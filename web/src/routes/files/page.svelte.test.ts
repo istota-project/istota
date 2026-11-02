@@ -1598,3 +1598,13 @@ it('opens a config file found in the listing in its own editor', async () => {
   await waitFor(() => expect(api.getWorkspaceConfigFile).toHaveBeenCalledWith('CRON.md'));
   expect(api.getWorkspaceTextFile).not.toHaveBeenCalled();
 });
+
+it('starts another folder at the top of the pane', async () => {
+  render(Workspace);
+  const folder = await screen.findByRole('link', { name: 'notes & drafts' });
+  const pane = document.querySelector('.shell-main') as HTMLElement;
+  pane.scrollTop = 400;
+  await fireEvent.click(folder);
+  await screen.findByRole('button', { name: 'plan #1.md' });
+  expect(pane.scrollTop).toBe(0);
+});

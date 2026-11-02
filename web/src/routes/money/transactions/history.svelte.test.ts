@@ -60,6 +60,31 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+it('starts another account at the top of the list', async () => {
+  vi.mocked(getTransactions).mockResolvedValue({
+    status: 'ok',
+    transactions: [
+      {
+        date: '2026-01-02',
+        payee: 'Shop',
+        narration: '',
+        account: 'Assets:Checking',
+        position: '1 USD',
+      },
+    ],
+    total: 1,
+    page: 1,
+    per_page: 100,
+  } as never);
+  mount();
+  await waitFor(() => expect(document.querySelector('.txn-scroll')).toBeTruthy());
+  const list = document.querySelector('.txn-scroll') as HTMLElement;
+  list.scrollTop = 400;
+  selectedAccount.set('Assets:Savings');
+  await tick();
+  expect(list.scrollTop).toBe(0);
+});
+
 describe('transaction selection history', () => {
   it.each([2025, 0])(
     'carries the chosen account and year %s from the accounts page into the reader',

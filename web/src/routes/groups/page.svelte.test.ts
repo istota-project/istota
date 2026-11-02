@@ -590,3 +590,15 @@ it('retries a failed creation with the same request id', async () => {
   );
   expect(ids[0]).toBe(ids[1]);
 });
+it('starts another group at the top of the pane', async () => {
+  const other = { ...group, group_id: 'ops', display_name: 'Ops' };
+  api.getGroups.mockResolvedValue({ groups: [group, other] });
+  api.getGroup.mockImplementation(async (id: string) => (id === 'ops' ? other : group));
+  render(Groups);
+  await screen.findByText('Shared plans');
+  const pane = document.querySelector('.shell-main') as HTMLElement;
+  pane.scrollTop = 400;
+  await fireEvent.click(screen.getByRole('link', { name: 'Ops' }));
+  await waitFor(() => expect(api.getGroup).toHaveBeenLastCalledWith('ops'));
+  expect(pane.scrollTop).toBe(0);
+});

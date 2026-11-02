@@ -10,6 +10,7 @@ vi.mock('$lib/api', () => api);
 vi.mock('@novnc/novnc', () => ({ default: class {} }));
 await fillApiDouble(api, { getAdminBrowsers: vi.fn() });
 import Page from './+page.svelte';
+import InShell from '../../settings/inShell.test.svelte';
 
 const LIST = '/istota/admin/browsers/';
 const currentUrl = () => __history.entries[__history.index].url;
@@ -216,4 +217,15 @@ it('reports a failed request without leaving live links on screen', async () => 
   api.getAdminBrowsers.mockRejectedValue(new Error('offline'));
   render(Page);
   await waitFor(() => expect(screen.getByText('Browser service is unavailable.')).toBeTruthy());
+});
+
+it('opens the console at the top of the pane', async () => {
+  api.getAdminBrowsers.mockResolvedValue(live('alice'));
+  render(InShell, { component: Page });
+  const view = await screen.findByRole('button', { name: "View alice's browser" });
+  const pane = document.querySelector('.shell-main') as HTMLElement;
+  pane.scrollTop = 400;
+  await fireEvent.click(view);
+  await screen.findByRole('heading', { name: 'alice' });
+  expect(pane.scrollTop).toBe(0);
 });

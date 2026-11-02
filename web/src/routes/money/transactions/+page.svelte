@@ -20,6 +20,15 @@
 
   const navigateToAccount = getTransactionNavigation();
 
+  // The list stays mounted, faded, through a reload, so it would keep its offset.
+  let scroller: HTMLElement | undefined = $state();
+  $effect(() => {
+    void $selectedAccount;
+    void $selectedYear;
+    void currentPage;
+    if (scroller) scroller.scrollTop = 0;
+  });
+
   let transactions: TransactionRow[] = $state([]);
   let loading = $state(true);
   let error = $state('');
@@ -223,7 +232,7 @@
     {#snippet emptyState()}
       <EmptyState>No transactions found.</EmptyState>
     {/snippet}
-    <div class="record-list txn-scroll" class:faded={loading}>
+    <div class="record-list txn-scroll" class:faded={loading} bind:this={scroller}>
       {#each grouped as group (group.date)}
         <div class="record-group micro-label">
           <Timestamp value={group.date} options={GROUP_DATE} title={false} />

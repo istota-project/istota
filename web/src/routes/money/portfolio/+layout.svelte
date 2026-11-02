@@ -88,8 +88,12 @@
      the pane's edge where every other money section puts it. Portfolio is the
      one money section framed this way: its pages are charts and stat grids
      rather than the full-bleed record tables the other tabs render. -->
-<div class="money-section-body">
-  <div class="content-frame">
-    {@render children()}
+<!-- Keyed because this is the scroller, not the shell's pane, and it outlives
+     the page inside it: a new element starts the next sub-route at the top. -->
+{#key page.url.pathname}
+  <div class="money-section-body">
+    <div class="content-frame">
+      {@render children()}
+    </div>
   </div>
-</div>
+{/key}

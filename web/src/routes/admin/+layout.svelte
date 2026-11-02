@@ -6,6 +6,7 @@
   import { AppShell, ShellHeader, Sidebar, SidebarNav, SidebarToggle } from '@minot/ui';
   import { createDrawerClose } from '@minot/ui/ui/drawerClose';
   import { HeaderSave } from '$lib/components/settings';
+  import ShellScrollReset from '$lib/components/ShellScrollReset.svelte';
   import {
     Activity,
     CalendarClock,
@@ -96,5 +97,6 @@
     </Sidebar>
   {/snippet}
 
+  <ShellScrollReset key={page.url.pathname} />
   {@render children()}
 </AppShell>

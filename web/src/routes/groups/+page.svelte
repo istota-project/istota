@@ -23,6 +23,7 @@
   import GroupRooms from '$lib/components/groups/GroupRooms.svelte';
   import GroupFiles from '$lib/components/groups/GroupFiles.svelte';
   import GroupBriefings from '$lib/components/groups/GroupBriefings.svelte';
+  import ShellScrollReset from '$lib/components/ShellScrollReset.svelte';
   type Selection = { group: string };
   const current = getCurrentUser();
   const user = $derived(current.user);
@@ -171,6 +172,7 @@
       />
     </Sidebar>
   {/snippet}
+  <ShellScrollReset key={selected?.group} />
   <LoadState
     loading={loading || detailLoading}
     {error}
