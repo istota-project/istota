@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 
 from istota import db, executor
+from istota.brain import BrainResult
 from istota.config import Config, SchedulerConfig, SecurityConfig, CredentialBrokerConfig, UserConfig
 from istota.llm.providers import (
     build_providers,
@@ -53,6 +54,13 @@ AMBIENT_NAMES = (
     "ISTOTA_BRAIN_NATIVE_API_KEY", "ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS",
 )
 ALL_NAMES = ("CLAUDE_CODE_OAUTH_TOKEN", *AMBIENT_NAMES)
+
+#: A CLI with no tools runs on `BrainRequest.env` with no harness, so that env is
+#: a CLI env: nothing runs below it to read the credential. With tools it is the
+#: task's env, and the credential is on the harness instead.
+TOOL_LESS_REQUEST = "brain_request:tool_less"
+TOOLED_REQUEST = "brain_request:with_tools"
+TOOLED_BRIEFING_REQUEST = "brain_request:briefing_with_tools"
 
 
 def _values(env) -> set[str]:
@@ -117,6 +125,59 @@ def _skill_index():
     }
 
 
+def _approved_skill_job_task(config, skill, index) -> db.Task:
+    """One occurrence of a `skill:` job with an `open` grant. Limited, the job is
+    refused an `external` skill before the subprocess whose env is swept."""
+    from istota.rooms import egress
+
+    name = f"sweep-{skill}"
+    with db.get_db(config.db_path) as conn:
+        job_id = conn.execute(
+            "INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, skill, skill_args) "
+            "VALUES ('alice', ?, '0 9 * * *', '', ?, '[]')",
+            (name, skill),
+        ).lastrowid
+        job = conn.execute("SELECT * FROM scheduled_jobs WHERE id = ?", (job_id,)).fetchone()
+        egress.add_grant(
+            conn, "alice", f"cron:{name}", f"open:{egress.job_digest(job)}",
+            decided_via="cli", skill_index=index,
+        )
+        task_id = db.create_task(
+            conn, prompt="", user_id="alice", source_type="scheduled",
+            scheduled_job_id=job_id, skill=skill, skill_args="[]",
+        )
+        return db.get_task(conn, task_id)
+
+
+class _RecordingBrain:
+    model_namespace = "anthropic"
+    supports_steering = False
+
+    def __init__(self):
+        self.requests = []
+
+    def resolve_model_name(self, name):
+        return name
+
+    def validate_alias_override(self, name, target):
+        return []
+
+    def execute(self, req):
+        self.requests.append(req)
+        return BrainResult(success=True, result_text="ok", stop_reason="completed")
+
+
+def _brain_request(config, monkeypatch, source_type):
+    """What `execute_task` hands the brain for a task of this source type."""
+    brain = _RecordingBrain()
+    monkeypatch.setattr(executor, "make_brain", lambda *a, **k: brain)
+    with db.get_db(config.db_path) as conn:
+        task_id = db.create_task(conn, prompt="digest", user_id="alice", source_type=source_type)
+        _ok, message, *_rest = executor.execute_task(db.get_task(conn, task_id), config, [], conn=conn)
+    assert brain.requests, f"the {source_type} task never reached the brain: {message}"
+    return brain.requests[-1]
+
+
 def _every_env(config, make_task, monkeypatch, tmp_path) -> dict[str, dict]:
     """Every environment istota builds, by name."""
     from istota import scheduler
@@ -162,12 +223,19 @@ def _every_env(config, make_task, monkeypatch, tmp_path) -> dict[str, dict]:
         "istota.skills._loader.load_skill_index", lambda *a, **k: index,
     )
     for skill in ("kv", "code_review"):
-        scheduler._execute_skill_task(
-            db.Task(id=5, status="running", source_type="scheduled", user_id="alice",
-                    prompt="", skill=skill, skill_args="[]"),
-            config,
+        _ok, message = scheduler._execute_skill_task(
+            _approved_skill_job_task(config, skill, index), config,
         )
+        assert "env" in captured, f"the {skill} job was refused before its subprocess: {message}"
         envs[f"scheduler_skill_task:{skill}"] = captured.pop("env")
+
+    tooled = _brain_request(config, monkeypatch, "cli")
+    assert tooled.allowed_tools
+    assert tooled.env["ISTOTA_TASK_ID"] == str(tooled.task_id)
+    envs[TOOLED_REQUEST] = tooled.env
+
+    briefing = _brain_request(config, monkeypatch, "briefing")
+    envs[TOOLED_BRIEFING_REQUEST if briefing.allowed_tools else TOOL_LESS_REQUEST] = briefing.env
 
     box = executor.build_daemon_sandbox(
         config, "alice", profile=executor.SandboxProfile.NATIVE,
@@ -186,7 +254,10 @@ def test_each_sentinel_appears_only_where_its_mode_carries_it(world, mode, monke
     # Positive controls: the hook and the manifest still deliver what is not a
     # model credential, and the mode's own credential reaches the CLI env.
     assert envs["task_env"].get("HOOK_OK") == "1"
-    for cli_env in ("build_model_cli_env", "build_harness_cli_env"):
+    cli_envs = ["build_model_cli_env", "build_harness_cli_env"]
+    if TOOL_LESS_REQUEST in envs:
+        cli_envs.append(TOOL_LESS_REQUEST)
+    for cli_env in cli_envs:
         if mode == "subscription":
             assert envs[cli_env]["CLAUDE_CODE_OAUTH_TOKEN"] == OAUTH
         else:
@@ -203,7 +274,7 @@ def test_each_sentinel_appears_only_where_its_mode_carries_it(world, mode, monke
 
     # The anthropic key: the CLI's own env and the reviewer's copy, under
     # "api_key", and nowhere a skill other than the reviewer runs.
-    allowed_anthropic = {"build_model_cli_env", "build_harness_cli_env",
+    allowed_anthropic = {"build_model_cli_env", "build_harness_cli_env", TOOL_LESS_REQUEST,
                          "skill:code_review", "scheduler_skill_task:code_review"}
     for name, env in envs.items():
         if mode == "subscription" or name not in allowed_anthropic:
@@ -213,7 +284,7 @@ def test_each_sentinel_appears_only_where_its_mode_carries_it(world, mode, monke
     # Neither a task env nor the clean env it starts from carries either
     # credential since the CLI left the sandbox (cli-brain-tools part 2,
     # Stage 5).
-    allowed_token = {"build_model_cli_env", "build_harness_cli_env",
+    allowed_token = {"build_model_cli_env", "build_harness_cli_env", TOOL_LESS_REQUEST,
                      "skill:code_review", "scheduler_skill_task:code_review"}
     for name, env in envs.items():
         if name not in allowed_token:
@@ -221,7 +292,7 @@ def test_each_sentinel_appears_only_where_its_mode_carries_it(world, mode, monke
 
     # No model credential name survives into an env that carries none.
     for name in ("build_clean_env", "task_env", "skill_proxy_base_env",
-                 "scheduler_skill_task:kv"):
+                 "scheduler_skill_task:kv", TOOLED_REQUEST):
         assert not [k for k in envs[name] if is_model_credential_name(k)], name
 
 
