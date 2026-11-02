@@ -380,6 +380,97 @@ it('leaves out the job text where the page shows it, but the approval still show
   expect(dialog.getByText(job.prompt)).toBeInTheDocument();
 });
 
+function reasked(dropped: object) {
+  return subject({
+    refused: [
+      {
+        entry: 'open',
+        hits: 1,
+        last_seen: '2026-11-02 16:34:00',
+        dropped_approval: {
+          approved_at: '2026-10-30T12:00:00Z',
+          text_changed_at: '2026-11-02T16:34:00Z',
+          changes: [{ field: 'prompt', lines: ['@@ -1 +1,2 @@', ' read', '+++ post it'] }],
+          ...dropped,
+        },
+      },
+    ],
+  });
+}
+
+function showReasked(dropped: object = {}, nextRunAt: string | null = null) {
+  render(Harness, {
+    props: { subjects: [reasked(dropped)] as never, expireSession, onChanged, nextRunAt },
+  });
+}
+
+it('says an edit dropped the approval, and shows what changed', async () => {
+  showReasked();
+  const view = await card();
+  expect(view.getByText(/for an earlier version of this job's/)).toBeInTheDocument();
+  expect(view.getByText('Prompt')).toBeInTheDocument();
+  // An added line starting `++` is still an added line.
+  expect(view.getByText('+++ post it').classList.contains('add')).toBe(true);
+  expect(view.queryByText('This job asked for full access.')).toBeNull();
+});
+
+it('does not call access an upgrade carried over an approval', async () => {
+  showReasked({ carried_over: true });
+  const view = await card();
+  expect(view.getByText(/was carried over from an upgrade on/)).toBeInTheDocument();
+  expect(view.queryByText(/was approved on/)).toBeNull();
+});
+
+it('re-approves the text on screen at the level it had, with no second step', async () => {
+  showReasked();
+  const view = await card();
+  await fireEvent.click(view.getByRole('button', { name: 'Approve this text for full access' }));
+  await waitFor(() =>
+    expect(api.setNetworkJobAccess).toHaveBeenCalledWith('cron:digest', 'open', job.digest),
+  );
+  await waitFor(() => expect(onChanged).toHaveBeenCalled());
+});
+
+it('re-reads when the text moved under the approval', async () => {
+  api.setNetworkJobAccess.mockRejectedValue(new Error('This job has changed.'));
+  showReasked();
+  const view = await card();
+  await fireEvent.click(view.getByRole('button', { name: 'Approve this text for full access' }));
+  await waitFor(() => expect(notices.notifyError).toHaveBeenCalledWith('This job has changed.'));
+  expect(onChanged).toHaveBeenCalled();
+});
+
+it('says what the next run will do without the approval', async () => {
+  showReasked({}, '2026-11-03T07:15:00Z');
+  expect((await card()).getByText(/will run\s+limited/)).toBeInTheDocument();
+});
+
+it('says nothing about a next run a job is not going to make', async () => {
+  showReasked();
+  expect((await card()).queryByText(/will run/)).toBeNull();
+});
+
+it('offers no shortcut for a change too long to show', async () => {
+  showReasked({ changes: null });
+  const view = await card();
+  expect(view.getByText(/too long to compare/)).toBeInTheDocument();
+  expect(view.queryByRole('button', { name: /Approve this text/ })).toBeNull();
+});
+
+it('says when the text is back to what was approved', async () => {
+  showReasked({ changes: [] });
+  const view = await card();
+  expect(view.getByText('The text is back to what you approved.')).toBeInTheDocument();
+  expect(view.getByRole('button', { name: /Approve this text/ })).toBeInTheDocument();
+});
+
+it('leaves a plain request as it was', async () => {
+  show(subject({ refused: [{ entry: 'open', hits: 1, last_seen: '2026-11-02 16:34:00' }] }));
+  const view = await card();
+  expect(view.getByText('This job asked for full access.')).toBeInTheDocument();
+  expect(view.queryByRole('button', { name: /Approve this text/ })).toBeNull();
+});
+
 it('leaves the state of the job to the page', async () => {
   show(subject({ job: { ...job, run_state: 'suspended' } }));
   const view = await card();

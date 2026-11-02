@@ -9,7 +9,9 @@ import re
 import shlex
 import unicodedata
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import tomli
 from croniter import croniter
@@ -1770,6 +1772,22 @@ def sync_cron_jobs_to_db(
     return refused_subjects
 
 
+def next_fire(cron: str, timezone_name: str) -> str | None:
+    """The next time a cron comes round, as ISO 8601 with its offset, or None if it does
+    not parse. A zone that will not load reads as UTC, as the scheduler's loops do."""
+    try:
+        zone = ZoneInfo(timezone_name)
+    except Exception:  # noqa: BLE001
+        zone = ZoneInfo("UTC")
+    # Naive wall-clock time, as the scheduler evaluates a cron.
+    now = datetime.now(zone).replace(tzinfo=None)
+    try:
+        fire = croniter(cron, now).get_next(datetime)
+    except Exception:  # noqa: BLE001
+        return None
+    return fire.replace(tzinfo=zone).isoformat()
+
+
 def _sync_job_approvals(
     conn, user_id: str, fj: "CronJob", existing, file_values: dict[str, object],
     ceiling: str = "limited",
@@ -1790,6 +1808,8 @@ def _sync_job_approvals(
 
     subject = egress.cron_subject(fj.name)
     digest = egress.job_digest(file_values)
+    old: dict[str, object] = {}
+    approved_old_text = {}
     if existing is None:
         egress.forget_subject(conn, user_id, subject)
         dropped: list[str] = []
@@ -1798,11 +1818,13 @@ def _sync_job_approvals(
     else:
         old_request = egress.REACH_REQUESTS.get(existing.reach)
         old = {column: getattr(existing, column) for column in egress.DIGEST_COLUMNS}
-        text_changed = egress.job_digest(old) != digest
-        dropped = (
-            egress.drop_job_approvals(conn, user_id, subject, keep_digest=digest)
-            if text_changed else []
-        )
+        old_digest = egress.job_digest(old)
+        text_changed = old_digest != digest
+        dropped = []
+        if text_changed:
+            approved_old_text = egress.approvals_of_text(conn, user_id, subject, old_digest)
+            dropped = egress.drop_job_approvals(conn, user_id, subject, keep_digest=digest)
+            egress.note_text_changed(conn, user_id, subject)
     request = egress.REACH_REQUESTS.get(fj.reach)
     runs_as = egress.unapproved_reach(fj.reach, ceiling)
     if old_request and old_request != request and old_request not in dropped:
@@ -1826,6 +1848,10 @@ def _sync_job_approvals(
             ask.append(request)
     for entry in ask:
         egress.note_refused(conn, user_id, subject, entry, reopen=True)
+        if entry in approved_old_text:
+            egress.record_dropped_approval(
+                conn, user_id, subject, entry, old, approved_old_text[entry],
+            )
     declared_new = egress.sync_declared(
         conn, user_id, subject, file_values["egress_request"],
         existing.egress_request if existing is not None else None,

@@ -572,6 +572,14 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         "egress_request": "TEXT",
     })
 
+    # What an edit's dropped approval had approved, so the re-ask can show it (#925).
+    _add_columns(conn, "egress_refused", {
+        "approved_text": "TEXT",
+        "approved_at": "TEXT",
+        "approved_via": "TEXT",
+        "text_changed_at": "TEXT",
+    })
+
     # Places table: drop source column (moved to config)
     try:
         conn.execute("ALTER TABLE places DROP COLUMN source")

@@ -18,15 +18,19 @@ sits below it.
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import ipaddress
 import json
 import logging
 import re
 import sqlite3
+import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from istota.lib.date_parse import iso_utc
 
 if TYPE_CHECKING:
     from istota import db
@@ -69,6 +73,10 @@ MAX_DECLARED = MAX_REFUSED_PER_SUBJECT - len(JOB_REQUESTS)
 #: `egress-refused.jsonl` channels whose entry is a name somebody else can choose.
 _HOST_CHANNELS = frozenset({"web_fetch", "connect"})
 _MAX_HOST_CHARS = 253
+#: A job's text is model-writable and the page compares it on every read.
+_MAX_COMPARED_CHARS = 100_000
+_MAX_COMPARED_LINES = 2_000
+_UNDRAWN_CATEGORIES = frozenset({"Cc", "Cf", "Cn", "Co", "Cs", "Zl", "Zp"})
 
 _LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 _SKILL_RE = re.compile(r"[a-z0-9_-]{1,64}")
@@ -158,14 +166,53 @@ def job_digest(row: "Mapping | sqlite3.Row") -> str:
 def _digest_over(row: "Mapping | sqlite3.Row", columns: tuple[str, ...]) -> str:
     digest = hashlib.sha256()
     for column in columns:
-        value = row[column]
-        if column == "publish_shared_kv_trusted":
-            # A bool in the file, 0 or 1 in the row, and only its truth means anything.
-            value = "1" if value else ""
-        data = ("" if value is None else str(value)).encode("utf-8", "surrogatepass")
+        data = _column_text(column, row[column]).encode("utf-8", "surrogatepass")
         digest.update(f"{len(data)}:".encode())
         digest.update(data)
     return digest.hexdigest()
+
+
+def _column_text(column: str, value: object) -> str:
+    if column == "publish_shared_kv_trusted":
+        # A bool in the file, 0 or 1 in the row, and only its truth means anything.
+        return "1" if value else ""
+    return "" if value is None else str(value)
+
+
+def job_text_changes(approved: Mapping, current: "Mapping | sqlite3.Row") -> list[dict] | None:
+    """What moved between an approved text and the job's, per digest column, as unified
+    diff lines without the file headers. None where it is too long to compare here.
+
+    Split on `\\n` alone: `splitlines` also breaks on `\\r` and `\\u2028` and drops a final
+    newline, so text whose digest moved could read as no change at all.
+    """
+    pairs = [
+        (column, _column_text(column, approved.get(column)), _column_text(column, current[column]))
+        for column in DIGEST_COLUMNS
+    ]
+    if (
+        sum(len(before) + len(after) for _, before, after in pairs) > _MAX_COMPARED_CHARS
+        or sum(before.count("\n") + after.count("\n") for _, before, after in pairs) > _MAX_COMPARED_LINES
+    ):
+        return None
+    changes = []
+    for column, before, after in pairs:
+        if before == after:
+            continue
+        diff = difflib.unified_diff(before.split("\n"), after.split("\n"), n=2, lineterm="")
+        changes.append({"field": column, "lines": [_visible(line) for line in list(diff)[2:]]})
+    return changes
+
+
+def _visible(line: str) -> str:
+    """A diff line with what a browser would not draw spelled out. A model reads a
+    zero-width or tag character and the owner approving the text does not see it."""
+    return "".join(
+        f"\\u{{{ord(char):04x}}}"
+        if char != "\t" and unicodedata.category(char) in _UNDRAWN_CATEGORIES
+        else char
+        for char in line
+    )
 
 
 def cron_subject(job_name: str) -> str:
@@ -603,6 +650,69 @@ def drop_job_approvals(
     return dropped
 
 
+def approvals_of_text(
+    conn: sqlite3.Connection, user_id: str, subject: str, digest: str,
+) -> dict[str, sqlite3.Row]:
+    """When and how each `open:` and `public:` naming this digest was decided, by kind."""
+    return {
+        kind: row
+        for kind in JOB_REQUESTS
+        for row in conn.execute(
+            "SELECT decided_at, decided_via FROM egress_grants "
+            "WHERE user_id = ? AND subject = ? AND entry = ?",
+            (user_id, subject, f"{kind}:{digest}"),
+        )
+    }
+
+
+def record_dropped_approval(
+    conn: sqlite3.Connection,
+    user_id: str,
+    subject: str,
+    kind: str,
+    approved: Mapping,
+    grant: sqlite3.Row,
+) -> None:
+    """Keep what was approved on the request a drop just filed, on the caller's
+    transaction. `approved` must be the text `grant` named, which `approvals_of_text`
+    establishes. It grants nothing and the owner reads it as data."""
+    text = {column: approved[column] for column in DIGEST_COLUMNS}
+    conn.execute(
+        "UPDATE egress_refused SET approved_text = ?, approved_at = ?, approved_via = ?, "
+        "text_changed_at = datetime('now') WHERE user_id = ? AND subject = ? AND entry = ?",
+        (json.dumps(text), grant["decided_at"], grant["decided_via"], user_id, subject, kind),
+    )
+
+
+def note_text_changed(conn: sqlite3.Connection, user_id: str, subject: str) -> None:
+    """The text moved again. A record keeps the approved text, so the owner's diff still
+    covers every edit since their approval rather than the latest one alone."""
+    conn.execute(
+        "UPDATE egress_refused SET text_changed_at = datetime('now') "
+        "WHERE user_id = ? AND subject = ? AND approved_text IS NOT NULL",
+        (user_id, subject),
+    )
+
+
+def _dropped_approval(item: sqlite3.Row, row: sqlite3.Row | None) -> dict | None:
+    if item["approved_text"] is None or row is None:
+        return None
+    try:
+        approved = json.loads(item["approved_text"])
+    except ValueError:
+        logger.warning("egress_approved_text_malformed: dropped on read")
+        return None
+    if not isinstance(approved, dict):
+        return None
+    return {
+        "approved_at": iso_utc(item["approved_at"]),
+        # The upgrade seed kept this job running. Nobody read its text then.
+        "carried_over": item["approved_via"] == "migration",
+        "text_changed_at": iso_utc(item["text_changed_at"]),
+        "changes": job_text_changes(approved, row),
+    }
+
+
 def forget_subject(conn: sqlite3.Connection, user_id: str, subject: str) -> None:
     """The subject is gone: its grants, refusals and bell row go with it."""
     from istota.notifications.resolvers import egress_refused
@@ -708,16 +818,20 @@ def clear_refused(conn: sqlite3.Connection, user_id: str, subject: str, entry: s
 
 def list_refused(conn: sqlite3.Connection, user_id: str, subject: str) -> list[sqlite3.Row]:
     return conn.execute(
-        "SELECT entry, hits, last_seen, dismissed FROM egress_refused "
-        "WHERE user_id = ? AND subject = ? ORDER BY last_seen DESC, rowid DESC",
+        "SELECT entry, hits, last_seen, dismissed, approved_text, approved_at, approved_via, "
+        "text_changed_at FROM egress_refused WHERE user_id = ? AND subject = ? "
+        "ORDER BY last_seen DESC, rowid DESC",
         (user_id, subject),
     ).fetchall()
 
 
 def dismiss_refused(conn: sqlite3.Connection, user_id: str, subject: str, entry: str) -> None:
-    """The owner does not expect this: it stays recorded and does not ask again."""
+    """The owner does not expect this: it stays recorded and does not ask again. It has
+    answered a dropped approval too, so a later request does not claim that history."""
     conn.execute(
-        "UPDATE egress_refused SET dismissed = 1 WHERE user_id = ? AND subject = ? AND entry = ?",
+        "UPDATE egress_refused SET dismissed = 1, approved_text = NULL, approved_at = NULL, "
+        "approved_via = NULL, text_changed_at = NULL "
+        "WHERE user_id = ? AND subject = ? AND entry = ?",
         (user_id, subject, entry),
     )
 
@@ -876,7 +990,12 @@ def describe_subject(
         "job": job,
         "waiting_on": waiting_on,
         "refused": [
-            {"entry": item["entry"], "hits": item["hits"], "last_seen": item["last_seen"]}
+            {
+                "entry": item["entry"],
+                "hits": item["hits"],
+                "last_seen": item["last_seen"],
+                "dropped_approval": _dropped_approval(item, row),
+            }
             for item in list_refused(conn, user_id, subject)
             if not item["dismissed"]
         ],

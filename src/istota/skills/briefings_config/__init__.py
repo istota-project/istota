@@ -119,22 +119,9 @@ def _unavailable() -> dict:
 
 
 def _next_run(cron: str, timezone_name: str) -> str | None:
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
+    from istota.cron_loader import next_fire
 
-    from croniter import croniter
-
-    try:
-        tz = ZoneInfo(timezone_name)
-    except Exception:  # noqa: BLE001
-        tz = ZoneInfo("UTC")
-    # Naive wall-clock time, as `scheduler.check_briefings` evaluates the cron.
-    now = datetime.now(tz).replace(tzinfo=None)
-    try:
-        fire = croniter(cron, now).get_next(datetime)
-    except Exception:  # noqa: BLE001
-        return None
-    return fire.replace(tzinfo=tz).isoformat()
+    return next_fire(cron, timezone_name)
 
 
 def _schedule_view(config, briefing, timezone_name: str) -> dict:

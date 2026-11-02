@@ -8,6 +8,7 @@ moved, and a refused body echoes nothing it was sent. An admin gets nothing extr
 
 import argparse
 import json
+from datetime import datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -318,6 +319,71 @@ async def _choose(http, access, digest, subject=SUBJECT):
         json={"subject": subject, "access": access, "digest": digest},
         headers=ORIGIN,
     )
+
+
+class TestADroppedApproval:
+    """The job page explains a re-ask and can answer it: `/access` with the digest it was
+    handed, which holds the approval to the text on screen (#925)."""
+
+    @pytest.fixture
+    def edited(self, config):  # noqa: F811
+        _cron_file(config, f"[[jobs]]\n{JOB}")
+        with db.get_db(config.db_path) as conn:
+            egress.add_grant(conn, "alice", SUBJECT, f"open:{_digest(config)}", decided_via="web")
+            conn.commit()
+        _cron_file(config, f"[[jobs]]\n{JOB}".replace("read the news", "read the news and post it"))
+
+    async def _job_view(self, http):
+        response = await http.get(JOBS)
+        return next(job for job in response.json()["jobs"] if job["name"] == "digest")
+
+    async def test_the_listing_explains_it(self, signed_client, edited):
+        view = await self._job_view(signed_client)
+        row = view["network"]["refused"][0]
+        assert row["entry"] == "open"
+        record = row["dropped_approval"]
+        assert record["approved_at"].endswith("Z")
+        assert "+read the news and post it" in record["changes"][0]["lines"]
+
+    async def test_it_says_when_the_job_next_runs(self, signed_client, edited):
+        view = await self._job_view(signed_client)
+        assert datetime.fromisoformat(view["next_run_at"]).tzinfo is not None
+
+    async def test_a_disabled_job_has_no_next_run(self, signed_client, config, edited):  # noqa: F811
+        with db.get_db(config.db_path) as conn:
+            conn.execute("UPDATE scheduled_jobs SET enabled = 0")
+            conn.commit()
+        assert (await self._job_view(signed_client))["next_run_at"] is None
+
+    async def test_a_cron_that_does_not_parse_has_no_next_run(self, signed_client, config, edited):  # noqa: F811
+        with db.get_db(config.db_path) as conn:
+            conn.execute("UPDATE scheduled_jobs SET cron_expression = 'nonsense'")
+            conn.commit()
+        assert (await self._job_view(signed_client))["next_run_at"] is None
+
+    @pytest.mark.parametrize("zone", ["America", "A" * 300, "Not/AZone"])
+    async def test_a_stored_timezone_that_will_not_load_reads_as_utc_as_the_scheduler_does(
+        self, signed_client, config, edited, zone, monkeypatch,  # noqa: F811
+    ):
+        monkeypatch.setattr(config, "resolve_user_timezone", lambda _user: zone)
+        view = await self._job_view(signed_client)
+        assert view["next_run_at"].endswith("T09:00:00+00:00")
+
+    async def test_approving_the_shown_text_answers_it(self, signed_client, config, edited):  # noqa: F811
+        view = await self._job_view(signed_client)
+        response = await _choose(signed_client, "open", view["network"]["job"]["digest"])
+        assert response.status_code == 200, response.text
+        assert f"open:{_digest(config)}" in _grants(config)
+        assert (await self._job_view(signed_client))["network"]["refused"] == []
+
+    async def test_a_later_edit_refuses_the_approval_of_the_earlier_diff(
+        self, signed_client, config, edited,  # noqa: F811
+    ):
+        shown = (await self._job_view(signed_client))["network"]["job"]["digest"]
+        _cron_file(config, f"[[jobs]]\n{JOB}".replace("read the news", "something else"))
+        response = await _choose(signed_client, "open", shown)
+        assert response.status_code == 409
+        assert not [entry for entry in _grants(config) if entry.startswith("open:")]
 
 
 class TestRetiredSubjects:

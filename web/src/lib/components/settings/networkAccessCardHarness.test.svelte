@@ -7,11 +7,13 @@
     onChanged = () => {},
     expireSession = () => {},
     showJobText = true,
+    nextRunAt = null,
   }: {
     subjects: NetworkSubject[];
     onChanged?: () => void;
     expireSession?: () => void;
     showJobText?: boolean;
+    nextRunAt?: string | null;
   } = $props();
   setCurrentUser({
     user: { username: 'alice', features: {} } as unknown as User,
@@ -26,6 +28,7 @@
     title={subject.label}
     {subject}
     {showJobText}
+    {nextRunAt}
     externalSkills={['browse', 'devbox', 'wordpress']}
     {onChanged}
   />

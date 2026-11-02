@@ -7,6 +7,7 @@
     setNetworkJobAccess,
     type NetworkSubject,
   } from '$lib/api';
+  import DiffBlock from '$lib/admin/config/DiffBlock.svelte';
   import { accessBadge } from '$lib/settings/jobState';
   import { getCurrentUser } from '$lib/userContext';
   import {
@@ -18,6 +19,7 @@
     Disclosure,
     Field,
     Input,
+    Timestamp,
     ToggleGroup,
   } from '@minot/ui';
   import { notifyError } from '@minot/ui/stores/notices';
@@ -27,6 +29,7 @@
     title,
     subject,
     showJobText = true,
+    nextRunAt = null,
     externalSkills,
     onChanged,
   }: {
@@ -34,6 +37,8 @@
     subject: NetworkSubject;
     /** Off where the page around the card already shows it. The approval still does. */
     showJobText?: boolean;
+    /** Null for anything the scheduler is not firing. */
+    nextRunAt?: string | null;
     externalSkills: string[];
     onChanged: () => void | Promise<void>;
   } = $props();
@@ -50,12 +55,24 @@
     { value: 'public', label: 'Public' },
     { value: 'open', label: 'Full access' },
   ];
+  const ACCESS_RANK: Record<string, number> = { limited: 0, public: 1, open: 2 };
+  const ACCESS_NAME: Record<string, string> = { public: 'Public access', open: 'Full access' };
+  const FIELD_LABEL: Record<string, string> = {
+    prompt: 'Prompt',
+    command: 'Command',
+    skill: 'Skill',
+    skill_args: 'Skill arguments',
+    publish_shared_kv: 'Publish target',
+    publish_shared_kv_trusted: 'Publish marked trusted (1 means yes)',
+  };
 
   const job = $derived(subject.job);
   const stateBadge = $derived(accessBadge(subject));
   const hostRefusals = $derived(subject.refused.filter((row) => !JOB_REQUESTS.has(row.entry)));
   const asksOpen = $derived(subject.refused.some((row) => row.entry === 'open'));
   const asksPublic = $derived(subject.refused.some((row) => row.entry === 'public'));
+  const reasked = $derived(subject.refused.filter((row) => row.dropped_approval));
+  const explains = (entry: string) => reasked.some((row) => row.entry === entry);
   const offeredSkills = $derived(externalSkills.filter((name) => !subject.skills.includes(name)));
   const access = $derived<Access>(subject.by_default ?? subject.state);
 
@@ -132,16 +149,24 @@
       approve.ask(next);
       return;
     }
-    const digest = job.digest;
+    setAccess('limited', job.digest);
+  }
+
+  function setAccess(next: Access, digest: string) {
     void run(async () => {
       try {
-        await setNetworkJobAccess(subject.subject, 'limited', digest);
+        await setNetworkJobAccess(subject.subject, next, digest);
       } catch (e) {
-        // An approval can be gone even though the file could not change.
+        // An approval can be gone though the file could not change, or the text moved.
         await onChanged();
         throw e;
       }
     });
+  }
+
+  /** The next run falls short of what this request's approval gave it. */
+  function runsBelow(entry: string): boolean {
+    return Boolean(nextRunAt) && !job?.waiting && ACCESS_RANK[access] < ACCESS_RANK[entry];
   }
 
   async function confirmAccess() {
@@ -219,8 +244,50 @@
     </Alert>
   {/if}
 
-  {#if asksOpen}<p>This job asked for full access.</p>{/if}
-  {#if asksPublic}<p>This job asks for public access.</p>{/if}
+  {#each reasked as row (row.entry)}
+    {@const record = row.dropped_approval}
+    {#if record}
+      <Alert appearance="inline" variant="warn">
+        {ACCESS_NAME[row.entry]}
+        {record.carried_over ? 'was carried over from an upgrade on' : 'was approved on'}
+        <Timestamp value={record.approved_at} format="datetime" /> for an earlier version of this job's
+        text. The text changed on
+        <Timestamp value={record.text_changed_at} format="datetime" />, so it needs approving again.
+        {#if runsBelow(row.entry)}
+          Its next run, on <Timestamp value={nextRunAt} format="datetime" />, will run
+          {access === 'public' ? 'with public access' : 'limited'}.
+        {/if}
+      </Alert>
+      {#if record.changes === null}
+        <p class="caption">
+          This text is too long to compare here. Choose the access below to read it in full.
+        </p>
+      {:else}
+        {#if record.changes.length === 0}
+          <p>The text is back to what you approved.</p>
+        {/if}
+        {#each record.changes as change (change.field)}
+          <div class="vstack change">
+            <span class="caption">{FIELD_LABEL[change.field] ?? change.field}</span>
+            <DiffBlock lines={change.lines} fileHeaders={false} />
+          </div>
+        {/each}
+        {#if job?.settable}
+          <div>
+            <Button
+              size="sm"
+              disabled={busy}
+              onclick={() => setAccess(row.entry as Access, job.digest)}
+              >Approve this text for {ACCESS_NAME[row.entry].toLowerCase()}</Button
+            >
+          </div>
+        {/if}
+      {/if}
+    {/if}
+  {/each}
+
+  {#if asksOpen && !explains('open')}<p>This job asked for full access.</p>{/if}
+  {#if asksPublic && !explains('public')}<p>This job asks for public access.</p>{/if}
 
   {#if job?.settable}
     <Field
@@ -394,6 +461,10 @@
     align-items: center;
     justify-content: space-between;
     gap: var(--space-2);
+  }
+
+  .change {
+    --vstack-gap: var(--space-1);
   }
 
   .entry-name {

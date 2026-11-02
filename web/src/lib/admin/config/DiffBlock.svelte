@@ -2,12 +2,14 @@
   interface Props {
     /** A unified diff, one line per entry. */
     lines: string[];
+    /** Off for a diff sent without them, where `+++` is an added line starting `++`. */
+    fileHeaders?: boolean;
   }
 
-  let { lines }: Props = $props();
+  let { lines, fileHeaders = true }: Props = $props();
 
   function lineKind(line: string): string {
-    if (line.startsWith('+++') || line.startsWith('---')) return 'file';
+    if (fileHeaders && (line.startsWith('+++') || line.startsWith('---'))) return 'file';
     if (line.startsWith('@@')) return 'hunk';
     if (line.startsWith('+')) return 'add';
     if (line.startsWith('-')) return 'del';
@@ -15,7 +17,6 @@
   }
 </script>
 
-<!-- The redacted config.toml diff, as the review dialog and the history show it. -->
 <pre class="diff">{#each lines as line, i (i)}<span class="line {lineKind(line)}">{line}</span
     >{/each}</pre>
 

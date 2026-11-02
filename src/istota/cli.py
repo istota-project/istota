@@ -1724,6 +1724,11 @@ def cmd_egress(args):
                     print(f"  waiting {' '.join(item['waiting_on']) or item['job']['reach']}")
                 for refused in item["refused"]:
                     print(f"  refused {refused['entry']} hits={refused['hits']}")
+                    if refused["dropped_approval"]:
+                        print(
+                            f"    approved {refused['dropped_approval']['approved_at']}, "
+                            f"text changed {refused['dropped_approval']['text_changed_at']}"
+                        )
             return
         conn.execute("BEGIN IMMEDIATE")
         if not egress.subject_exists(conn, args.user, args.subject):

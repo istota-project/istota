@@ -369,6 +369,7 @@
         title="Network access"
         subject={job.network}
         showJobText={false}
+        nextRunAt={job.next_run_at}
         externalSkills={data.external_skills}
         onChanged={refresh}
       />
