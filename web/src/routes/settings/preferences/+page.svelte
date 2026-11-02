@@ -51,7 +51,7 @@
     { value: 'hidden', label: 'Sender and subject only' },
   ];
 
-  // The app's Device settings (0.12.0). Settings' Device entry opens the same screen, and
+  // The app's own settings (0.12.0). Settings' App settings entry opens the same screen, and
   // the app icon's quick action is the route that works when this page cannot
   // load. The card is titled with the device it describes.
   const appSettingsOffered = appConnectionAvailable();
@@ -62,7 +62,7 @@
       await openAppSettings();
     } catch {
       notifyError(
-        'Could not open Device settings. Long-press the Istota icon and choose Device settings.',
+        'Could not open App settings. Long-press the Istota icon and choose the settings item.',
       );
     }
   }
@@ -299,7 +299,7 @@
   {#if appSettingsOffered}
     <Card title={device} description="Server, location tracking and notifications on this device.">
       <div class="card-actions">
-        <Button variant="secondary" size="sm" onclick={showAppSettings}>Device settings</Button>
+        <Button variant="secondary" size="sm" onclick={showAppSettings}>App settings</Button>
       </div>
     </Card>
   {/if}

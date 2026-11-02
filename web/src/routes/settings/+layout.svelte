@@ -23,7 +23,7 @@
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { USER_SETTINGS_SECTIONS } from '$lib/settings/sections';
   import { appConnectionAvailable, openAppSettings } from '$lib/platform/nativeConnection';
-  import { Smartphone } from '@lucide/svelte';
+  import { AppWindow } from '@lucide/svelte';
   import { setUserSettings } from '$lib/settings/userSettingsContext';
 
   let { children } = $props();
@@ -220,8 +220,9 @@
   // `/settings` is a prefix of every section, so the index matches exactly
   // rather than by prefix — otherwise Account stays lit everywhere.
   // In the app the page runs full screen with no native bar above it, so this entry is how a
-  // loaded page reaches Device settings (Change server, Disconnect). It opens the native sheet
-  // rather than a page. The app icon's quick action is the route that does not need the page.
+  // loaded page reaches App settings (Change server, Disconnect). It opens the native sheet
+  // rather than a page. The app icon's quick action is the route that does not need the page; the
+  // refusal below does not name it, since an installed app may still call it Device settings.
   const appSettingsOffered = appConnectionAvailable();
 
   async function showAppSettings() {
@@ -230,7 +231,7 @@
       await openAppSettings();
     } catch {
       notifyError(
-        'Could not open Device settings. Long-press the Istota icon and choose Device settings.',
+        'Could not open App settings. Long-press the Istota icon and choose the settings item.',
       );
     }
   }
@@ -274,8 +275,8 @@
         onnavigate={(item, event) => drawer.link(event, () => void goto(item.href))}
       />
       {#if appSettingsOffered}
-        {#snippet deviceIcon()}<Icon icon={Smartphone} size="sm" />{/snippet}
-        <ListRow onclick={showAppSettings} icon={deviceIcon}>Device</ListRow>
+        {#snippet appSettingsIcon()}<Icon icon={AppWindow} size="sm" />{/snippet}
+        <ListRow onclick={showAppSettings} icon={appSettingsIcon}>App settings</ListRow>
       {/if}
     </Sidebar>
   {/snippet}

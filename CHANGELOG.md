@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **In the iOS app, Settings now says App settings for the app's own settings.** The sidebar entry was called Device, right beside Devices, with the same icon. It and the Preferences button now read App settings and the entry has its own icon. Devices stays the page listing your phones.
 - **A job whose text changed now says why it is asking again.** When an edit drops a job's Public or Full approval, its page says what was approved and when, shows what changed since, and names the next run if it would run with less. One button approves the new text at the same level.
 - **Settings has a Scheduled jobs page in place of Network access.** You can create and edit a job there with everything CRON.md holds, see its schedule, state, last run and last error, run it now, disable, enable or delete it, and decide what it may reach on its own page. Old links land there. A task refused a host now names the right page, and a TASKS.md line is told plainly that nothing can be approved for it.
 - **The bell's network row opens what it is about.** It is now titled "A scheduled job or assignment needs network access" and opens that job's or assignment's page. An assignment's notices also link to its page, and say you can act there as well as in chat.

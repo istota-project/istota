@@ -108,6 +108,9 @@ describe('LogoutButton in the generic iOS app', () => {
     const { navigate, trigger } = mount();
     await fireEvent.click(trigger);
     await vi.waitFor(() => expect(notices.notifyError).toHaveBeenCalledOnce());
+    expect(notices.notifyError).toHaveBeenCalledWith(
+      'Could not sign out here. Open App settings to sign out.',
+    );
     expect(navigate).not.toHaveBeenCalled();
     expect(lastUser.forgetLastUserId).not.toHaveBeenCalled();
   });

@@ -1,13 +1,13 @@
 /**
  * The settings row that opens the generic iOS app's own settings (0.12.0).
  *
- * It is a convenience beside the Settings sidebar's Device entry and the app icon's quick action, so what
+ * It is a convenience beside the Settings sidebar's App settings entry and the app icon's quick action, so what
  * matters is that it appears only where the app can answer, that it names the
  * device, and that a refusal is reported rather than swallowed.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
-import { render, cleanup, screen, waitFor } from '@testing-library/svelte';
+import { render, cleanup, screen, waitFor, within } from '@testing-library/svelte';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
@@ -92,7 +92,25 @@ const person: User = {
 
 const renderPage = () => render(Harness, { component: Page, layout: SettingsLayout, user: person });
 
-const BUTTON = { name: 'Device settings' };
+const NAME = { name: 'App settings' };
+
+// The sidebar entry and the Preferences button carry one name, so each is found by where it sits.
+const queryButton = () =>
+  screen.queryAllByRole('button', NAME).find((element) => !element.closest('aside')) ?? null;
+// The sidebar's entry renders first, so waiting for the name alone would not wait for the page.
+const findButton = () =>
+  waitFor(() => {
+    const button = queryButton();
+    if (!button) throw new Error('no App settings button in the page');
+    return button;
+  });
+const findEntry = async () =>
+  within(await screen.findByRole('complementary')).findByRole('button', NAME);
+const queryEntry = () => within(screen.getByRole('complementary')).queryByRole('button', NAME);
+
+// The app's own quick action still has its old name in installed apps, so no message may name it.
+const REFUSAL =
+  /^Could not open App settings\. Long-press the Istota icon and choose the settings item\.$/;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -105,14 +123,14 @@ afterEach(() => {
   cleanup();
 });
 
-describe('the "Device settings" row', () => {
+describe('the "App settings" button', () => {
   it('opens the native settings in the generic app', async () => {
     renderPage();
     expect(await screen.findByText('iPhone')).toBeInTheDocument();
     expect(
       screen.getByText('Server, location tracking and notifications on this device.'),
     ).toBeInTheDocument();
-    (await screen.findByRole('button', BUTTON)).click();
+    (await findButton()).click();
     await waitFor(() => expect(app.openAppSettings).toHaveBeenCalledOnce());
     expect(notices.notifyError).not.toHaveBeenCalled();
   });
@@ -128,42 +146,50 @@ describe('the "Device settings" row', () => {
     app.appConnectionAvailable.mockReturnValue(false);
     renderPage();
     await waitFor(() => expect(screen.getByText('Appearance')).toBeInTheDocument());
-    expect(screen.queryByRole('button', BUTTON)).toBeNull();
+    expect(queryButton()).toBeNull();
   });
 
   it('reports an app that refused to open them', async () => {
     app.openAppSettings.mockRejectedValueOnce(new Error('The connection changed.'));
     renderPage();
-    (await screen.findByRole('button', BUTTON)).click();
+    (await findButton()).click();
     await waitFor(() => expect(notices.notifyError).toHaveBeenCalledOnce());
+    expect(notices.notifyError).toHaveBeenCalledWith(expect.stringMatching(REFUSAL));
   });
 });
 
 // The app shows no native bar over a loaded page, so this entry is how the page reaches the
-// app's Device settings, and with them Change server and Disconnect.
-describe('the Device entry in the settings sections', () => {
-  const ENTRY = { name: 'Device' };
-
+// app's own settings, and with them Change server and Disconnect.
+describe('the App settings entry in the settings sections', () => {
   it('opens the native settings instead of a page', async () => {
     renderPage();
-    (await screen.findByRole('button', ENTRY)).click();
+    (await findEntry()).click();
     await waitFor(() => expect(app.openAppSettings).toHaveBeenCalledOnce());
     expect(notices.notifyError).not.toHaveBeenCalled();
+  });
+
+  it('does not share the Devices page icon', async () => {
+    renderPage();
+    const entry = await findEntry();
+    const devices = await screen.findByRole('link', { name: 'Devices' });
+    expect(devices.querySelector('.lucide-smartphone')).not.toBeNull();
+    expect(entry.querySelector('.lucide-smartphone')).toBeNull();
+    expect(entry.querySelector('.lucide-app-window')).not.toBeNull();
   });
 
   it('is absent in a browser and in an older app', async () => {
     app.appConnectionAvailable.mockReturnValue(false);
     renderPage();
     await screen.findByRole('link', { name: 'Preferences' });
-    expect(screen.queryByRole('button', ENTRY)).toBeNull();
+    expect(queryEntry()).toBeNull();
   });
 
   it('reports an app that refused to open them', async () => {
     app.openAppSettings.mockRejectedValueOnce(new Error('The connection changed.'));
     renderPage();
-    (await screen.findByRole('button', ENTRY)).click();
+    (await findEntry()).click();
     await waitFor(() =>
-      expect(notices.notifyError).toHaveBeenCalledWith(expect.stringMatching(/Long-press/)),
+      expect(notices.notifyError).toHaveBeenCalledWith(expect.stringMatching(REFUSAL)),
     );
   });
 });
