@@ -485,7 +485,7 @@
             <Disclosure summary="Summary" open={index === 0}>
               <p class="wake-text">{wake.summary}</p>
               {#if wake.summary_truncated}
-                <p class="caption">Cut short here. The whole text is kept with the assignment.</p>
+                <p class="caption">Cut short here.</p>
               {/if}
             </Disclosure>
           {/if}
