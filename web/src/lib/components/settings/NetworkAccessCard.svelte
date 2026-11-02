@@ -254,8 +254,8 @@
   {#if hostRefusals.length > 0}
     <h3>Asked for or refused</h3>
     <Alert appearance="inline" variant="warn">
-      A job's own file or a page it reads can make it ask for a host. Add one only if you expect
-      this job to use it.
+      Its own files or a page it reads can make it ask for a host. Add one only if you expect it to
+      use that host.
     </Alert>
     <ul class="divided-list">
       {#each hostRefusals as row (row.entry)}
@@ -350,7 +350,7 @@
   bind:open={grantSkill.open}
   title="Grant {grantSkill.target ?? 'this skill'}"
   message="This grant is unbounded. With {grantSkill.target ??
-    'this skill'}, the job can send what it holds to any host a page or a command names, and no host list applies."
+    'this skill'}, it can send what it holds to any host a page or a command names, and no host list applies."
   confirmLabel="Grant"
   busyLabel="Granting…"
   confirmVariant="danger"

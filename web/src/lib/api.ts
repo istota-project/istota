@@ -186,6 +186,8 @@ export interface User {
     sharing?: boolean;
     /** Open Cloud Mesh folder shares are received on this server. */
     sharing_ocm?: boolean;
+    /** Settings > Assignments; absent on a server that predates it. */
+    assignments?: boolean;
   };
   // null when the operator hasn't enabled encrypted token storage.
   nextcloud_token?: NextcloudTokenStatus | null;
@@ -6415,6 +6417,146 @@ export function removeNetworkGrant(subject: string, entry: string): Promise<{ ok
 }
 export function dismissNetworkRefusal(subject: string, entry: string): Promise<{ ok: boolean }> {
   return postNetwork('/refused/dismiss', { subject, entry });
+}
+export type AssignmentState =
+  'draft' | 'sleeping' | 'active' | 'waiting' | 'paused' | 'completed' | 'abandoned';
+export interface AssignmentSummary {
+  id: number;
+  slug: string;
+  title: string;
+  state: AssignmentState;
+  /** A system pause's reason, or on an abandoned assignment the words the user gave. */
+  state_reason: string | null;
+  waiting_on: string[];
+  deadline: string | null;
+  next_wake_at: string | null;
+  cadence_minutes: number;
+  /** List-price dollars and wakes: a budget unit, not spend. */
+  budget: { max_cost_usd?: number; max_wakes?: number };
+  auto_complete: boolean;
+  model: string | null;
+  effort: string | null;
+  directory: string;
+  created_at: string;
+  activated_at: string | null;
+  closed_at: string | null;
+}
+export interface AssignmentLedger {
+  cost_usd: number;
+  wakes: number;
+  unmeasured_wakes: number;
+  billed_input_tokens: number;
+  output_tokens: number;
+  remaining: { cost_usd: number; wakes: number };
+  cheapest_wake_usd: number | null;
+}
+export interface AssignmentListRow extends AssignmentSummary {
+  open_handoffs: number;
+  ledger: AssignmentLedger;
+}
+export interface AssignmentItem {
+  id: number;
+  position: number;
+  kind: 'mechanical' | 'confirmed';
+  text: string;
+  status: 'open' | 'passing' | 'failing' | 'confirmed';
+  detail: string | null;
+  checked_at: string | null;
+}
+export interface AssignmentHandoff {
+  id: number;
+  text: string;
+  report: string | null;
+  due_at: string | null;
+  created_at: string;
+}
+export interface AssignmentWake {
+  seq: number;
+  fired_by: string;
+  started_at: string | null;
+  ended_at: string | null;
+  outcome: string | null;
+  cost_usd: number | null;
+  progress_signals: unknown;
+  summary: string | null;
+  summary_truncated: boolean;
+}
+export interface AssignmentDetail {
+  assignment: AssignmentSummary;
+  wake_due: string | null;
+  charter: string;
+  ledger: AssignmentLedger;
+  items: AssignmentItem[];
+  frozen: { id: number; name: string; value: string }[];
+  open_handoffs: AssignmentHandoff[];
+  wakes: AssignmentWake[];
+  notice: string;
+  goal: string;
+  autonomy: string;
+  completion_evidence: string | null;
+  /** Null on a finished assignment. */
+  network: NetworkSubject | null;
+  external_skills: string[];
+  chat_href: string;
+  folder_href: string;
+}
+export interface AssignmentTopUpResult {
+  /** Present when a budget pause stays in place after the top-up. */
+  still_paused?: {
+    remaining: { cost_usd: number; wakes: number };
+    cheapest_wake_usd: number | null;
+  };
+}
+export function getAssignments(): Promise<{ assignments: AssignmentListRow[] }> {
+  return apiFetch('/assignments');
+}
+export function getAssignment(id: number): Promise<AssignmentDetail> {
+  return apiFetch(`/assignments/${id}`);
+}
+function postAssignment<T>(id: number, verb: string, body?: Record<string, unknown>): Promise<T> {
+  return apiFetch(`/assignments/${id}/${verb}`, {
+    method: 'POST',
+    ...(body
+      ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+      : {}),
+  });
+}
+export function pauseAssignment(id: number): Promise<unknown> {
+  return postAssignment(id, 'pause');
+}
+export function resumeAssignment(id: number): Promise<unknown> {
+  return postAssignment(id, 'resume');
+}
+export function wakeAssignment(id: number): Promise<unknown> {
+  return postAssignment(id, 'wake');
+}
+export function abandonAssignment(id: number, reason: string): Promise<unknown> {
+  return postAssignment(id, 'abandon', { reason });
+}
+export function topUpAssignment(
+  id: number,
+  amount: { usd: number } | { wakes: number },
+): Promise<AssignmentTopUpResult> {
+  return postAssignment(id, 'topup', amount);
+}
+export function noteAssignment(id: number, text: string): Promise<unknown> {
+  return postAssignment(id, 'note', { text });
+}
+export function completeAssignment(id: number): Promise<unknown> {
+  return postAssignment(id, 'close', { completed: true });
+}
+export function sendBackAssignment(id: number, reject: string): Promise<unknown> {
+  return postAssignment(id, 'close', { reject });
+}
+export function confirmAssignmentItem(id: number, itemId: number): Promise<unknown> {
+  return postAssignment(id, `items/${itemId}/confirm`);
+}
+export function completeAssignmentHandoff(
+  id: number,
+  actionId: number,
+  report: string,
+): Promise<unknown> {
+  return postAssignment(id, `handoffs/${actionId}/done`, { report });
 }
 export function getWallet(): Promise<WalletSettings> {
   return apiFetch('/settings/wallet');
