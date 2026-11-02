@@ -260,17 +260,27 @@ def _row_approved(
     return f"{kind}:{job_digest(row)}" in grants
 
 
+def task_text_digest(row: "Mapping | sqlite3.Row") -> str:
+    """The sha256 of what a job or an occurrence dispatches: `job_digest` without the
+    publish columns, which a task does not carry."""
+    return _digest_over(row, TASK_TEXT_COLUMNS)
+
+
+def occurrence_text_digest(conn: sqlite3.Connection, task_id: int) -> str | None:
+    """`task_text_digest` of the text an occurrence is running. From the table, since
+    `execute_task` enriches the prompt on the object it holds. `db.create_task` is the
+    one writer of these fields on an occurrence, and `_create_scheduled_job_task`
+    copies them from the row."""
+    stored = conn.execute(
+        "SELECT prompt, command, skill, skill_args FROM tasks WHERE id = ?", (task_id,),
+    ).fetchone()
+    return task_text_digest(stored) if stored is not None else None
+
+
 def _task_runs_row_text(conn: sqlite3.Connection, root: "db.Task", row: sqlite3.Row) -> bool:
     """Whether the task is running the text its job row holds. An approval is of the
-    row, and the task is what runs. From the table, since `execute_task` enriches the
-    prompt on the object it holds. `db.create_task` is the one writer of these fields
-    on an occurrence, and `_create_scheduled_job_task` copies them from the row."""
-    stored = conn.execute(
-        "SELECT prompt, command, skill, skill_args FROM tasks WHERE id = ?", (root.id,),
-    ).fetchone()
-    if stored is None:
-        return False
-    return _digest_over(stored, TASK_TEXT_COLUMNS) == _digest_over(row, TASK_TEXT_COLUMNS)
+    row, and the task is what runs."""
+    return occurrence_text_digest(conn, root.id) == task_text_digest(row)
 
 
 def stored_posture(conn: sqlite3.Connection, task_id: int) -> str | None:
