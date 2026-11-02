@@ -148,6 +148,15 @@ class TestTheTool:
         assert calls == []
         assert _lines(log) == [{"channel": "web_fetch", "entry": "evil.example"}]
         assert "canary" not in log.read_text()
+        assert "nothing can be approved for this task" in text
+
+    def test_the_refusal_names_the_page_of_the_tasks_subject(self, tmp_path, monkeypatch):
+        _resolver_calls(monkeypatch, {})
+        policy = web_fetch_policy_for_task(
+            WebFetchConfig(), frozenset({HOST}), subject="assignment:7",
+        )
+        res = _fetch(tmp_path, policy, "https://evil.example/")
+        assert "the owner can add it in Settings, Assignments." in res.content[0].text
 
     def test_a_redirect_to_an_ungranted_host_is_refused_unresolved(self, tmp_path, monkeypatch):
         calls = _resolver_calls(monkeypatch, {HOST: "93.184.216.34"})
@@ -434,6 +443,11 @@ class TestThroughTheExecutor:
             assert req.harness.web_fetch.refusal_log == str(req.egress_log)
         system = open(req.composed_system_prompt_path).read()
         assert f"reaches only the hosts its owner approved: {HOST}." in system
+        assert "the owner can add it in Settings, Scheduled jobs." in system
+        assert "Network access" not in system
+        assert req.egress_subject == "cron:digest"
+        if req.harness is not None:
+            assert "Settings, Scheduled jobs" in req.harness.web_fetch.refusal_advice
         with db.get_db(config.db_path) as conn:
             rows = egress.list_refused(conn, "alice", "cron:digest")
         assert [row["entry"] for row in rows] == ["evil.example"]
@@ -445,6 +459,21 @@ class TestThroughTheExecutor:
         assert req.egress_hosts == frozenset()
         system = open(req.composed_system_prompt_path).read()
         assert "no hosts are approved for this task" in system
+
+    def test_a_tasks_md_line_is_told_nothing_can_be_approved(self, config):
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, db.create_task(
+                conn, prompt="read the news", user_id="alice", source_type="istota_file",
+            ))
+            conn.commit()
+        req = self._run(config, task)
+        assert req.egress_hosts == frozenset()
+        assert req.egress_subject is None
+        system = open(req.composed_system_prompt_path).read()
+        assert "no hosts are approved for this task." in system
+        assert "Do not retry a refused host; nothing can be approved for this task." in system
+        assert "Settings," not in system
+        assert "approved for this task yet" not in system
 
     def test_an_attended_turn_has_no_limit(self, config):
         with db.get_db(config.db_path) as conn:

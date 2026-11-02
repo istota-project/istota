@@ -31,15 +31,30 @@ if TYPE_CHECKING:
 
 SOURCE = "egress_refused"
 OBJECT_TYPE = "egress_subject"
-TITLE = "A scheduled task needs network access"
+TITLE = "A scheduled job or assignment needs network access"
 BODY = "Review it in Istota"
-LINK = "/settings/network"
+PAGE = "/settings/jobs"
 _MAX_LABEL_CHARS = 120
 
 
 def dedup_key(subject: str) -> str:
     digest = hashlib.sha256(subject.encode("utf-8", "surrogatepass")).hexdigest()
     return f"subject:{digest[:32]}"
+
+
+def link_for(conn: "sqlite3.Connection", user_id: str, subject: str) -> str:
+    """Where a subject is decided. It carries only an integer, so no model-written name
+    reaches a link. Both are server redirects: a link cannot hold the page's query."""
+    kind, _, rest = subject.partition(":")
+    if kind == "assignment" and rest.isascii() and rest.isdigit():
+        return f"/settings/assignments/open/{int(rest)}"
+    if kind == "cron":
+        row = conn.execute(
+            "SELECT id FROM scheduled_jobs WHERE user_id = ? AND name = ?", (user_id, rest),
+        ).fetchone()
+        if row is not None:
+            return f"/settings/jobs/open/{int(row[0])}"
+    return PAGE
 
 
 def write(conn: "sqlite3.Connection", user_id: str, subject: str) -> "RaiseResult | None":
@@ -49,7 +64,7 @@ def write(conn: "sqlite3.Connection", user_id: str, subject: str) -> "RaiseResul
     return write_notification(
         conn, user_id, source=SOURCE, dedup_key=dedup_key(subject), title=TITLE, body=BODY,
         severity="warning", actionable=True, object_type=OBJECT_TYPE, object_id=subject,
-        link=LINK,
+        link=link_for(conn, user_id, subject),
     )
 
 
@@ -84,14 +99,15 @@ class EgressRefusedResolver:
             return None
         if not egress.has_open_refusal(conn, row.user_id, subject):
             return None
+        link = link_for(conn, row.user_id, subject)
         review = NotificationAction(
-            id="review", label="Review", kind="primary", method="LINK", href=LINK,
+            id="review", label="Review", kind="primary", method="LINK", href=link,
         )
         return NotificationView(
             title=TITLE,
             body=flatten(egress.subject_label(subject))[:_MAX_LABEL_CHARS],
             severity="warning",
-            link=LINK,
+            link=link,
             actions=(review,),
         )
 

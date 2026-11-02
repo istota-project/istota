@@ -196,6 +196,7 @@ from .transport.registry import (
     result_event_payload,
 )
 from .lib.audio_sniff import VOICE_TRANSCRIPT_LABEL
+from .lib.egress_log import refusal_advice
 from .transport.ingest import describe_attachment_only_message
 from .transport.routing import private_phone_room
 from .storage import BOT_USER_BASE, ensure_user_directories_v2, ensure_workspace_roots
@@ -2680,7 +2681,7 @@ def _execute_skill_task(
         file_egress_refusals(config, task, [("skill", f"skill:{skill_name}")])
         return False, (
             f"egress_not_approved: the {skill_name} skill is not approved for this "
-            "job; the owner can add it in Settings, Network access."
+            f"job; {refusal_advice(reach.egress_subject)}"
         )
 
     # In-process dispatch for skill-tasks that need read/write access to
@@ -6433,22 +6434,6 @@ def poll_mail_account_test_requests(config: Config, inflight: dict) -> None:
         )
 
 
-def _parse_shared_kv_target(target: str) -> tuple[str, str]:
-    """Parse a ``publish_shared_kv`` target into ``(namespace, key)``.
-
-    ``"<ns>/<key>"`` → split on the first slash; a bare ``"<key>"`` →
-    (``briefing_shared_blocks``, key) so a publish job populates a shared block
-    by name with no ceremony.
-    """
-    from istota.briefings.sources.kv import SHARED_BLOCK_NAMESPACE
-
-    target = (target or "").strip()
-    if "/" in target:
-        ns, _, key = target.partition("/")
-        return ns.strip(), key.strip()
-    return SHARED_BLOCK_NAMESPACE, target
-
-
 def _publish_is_trusted(conn, task, job) -> bool:
     """Whether a job's published answer goes out marked trusted. Not from an occurrence
     the ceiling let run: nobody read the flag, and with open web a page can write the
@@ -6484,7 +6469,9 @@ def _publish_result_to_shared_kv(
     * Empty/whitespace result → skip (preserve last-known-good), INFO → ``True``.
     * Never raises out of ``process_one_task``.
     """
-    ns, key = _parse_shared_kv_target(job.publish_shared_kv)
+    from istota.briefings.sources.kv import parse_shared_kv_target
+
+    ns, key = parse_shared_kv_target(job.publish_shared_kv)
     if not key:
         logger.error(
             "publish_shared_kv job=%s has no key in target %r; skipping",
@@ -10103,13 +10090,21 @@ def run_scheduled_job_now(
 
     Returns ``(task_id, "")`` or ``(None, refusal)``. Leaves ``last_run_at``
     alone, so the job's next scheduled slot is unchanged. A ``_module.*`` job is
-    refused: its module owns its schedule and its retry.
+    refused: its module owns its schedule and its retry. So is a ``once`` job
+    holding for its owner's approval, as the tick holds it.
     """
     from istota.notifications.resolvers.cron_job import is_module_job
+
+    from .rooms import egress as rooms_egress
 
     label = f"Job '{job.name}'"
     if is_module_job(job.name):
         return None, f"{label} is managed by a module and can't be run by hand."
+    if job.once and rooms_egress.once_job_waiting(
+        conn, job.user_id, job.name,
+        ceiling=app_config.security.scheduled_job_max_unapproved,
+    ):
+        return None, f"{label} is waiting for you to approve what it asked for."
     refusal = _job_run_refusal(
         conn, "scheduled_job_id = ?", (job.id,), label,
         exclude_task_id=parent_task_id,

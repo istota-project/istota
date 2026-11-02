@@ -30,7 +30,7 @@ from istota.mail import support as email_support
 from istota.credentials import names as secrets_vault
 from istota.sandbox import cgroup as task_cgroup
 from istota.sandbox import task_env
-from istota.lib.egress_log import REFUSED_LOG_NAME
+from istota.lib.egress_log import REFUSED_LOG_NAME, refusal_advice
 from istota.rooms import speech_gate
 from istota.rooms.scopes import CHANNEL_NOTES_LABEL as CHANNEL_MEMORY_LABEL
 from istota.sandbox.claude_runtime_env import (
@@ -4156,6 +4156,7 @@ def harness_web_fetch_policy(
     *,
     egress_hosts: frozenset[str] | None = None,
     refusal_log: Path | None = None,
+    subject: str | None = None,
 ):
     """`HarnessSpec.web_fetch`: the daemon-side WebFetch's policy, or None.
 
@@ -4171,7 +4172,7 @@ def harness_web_fetch_policy(
     from .session.tools import web_fetch_policy_for_task
 
     return web_fetch_policy_for_task(
-        config.brain.native.web_fetch, egress_hosts, refusal_log=refusal_log,
+        config.brain.native.web_fetch, egress_hosts, refusal_log=refusal_log, subject=subject,
     )
 
 
@@ -4648,6 +4649,17 @@ def _split_credential_env(
     return credential_env, clean_env
 
 
+def task_is_tool_less(task: db.Task) -> bool:
+    """Whether a task's model runs with no tools, which is one answer for the
+    tool list and the prompt's Tools section.
+
+    A personal briefing only: the daemon gathers its sources before the model
+    starts, and the prompt holds all of it. Group and shared-block research are
+    other source types and keep their tools.
+    """
+    return task.source_type == "briefing"
+
+
 def build_allowed_tools(
     is_admin: bool,
     skill_names: list[str],
@@ -4669,7 +4681,8 @@ def build_allowed_tools(
     The returned list still matters in two places: NativeBrain filters its
     in-process tool set by these names, and a non-empty list is the signal that
     distinguishes a tool-bearing task from a text-only one (empty => sleep cycle
-    / OCR / explainer, which get no tools and no skip-permissions).
+    / OCR / explainer / personal briefing, which get no tools and no
+    skip-permissions).
 
     WebSearch is included for everyone; it runs server-side at the provider and
     returns result titles + URLs rather than page bodies, so it grants this host
@@ -8026,11 +8039,12 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
         web_tools += (
             f"\n- Network: this task runs unattended and reaches only the hosts its owner approved: {approved}."
             if approved else
-            "\n- Network: this task runs unattended, and no hosts are approved for this task yet."
+            "\n- Network: this task runs unattended, and no hosts are approved for this task"
+            + (" yet." if reach.egress_subject else ".")
         )
         web_tools += (
             " WebFetch and shell network calls to anything else are refused. Do not "
-            "retry a refused host; the owner can add it in Settings, Network access."
+            f"retry a refused host; {refusal_advice(reach.egress_subject)}"
         )
 
     # Bash runs with `pipefail` on (ISSUE-321), which the model has to be told
@@ -8239,6 +8253,17 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     if _per_user_email:
         per_user_email_line = f"\nPer-user email: {_one_line(_per_user_email)}"
 
+    tools_section = ""
+    if not task_is_tool_less(task):
+        tools_section = f"""## Available tools
+
+You have access to:
+{file_tools}{browser_tool}{web_tools}{bash_tool}
+{cli_skills_section}{db_tool_line}
+- Email: two commands exist — `istota-skill email send` sends immediately via SMTP, `istota-skill email output` writes a deferred reply file. Use `send` when the user asks you to email someone (this is the common case). Only use `output` when this task arrived as an incoming email (Source: email) and you are composing the reply. See the email skill for details.{shared_credentials_line}
+
+"""
+
     # ---- the system half: standing instructions, verbatim for the whole task
     system = f"""You are {display_bot_name}, a helpful assistant bot. {requester_line}
 
@@ -8257,14 +8282,7 @@ Output target: {display_output_target}{per_user_email_line}
 
 {resources_text}
 
-## Available tools
-
-You have access to:
-{file_tools}{browser_tool}{web_tools}{bash_tool}
-{cli_skills_section}{db_tool_line}
-- Email: two commands exist — `istota-skill email send` sends immediately via SMTP, `istota-skill email output` writes a deferred reply file. Use `send` when the user asks you to email someone (this is the common case). Only use `output` when this task arrived as an incoming email (Source: email) and you are composing the reply. See the email skill for details.{shared_credentials_line}
-
-{rules_section}
+{tools_section}{rules_section}
 {channel_section}"""
 
     if skills_changelog:
@@ -9552,7 +9570,7 @@ def execute_task(
             # picks its own verb at ack time; both draw from the same list.
             event_writer.emit("task_started", {"text": random_progress_message()})
         use_streaming = event_writer is not None
-        allowed = build_allowed_tools(
+        allowed = [] if task_is_tool_less(task) else build_allowed_tools(
             is_admin,
             selected_skills,
             web_fetch_admin_only=config.brain.native.web_fetch.admin_only,
@@ -9601,6 +9619,7 @@ def execute_task(
             conn=conn,
             egress_hosts=_reach.egress_hosts,
             egress_withheld=_reach.egress_withheld,
+            egress_subject=_reach.egress_subject,
             egress_log=_egress_log,
         )
         env = _runtime.env
@@ -9747,6 +9766,7 @@ def execute_task(
             allowed_tools=allowed,
             egress_hosts=_reach.egress_hosts,
             egress_log=_egress_log,
+            egress_subject=_reach.egress_subject,
             # Non-sandbox path (Mac/dev/Docker): the REPL points the brain's
             # working directory at the launch dir directly. No blocklist here —
             # without bwrap the process already runs with the user's own FS
@@ -9865,6 +9885,15 @@ def execute_task(
             fs_write_denied_roots=_fs_write_denied_roots,
             result_file=result_file,
         )
+        # A text-only CLI runs on `req.env` with no harness, so a tool-less task
+        # needs a CLI env rather than the task's, which holds no credential. The
+        # one exception to that rule, and it holds because no tool server starts
+        # and nothing runs below the CLI. Native reads no env on such a request,
+        # and a `native -> claude_code` reroute reuses it.
+        if task_is_tool_less(task):
+            req.env = build_harness_cli_env(
+                config, task.user_id, timeout_seconds=req.timeout_seconds,
+            )
         # The CLI tool harness, for a `claude_code` request with tools, as the
         # routed brain or as the fallback a native task may reroute to: the
         # reroute reuses this request, and a CLI with tools runs only on the
@@ -9888,6 +9917,7 @@ def execute_task(
                 web_fetch=harness_web_fetch_policy(
                     config, allowed,
                     egress_hosts=_reach.egress_hosts, refusal_log=_egress_log,
+                    subject=_reach.egress_subject,
                 ),
                 # Bound read-only by `_tool_server_wrap` above: where the
                 # harness hands the CLI-spawned tool server its hello and gate.

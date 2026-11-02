@@ -68,10 +68,15 @@ def _job_task(config, name=HOSTILE_NAME, user=USER):
 def _rows(config, user=USER):
     with db.get_db(config.db_path) as conn:
         return conn.execute(
-            "SELECT user_id, dedup_key, title, body, occurrences, state, object_id "
+            "SELECT user_id, dedup_key, title, body, occurrences, state, object_id, link "
             "FROM notifications WHERE source = 'egress_refused' AND user_id = ?",
             (user,),
         ).fetchall()
+
+
+def _job_id(config, name=HOSTILE_NAME, user=USER):
+    with db.get_db(config.db_path) as conn:
+        return db.get_scheduled_job_by_name(conn, user, name).id
 
 
 def _open(config, user=USER):
@@ -90,7 +95,7 @@ class TestTheRow:
         _refuse(config, _job_task(config), HOSTILE_HOST)
         [row] = _rows(config)
         assert (row["title"], row["body"]) == (egress_refused.TITLE, egress_refused.BODY)
-        assert row["title"] == "A scheduled task needs network access"
+        assert row["title"] == "A scheduled job or assignment needs network access"
         assert row["body"] == "Review it in Istota"
         assert len(sends) == 1
         assert sends[0]["user_id"] == USER
@@ -144,8 +149,47 @@ class TestTheBell:
         [row] = _open(config)
         [action] = row.actions
         assert action.method == "LINK"
-        assert action.href == egress_refused.LINK == "/settings/network"
+        assert action.href == f"/settings/jobs/open/{_job_id(config)}"
+        assert row.link == action.href
         assert notification_sources.SAFE_PATH_RE.match(action.href)
+
+    def test_a_stored_row_with_the_old_link_opens_the_job(self, config, sends):
+        """Rows written before the pages have `/settings/network`, and the view is live."""
+        _refuse(config, _job_task(config), HOSTILE_HOST)
+        with db.get_db(config.db_path) as conn:
+            conn.execute("UPDATE notifications SET link = '/settings/network'")
+            conn.commit()
+        [row] = _open(config)
+        assert row.link == f"/settings/jobs/open/{_job_id(config)}"
+
+    def test_the_stored_link_holds_only_the_rows_integer(self, config, sends):
+        _refuse(config, _job_task(config), HOSTILE_HOST)
+        [row] = _rows(config)
+        assert row["link"] == f"/settings/jobs/open/{_job_id(config)}"
+        assert HOSTILE_NAME not in row["link"]
+
+    def test_an_assignment_links_to_its_own_page(self, config, sends):
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "INSERT INTO assignments (id, user_id, slug, title, goal, budget, dir_relpath, state) "
+                "VALUES (7, ?, 's', 't', 'g', '{}', 'assignments/s', 'active')",
+                (USER,),
+            )
+            egress.note_refused(conn, USER, "assignment:7", HOSTILE_HOST)
+            conn.commit()
+            egress.raise_refused_bell(config, conn, USER, ["assignment:7"])
+        [row] = _open(config)
+        assert row.link == "/settings/assignments/open/7"
+        assert notification_sources.SAFE_PATH_RE.match(row.link)
+
+    def test_a_subject_with_no_row_links_to_the_page(self, config):
+        with db.get_db(config.db_path) as conn:
+            assert egress_refused.link_for(conn, USER, "cron:nothing") == "/settings/jobs"
+
+    def test_another_users_job_of_that_name_is_not_linked(self, config, sends):
+        _job_task(config, name="same", user="bob")
+        with db.get_db(config.db_path) as conn:
+            assert egress_refused.link_for(conn, USER, "cron:same") == "/settings/jobs"
 
     def test_another_users_row_is_not_seen(self, config, sends):
         _refuse(config, _job_task(config), HOSTILE_HOST)
@@ -208,13 +252,6 @@ class TestItCloses:
             conn.commit()
         assert _open(config) == []
 
-    def test_when_the_briefing_is_gone(self, config, sends):
-        with db.get_db(config.db_path) as conn:
-            egress.note_refused(conn, USER, "briefing:morning", HOSTILE_HOST)
-            conn.commit()
-            egress.raise_refused_bell(config, conn, USER, ["briefing:morning"])
-        assert _open(config) == []
-
     def test_when_the_assignment_is_closed(self, config, sends):
         with db.get_db(config.db_path) as conn:
             conn.execute(
@@ -231,13 +268,20 @@ class TestItCloses:
             conn.commit()
         assert _open(config) == []
 
-    def test_tasks_md_is_a_subject_that_never_goes(self, config, sends):
+    @pytest.mark.parametrize("subject", ["tasks-file", "briefing:morning"])
+    def test_a_stored_row_on_a_retired_subject_closes(self, config, sends, subject):
+        """The briefing itself is still there: its subject is what went."""
         with db.get_db(config.db_path) as conn:
-            egress.note_refused(conn, USER, egress.TASKS_FILE_SUBJECT, HOSTILE_HOST)
+            conn.execute(
+                "INSERT INTO briefing_configs "
+                "(user_id, name, cron_expression, conversation_token, output, components) "
+                "VALUES (?, 'morning', '0 7 * * *', '', 'email', '{}')",
+                (USER,),
+            )
+            egress.note_refused(conn, USER, subject, HOSTILE_HOST)
+            egress_refused.write(conn, USER, subject)
             conn.commit()
-            egress.raise_refused_bell(config, conn, USER, [egress.TASKS_FILE_SUBJECT])
-        [row] = _open(config)
-        assert "TASKS.md" in row.body
+        assert _open(config) == []
 
 
 class TestTheBadgeIsRightWithNoPanelOpen:
@@ -275,24 +319,6 @@ class TestTheBadgeIsRightWithNoPanelOpen:
         assert self._badge(config, "bob") == 0
         assert self._badge(config, USER) == 1
 
-    def test_a_deleted_briefing_closes_its_row(self, config, sends):
-        from istota import user_briefings
-
-        with db.get_db(config.db_path) as conn:
-            conn.execute(
-                "INSERT INTO briefing_configs "
-                "(user_id, name, cron_expression, conversation_token, output, components) "
-                "VALUES (?, 'morning', '0 7 * * *', '', 'email', '{}')",
-                (USER,),
-            )
-            briefing_id = conn.execute("SELECT id FROM briefing_configs").fetchone()[0]
-            egress.note_refused(conn, USER, "briefing:morning", HOSTILE_HOST)
-            conn.commit()
-            egress.raise_refused_bell(config, conn, USER, ["briefing:morning"])
-        assert self._badge(config) == 1
-        assert user_briefings.delete_briefing_by_id(config.db_path, USER, briefing_id)
-        assert self._badge(config) == 0
-
     def test_a_new_job_under_an_old_name_starts_with_no_row(self, config, sends):
         _refuse(config, _job_task(config), HOSTILE_HOST)
         with db.get_db(config.db_path) as conn:
@@ -316,9 +342,9 @@ class TestTheBadgeIsRightWithNoPanelOpen:
 
     def test_a_refusal_filed_after_the_subject_went_raises_nothing(self, config, sends):
         with db.get_db(config.db_path) as conn:
-            egress.note_refused(conn, USER, "briefing:gone", HOSTILE_HOST)
+            egress.note_refused(conn, USER, "cron:gone", HOSTILE_HOST)
             conn.commit()
-            egress.raise_refused_bell(config, conn, USER, ["briefing:gone"])
+            egress.raise_refused_bell(config, conn, USER, ["cron:gone"])
         assert _rows(config) == []
         assert sends == []
 
@@ -449,27 +475,6 @@ class TestAModuleSyncMatchesItsPrefixLiterally:
             conn.commit()
             names = [row[0] for row in conn.execute("SELECT name FROM scheduled_jobs")]
         assert names == ["xmodule.feeds.mine"]
-
-
-class TestRemovingABriefingForgetsIt:
-    def test_its_grants_and_refusals_go(self, config):
-        from istota import user_briefings
-
-        with db.get_db(config.db_path) as conn:
-            conn.execute(
-                "INSERT INTO briefing_configs "
-                "(user_id, name, cron_expression, conversation_token, output, components) "
-                "VALUES (?, 'morning', '0 7 * * *', '', 'email', '{}')",
-                (USER,),
-            )
-            briefing_id = conn.execute("SELECT id FROM briefing_configs").fetchone()[0]
-            egress.add_grant(conn, USER, "briefing:morning", "news.example.com", decided_via="cli")
-            egress.note_refused(conn, USER, "briefing:morning", HOSTILE_HOST)
-            conn.commit()
-        assert user_briefings.delete_briefing_by_id(config.db_path, USER, briefing_id)
-        with db.get_db(config.db_path) as conn:
-            assert egress.grants_for(conn, USER, "briefing:morning") == frozenset()
-            assert egress.list_refused(conn, USER, "briefing:morning") == []
 
 
 class TestAFailureNeverDecides:

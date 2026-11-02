@@ -40,6 +40,7 @@ from tests.test_assignments_wakes import (
 )
 
 STEP = "photograph the furnace label in the basement"
+EVERY_ACTION = ["open-assignment", "open-chat", "open-folder"]
 
 
 @pytest.fixture
@@ -354,6 +355,18 @@ class TestTheViewLinksToTheChatAndTheFolder:
         _end(config, made)
         return a
 
+    def test_the_fixed_text_names_the_page_as_well_as_chat(self, config, notify):
+        self._handed_off(config)
+        view = _view(config, "handoff")
+        assert "on its page or in chat" in view.body
+        assert "on its page or in chat" in view.status_note
+        for line in (
+            notices._STATUS_NOTE["completion"],
+            notices._PAUSE_TEXT["budget"],
+        ):
+            assert "on its page or in chat" in line
+            assert "\n" not in line
+
     def test_a_handoff_opens_the_activation_room_and_the_folder(self, config, notify):
         a = self._handed_off(config)
         with db.get_db(config.db_path) as conn:
@@ -363,10 +376,15 @@ class TestTheViewLinksToTheChatAndTheFolder:
 
         view = _view(config, "handoff")
         actions = {action.id: action for action in view.actions}
-        assert actions["open-chat"].method == "LINK" and actions["open-chat"].kind == "primary"
+        assert actions["open-assignment"].method == "LINK"
+        assert actions["open-assignment"].kind == "primary"
+        assert actions["open-assignment"].href == f"/settings/assignments/open/{a}"
+        assert actions["open-chat"].method == "LINK" and actions["open-chat"].kind == "default"
         assert actions["open-chat"].href == f"/chat/r/{room.token}"
         assert actions["open-folder"].method == "LINK"
         assert actions["open-folder"].href == f"/files/assignments/{a}"
+        assert actions["open-folder"].detail_only is True
+        assert not actions["open-assignment"].detail_only and not actions["open-chat"].detail_only
         for action in view.actions:
             assert sources.is_safe_path(action.href)
 
@@ -424,12 +442,12 @@ class TestTheViewLinksToTheChatAndTheFolder:
             if view is None:
                 continue
             resolved.add(kind)
-            assert [action.id for action in view.actions] == ["open-chat", "open-folder"], kind
+            assert [action.id for action in view.actions] == EVERY_ACTION, kind
         # The kinds whose condition holds while a completion waits: the seen
         # kinds always do, and the proposal itself.
         assert resolved == {"completion", "report", "closed"}
         view = _view(config, "completion")
-        assert [action.id for action in view.actions] == ["open-chat", "open-folder"]
+        assert [action.id for action in view.actions] == EVERY_ACTION
 
     def test_the_push_is_unchanged(self, config, notify):
         self._handed_off(config)

@@ -505,6 +505,16 @@ def open_wake(conn: sqlite3.Connection, assignment_id: int) -> Wake | None:
     return _wake(row) if row else None
 
 
+def latest_complete_request(conn: sqlite3.Connection, assignment_id: int) -> str | None:
+    """The evidence of the newest completion a wake asked for, or None."""
+    row = conn.execute(
+        "SELECT complete_request FROM assignment_wakes WHERE assignment_id = ?"
+        " AND complete_request IS NOT NULL ORDER BY seq DESC LIMIT 1",
+        (assignment_id,),
+    ).fetchone()
+    return row[0] if row is not None else None
+
+
 def list_wakes(conn: sqlite3.Connection, assignment_id: int, *, limit: int | None = None) -> list[Wake]:
     """Newest first."""
     sql = "SELECT * FROM assignment_wakes WHERE assignment_id = ? ORDER BY seq DESC"

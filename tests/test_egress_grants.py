@@ -178,13 +178,15 @@ class TestGrants:
         with pytest.raises(egress.EntryRefused):
             egress.add_grant(conn, USER, "cron:j", "skill:browse", decided_via="web")
 
-    @pytest.mark.parametrize("subject", ["briefing:b", "assignment:3", "tasks-file"])
+    @pytest.mark.parametrize("subject", ["assignment:3"])
     def test_only_a_cron_job_carries_a_digest(self, conn, subject):
         for kind in ("open", "public"):
             with pytest.raises(egress.EntryRefused):
                 egress.add_grant(conn, USER, subject, f"{kind}:{DIGEST}", decided_via="web")
 
-    @pytest.mark.parametrize("subject", ["", "cron:", "other:x", "assignment:abc", "briefing:", None])
+    @pytest.mark.parametrize("subject", [
+        "", "cron:", "other:x", "assignment:abc", "briefing:", "briefing:b", "tasks-file", None,
+    ])
     def test_an_unknown_subject_is_refused(self, conn, subject):
         with pytest.raises(egress.EntryRefused):
             egress.add_grant(conn, USER, subject, "example.com", decided_via="web")
@@ -203,8 +205,14 @@ class TestTheWriterHasOneSetOfCallers:
     """Only an authenticated person can approve anything: the web route, the operator
     CLI and the one-time seed. A skill CLI or a deferred handler never."""
 
-    ALLOWED = {"rooms/egress.py", "db.py", "webui/egress_routes.py", "cli.py"}
-    WRITERS = re.compile(r"\badd_grant\b|\bapprove_job\b|\bset_job_access\b|INSERT[^\"']*\begress_grants\b", re.DOTALL)
+    ALLOWED = {
+        "rooms/egress.py", "db.py", "webui/egress_routes.py", "webui/job_routes.py", "cli.py",
+    }
+    WRITERS = re.compile(
+        r"\badd_grant\b|\bapprove_job\b|\bapprove_saved_text\b|\bset_job_access\b"
+        r"|INSERT[^\"']*\begress_grants\b",
+        re.DOTALL,
+    )
 
     def test_only_the_listed_modules_name_the_writer(self):
         found = {

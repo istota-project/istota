@@ -608,8 +608,8 @@ def make_web_fetch_tool(env: ToolEnv) -> AgentTool:
             # A redirect's host is the server's choice, on a line outside any fence.
             shown = _header_scalar(exc.host, _HEADER_URL_MAX_CHARS)
             return _err(
-                f"egress_not_approved: {shown} is not approved for this task; the owner "
-                "can add it in Settings, Network access. Do not retry."
+                f"egress_not_approved: {shown} is not approved for this task; "
+                f"{policy.refusal_advice} Do not retry."
             )
         except WebFetchNetworkError as exc:
             return _err(f"WebFetch: {exc}")

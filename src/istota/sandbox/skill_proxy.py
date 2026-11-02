@@ -18,7 +18,7 @@ from pathlib import Path
 from time import monotonic, sleep, time
 
 from istota import skill_client
-from istota.lib.egress_log import EGRESS_LOG_VAR, append_refusal
+from istota.lib.egress_log import EGRESS_LOG_VAR, append_refusal, refusal_advice
 from istota.sandbox import peer_process
 from istota.sandbox.host_paths import skill_file_env
 from istota.credentials.names import label_for_display
@@ -402,10 +402,12 @@ class SkillProxy:
         max_concurrent_skills: int = DEFAULT_MAX_CONCURRENT_SKILLS,
         max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
         egress_withheld: frozenset[str] = frozenset(),
+        egress_subject: str | None = None,
     ):
         # `Reach.egress_withheld`: refused like any skill off the list, and asked
         # for in the refusal log. Only names from this set reach the log.
         self.egress_withheld = egress_withheld
+        self.egress_subject = egress_subject
         self.credential_env = credential_env
         self.base_env = base_env
         self.timeout = timeout
@@ -807,7 +809,7 @@ class SkillProxy:
                 append_refusal(self.base_env.get(EGRESS_LOG_VAR), "skill", f"skill:{skill}")
                 message = (
                     f"egress_not_approved: the {skill} skill is not approved for this "
-                    "task; the owner can add it in Settings, Network access. Do not retry."
+                    f"task; {refusal_advice(self.egress_subject)} Do not retry."
                 )
                 # On stdout too: a caller of a skill parses its JSON `status` there.
                 self._send_response(conn, {

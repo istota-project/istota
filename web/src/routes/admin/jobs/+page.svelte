@@ -24,8 +24,7 @@
   import { ConfirmStepUpDialog } from '$lib/components/settings';
   import { createConfirm } from '@minot/ui/ui/confirm.svelte';
   import { notifyError, notifySuccess, notifyWarning } from '@minot/ui/stores/notices';
-
-  type JobState = 'running' | 'disabled' | 'suspended';
+  import { STATE_LABEL, STATE_VARIANT, type JobState } from '$lib/settings/jobState';
 
   let jobs = $state<AdminStatsJob[] | null>(null);
   let loadError = $state('');
@@ -45,9 +44,6 @@
     if (!job.enabled) return 'disabled';
     return job.auto_disabled_at ? 'suspended' : 'running';
   }
-
-  const STATE_LABEL = { running: 'Running', disabled: 'Disabled', suspended: 'Suspended' } as const;
-  const STATE_VARIANT = { running: 'success', disabled: 'neutral', suspended: 'warn' } as const;
 
   const needle = $derived(filter.trim().toLowerCase());
   const visible = $derived(

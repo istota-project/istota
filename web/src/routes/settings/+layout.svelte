@@ -211,6 +211,11 @@
   });
 
   const settingsBase = $derived(`${base}/settings`);
+  const visibleSections = $derived(
+    USER_SETTINGS_SECTIONS.filter(
+      (section) => !section.feature || identity.user.features?.[section.feature],
+    ),
+  );
 
   // `/settings` is a prefix of every section, so the index matches exactly
   // rather than by prefix — otherwise Account stays lit everywhere.
@@ -259,7 +264,7 @@
   {#snippet sidebar()}
     <Sidebar title="Settings" open={sidebarOpen} onClose={() => (sidebarOpen = false)}>
       <SidebarNav
-        items={USER_SETTINGS_SECTIONS.map((section) => ({
+        items={visibleSections.map((section) => ({
           href: `${settingsBase}${section.href}`,
           label: section.label,
           icon: section.icon,

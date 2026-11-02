@@ -61,7 +61,7 @@ def test_it_warns_with_a_count_and_names_no_job(config):
     assert "2 " in result.detail
     assert "canary" not in result.detail
     assert "canary" not in (result.remedy or "")
-    assert "Network access" in result.remedy
+    assert "Settings, Scheduled jobs" in result.remedy
 
 
 @pytest.mark.parametrize("name,kwargs", [

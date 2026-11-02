@@ -38,6 +38,20 @@ logger = logging.getLogger(__name__)
 SHARED_BLOCK_NAMESPACE = "briefing_shared_blocks"
 
 
+def parse_shared_kv_target(target: str) -> tuple[str, str]:
+    """Parse a ``publish_shared_kv`` target into ``(namespace, key)``.
+
+    ``"<ns>/<key>"`` → split on the first slash; a bare ``"<key>"`` →
+    (``briefing_shared_blocks``, key) so a publish job populates a shared block
+    by name with no ceremony.
+    """
+    target = (target or "").strip()
+    if "/" in target:
+        ns, _, key = target.partition("/")
+        return ns.strip(), key.strip()
+    return SHARED_BLOCK_NAMESPACE, target
+
+
 def _parse_updated_at(raw: str | None) -> datetime | None:
     """Parse a SQLite ``datetime('now')`` value (naive UTC) into an aware dt."""
     if not raw:

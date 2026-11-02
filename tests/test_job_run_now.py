@@ -341,6 +341,23 @@ class TestTheCli:
         assert exc.value.code == 1
         assert "already queued" in capsys.readouterr().err
 
+    def test_a_once_job_waiting_for_approval_exits_nonzero(self, cfg, monkeypatch, capsys):
+        from istota.cron_loader import CronJob, sync_cron_jobs_to_db
+
+        cfg_path, db_path = cfg
+        job = CronJob(
+            name="digest", cron="0 7 * * *", prompt="Write the digest",
+            once=True, egress=("news.example.com",),
+        )
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", [job])
+        with pytest.raises(SystemExit) as exc:
+            self._main(monkeypatch, cfg_path, "job", "run", "alice", "digest")
+        assert exc.value.code == 1
+        assert "waiting for you to approve" in capsys.readouterr().err
+        with db.get_db(db_path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
     def test_unknown_job_exits_nonzero(self, cfg, monkeypatch, capsys):
         cfg_path, _ = cfg
         with pytest.raises(SystemExit):

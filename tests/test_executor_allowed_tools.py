@@ -19,10 +19,12 @@ The CLI brains are unaffected either way — they run with
 """
 
 from pathlib import Path
+from unittest.mock import patch
 
 from istota import db
-from istota.config import Config, WebFetchConfig
-from istota.executor import build_allowed_tools, build_prompt
+from istota.brain import BrainResult
+from istota.config import BrainConfig, Config, SecurityConfig, WebFetchConfig
+from istota.executor import build_allowed_tools, build_prompt, execute_task
 
 
 class TestWebFetchIsNotIdentityScopedByDefault:
@@ -378,3 +380,109 @@ class TestTheHarnessWebFetchPolicy:
 
         config = self._config(enabled=False)
         assert harness_web_fetch_policy(config, ["Read", "WebFetch"]) is None
+
+
+class _RecordingBrain:
+    model_namespace = "anthropic"
+    supports_steering = False
+
+    def __init__(self):
+        self.requests = []
+
+    def resolve_model_name(self, name):
+        return name
+
+    def validate_alias_override(self, name, target):
+        return []
+
+    def execute(self, req):
+        self.requests.append(req)
+        return BrainResult(success=True, result_text="ok", stop_reason="completed")
+
+
+class TestAPersonalBriefingHasNoTools:
+    """The daemon gathers a briefing's sources before the model starts, so the
+    model only formats text. Through `execute_task`, because the request is the
+    only thing a brain reads: an empty list is what keeps it text-only."""
+
+    def _config(self, tmp_path, *, kind="claude_code", fallback=None):
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        skills_dir = tmp_path / "config" / "skills"
+        skills_dir.mkdir(parents=True)
+        return Config(
+            db_path=db_path,
+            skills_dir=skills_dir,
+            temp_dir=tmp_path / "temp",
+            workspace_path=tmp_path / "workspace",
+            model="claude-sonnet-4-6",
+            security=SecurityConfig(skill_proxy_enabled=False),
+            brain=BrainConfig(kind=kind, fallback=fallback),
+        )
+
+    def _request(self, tmp_path, config, source_type, user_id="alice"):
+        (tmp_path / "temp" / user_id).mkdir(parents=True)
+        brain = _RecordingBrain()
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="do the thing", user_id=user_id, source_type=source_type,
+            )
+            task = db.get_task(conn, task_id)
+            with patch("istota.executor.make_brain", return_value=brain):
+                execute_task(task, config, [], conn=conn)
+        assert brain.requests, "the brain was never called"
+        return brain.requests[-1]
+
+    def test_a_briefing_request_has_no_tools_and_no_harness(self, tmp_path):
+        req = self._request(tmp_path, self._config(tmp_path), "briefing")
+        assert req.allowed_tools == []
+        assert req.harness is None
+
+    def test_a_text_only_cli_request_has_the_cli_env(self, tmp_path, monkeypatch):
+        """With no harness the CLI's env is `req.env`, so it has to be a CLI env
+        and not the task's, which holds no credential by design."""
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "the-cli-credential")
+        monkeypatch.setenv("ISTOTA_CLI_AUTH", "subscription")
+        req = self._request(tmp_path, self._config(tmp_path), "briefing")
+        assert req.env.get("CLAUDE_CODE_OAUTH_TOKEN") == "the-cli-credential"
+        assert req.env.get("CLAUDE_CODE_DISABLE_ATTACHMENTS") == "1"
+
+    def test_an_ordinary_task_env_still_holds_no_cli_credential(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "the-cli-credential")
+        monkeypatch.setenv("ISTOTA_CLI_AUTH", "subscription")
+        req = self._request(tmp_path, self._config(tmp_path), "scheduled")
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in req.env
+        assert req.harness.cli_env.get("CLAUDE_CODE_OAUTH_TOKEN") == "the-cli-credential"
+
+    def test_a_native_fallback_to_the_cli_reuses_a_request_with_no_harness(
+        self, tmp_path, monkeypatch,
+    ):
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "the-cli-credential")
+        monkeypatch.setenv("ISTOTA_CLI_AUTH", "subscription")
+        config = self._config(tmp_path, kind="native", fallback="claude_code")
+        req = self._request(tmp_path, config, "briefing")
+        assert req.allowed_tools == []
+        assert req.harness is None
+        assert req.env.get("CLAUDE_CODE_OAUTH_TOKEN") == "the-cli-credential"
+
+    def test_the_system_half_names_no_tools(self, tmp_path):
+        req = self._request(tmp_path, self._config(tmp_path), "briefing")
+        system = req.composed_system_prompt_path.read_text()
+        assert "## Available tools" not in system
+        assert "## Important rules" in system
+
+    def test_an_ordinary_task_keeps_its_tools_and_section(self, tmp_path):
+        req = self._request(tmp_path, self._config(tmp_path), "scheduled")
+        assert "Bash" in req.allowed_tools
+        assert req.harness is not None
+        assert "## Available tools" in req.composed_system_prompt_path.read_text()
+
+    def test_group_briefing_research_keeps_its_tools(self, tmp_path):
+        config = self._config(tmp_path)
+        config.browser.enabled = True
+        with patch("istota.executor.public_posture_refusal", return_value=None):
+            req = self._request(
+                tmp_path, config, "group_briefing_research", user_id="__briefings__",
+            )
+        assert "Bash" in req.allowed_tools
+        assert "## Available tools" in req.composed_system_prompt_path.read_text()
