@@ -5,6 +5,7 @@ import errno
 import json
 import logging
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -4317,16 +4318,17 @@ def _build_network_allowlist(
     wasn't selected — symmetric with credential authorization.
 
     ``egress_hosts`` (`Reach.egress_hosts`) not None replaces all of that: the
-    operator's ``extra_hosts``, the Nextcloud host, and each grant at 443. A
-    registry or a forge is there only if granted, and a host bound to a
-    credential only if granted: the broker intercepts what is on this list and
-    adds nothing to it.
+    operator's ``extra_hosts``, the Nextcloud host, each plain grant at 443 and
+    each endpoint grant as written. A registry or a forge is there only if
+    granted, and a host bound to a credential only if granted: the broker
+    intercepts what is on this list and adds nothing to it. An endpoint reaches
+    here only through ``_egress_grants_in_force``.
     """
     if egress_hosts is not None:
         return {
             *config.security.network.extra_hosts,
             *_configured_url_hosts(config, ["nextcloud"]),
-            *(f"{host}:443" for host in egress_hosts),
+            *(host if ":" in host else f"{host}:443" for host in egress_hosts),
         }
 
     hosts: set[str] = set()
@@ -4417,6 +4419,7 @@ def _network_private_hosts(
     config: Config,
     authorized_skills: list[str],
     egress_hosts: frozenset[str] | None = None,
+    private_grants: frozenset[str] = frozenset(),
 ) -> set[str]:
     """The allowlisted names the proxy lets reach a private address.
 
@@ -4424,8 +4427,9 @@ def _network_private_hosts(
     since choosing a LAN host there is the permission. The built-in defaults
     (PyPI, the registries, GitHub's API and log hosts, Google) must resolve
     public: a private answer for one of those is DNS somebody else controls.
-    So must a user's grant, unless it names a host the operator also wrote. A
-    limited task keeps Nextcloud whatever its skills, as its list does.
+    So must a user's grant, unless it names a host the operator also wrote or
+    ``private_grants`` holds it (``_egress_grants_in_force``). A limited task
+    keeps Nextcloud whatever its skills, as its list does.
     """
     from .sandbox.net_guard import normal_host
 
@@ -4439,7 +4443,36 @@ def _network_private_hosts(
             host = host[1:-1]
         if host:
             names.add(normal_host(host))
+    names.update(private_grants)
     return names
+
+
+def _egress_grants_in_force(
+    config: Config,
+    user_id: str,
+    egress_hosts: frozenset[str] | None,
+    conn=None,
+) -> tuple[frozenset[str] | None, frozenset[str]]:
+    """``egress.grants_in_force`` for this task, with the bindings read here. A read
+    that fails keeps only what the config allows. ``None`` is open egress, untouched."""
+    from .rooms import egress
+
+    if egress_hosts is None:
+        return None, frozenset()
+    operator = egress.operator_endpoints(None, config, user_id)
+    if config.db_path and Path(config.db_path).is_file():
+        try:
+            with db.get_db_if_present(config.db_path, conn) as c:
+                operator = egress.operator_endpoints(c, config, user_id)
+        except (sqlite3.Error, ValueError) as exc:
+            logger.warning("egress_endpoints_read_failed: %s", type(exc).__name__)
+    kept, private = egress.grants_in_force(egress_hosts, operator)
+    if len(kept) != len(egress_hosts):
+        # A host in a grant can carry data, so only the count is logged.
+        logger.warning(
+            "egress_endpoints_not_allowed user=%s count=%d", user_id, len(egress_hosts) - len(kept),
+        )
+    return kept, private
 
 
 # --- Manifest-derived credential / authorization helpers (Phase 3) ---
@@ -8046,6 +8079,8 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
             " WebFetch and shell network calls to anything else are refused. Do not "
             f"retry a refused host; {refusal_advice(reach.egress_subject)}"
         )
+        if any(":" in host for host in reach.egress_hosts):
+            web_tools += " A host with a port is for shell calls only; WebFetch does not reach it."
 
     # Bash runs with `pipefail` on (ISSUE-321), which the model has to be told
     # once because it changes what an exit status means.

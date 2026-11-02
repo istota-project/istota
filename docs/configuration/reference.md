@@ -835,6 +835,7 @@ Which hosts each part of Istota may reach on a private, loopback or reserved add
 | `servarr` | The operator, in `[servarr.apps.*]` | The [`servarr` skill](../features/servarr.md) sends the app's API key, and plain HTTP is allowed to it |
 | `feeds` | A user, or a task through `feeds add` | The poller [fetches the host](../features/feeds.md) on a timer. Plain HTTP is allowed to any feed, listed or not, and each redirect is checked again |
 | `heartbeat` | The author of `HEARTBEAT.md`, which a task can write | A [`url-health` check](../features/heartbeat.md) fetches the host and reads its status, from the daemon's network. Without a grant nothing is fetched, even a public host, and every redirect needs a grant too |
+| `egress` | A job's owner, on the job's page | The owner may grant that job `<host>:<port>` at any port, and a [limited job](../architecture/egress.md) may then reach it from its shell, on a private address too. Nothing opens until a job is granted it, and only for that job |
 
 So there is no shared list. An arr app on `10.0.0.5` granted for `servarr` does not become a target for a user's RSS feed, a user's mail account or a page Chrome loads.
 
@@ -847,7 +848,7 @@ The rules for writing the table:
 
 Admin > Configuration shows the table as `private_hosts` under General, written as TOML. The field's text must include the `[private_hosts]` line, so a first grant in an empty field needs that line above it. Any edit to it needs the typed confirmation.
 
-This table does not touch `[security.network] extra_hosts` or the hosts of the forge and Nextcloud URLs. Those are the sandbox's own allowlist, a different permission.
+This table does not touch `[security.network] extra_hosts` or the hosts of the forge and Nextcloud URLs. Those are the sandbox's own allowlist, a different permission, and they open a host to every task where an `egress` grant opens it to one job.
 
 ### Moving from the old keys
 

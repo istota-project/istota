@@ -241,6 +241,7 @@ def build_task_runtime(
         SKILL_DAEMON_CREDENTIAL_VARS,
         SKILL_MODEL_CALLERS,
         _build_network_allowlist,
+        _egress_grants_in_force,
         _network_private_hosts,
         _split_credential_env,
         attachments_dir,
@@ -761,8 +762,11 @@ def build_task_runtime(
     if config.security.network.enabled and config.security.sandbox_enabled:
         from .network_proxy import NetworkProxy, write_bridge_script
 
+        grants_in_force, private_grants = _egress_grants_in_force(
+            config, task.user_id, egress_hosts, conn,
+        )
         allowed_hosts = _build_network_allowlist(
-            config, authorized_skills, egress_hosts=egress_hosts,
+            config, authorized_skills, egress_hosts=grants_in_force,
         )
 
         # Write bridge script to .developer/ (RO inside sandbox)
@@ -775,6 +779,7 @@ def build_task_runtime(
             _net_proxy_sock, allowed_hosts,
             private_hosts=_network_private_hosts(
                 config, authorized_skills, egress_hosts=egress_hosts,
+                private_grants=private_grants,
             ),
             max_connections=config.security.network_proxy_max_connections,
             refusal_log=egress_log if egress_hosts is not None else None,

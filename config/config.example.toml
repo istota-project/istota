@@ -1381,10 +1381,12 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # are exact names or IP addresses, quoted when they hold a dot. For a host already
 # here, add the consumer to its list: a second line for it is a TOML error. The
 # old [<consumer>] private_hosts keys still load, with a warning. A HEARTBEAT.md
-# url-health check fetches only hosts with a heartbeat grant, public ones too.
+# url-health check fetches only hosts with a heartbeat grant, public ones too. An
+# egress grant lets a job's owner grant that job the host at any port, as host:port.
 # [private_hosts]
 # "wiki.example.internal" = ["browser"]
 # "status.example.com" = ["heartbeat"]
+# "192.168.1.20" = ["egress"]
 # "rss.example.internal" = ["browser", "feeds"]
 # "192.168.1.10" = ["servarr"]
 

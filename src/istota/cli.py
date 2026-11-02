@@ -1757,6 +1757,7 @@ def cmd_egress(args):
                     )
                 egress.add_grant(
                     conn, args.user, args.subject, parsed.text, decided_via="cli", skill_index=skills,
+                    operator=egress.operator_endpoints(conn, config, args.user),
                 )
                 egress.clear_refused(conn, args.user, args.subject, parsed.text)
         except egress.EntryRefused as exc:

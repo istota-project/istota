@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A job can be granted an internal service without Full access.** Add `host:port`, such as `192.168.1.10:8080`, on a job's page or in `egress`. It takes effect only where the deployment already allows that endpoint: an `egress` grant in `[private_hosts]`, `extra_hosts`, or for an admin a credential they added for that address.
 - **Settings has an Assignments page.** See your assignments, their budget, hand-offs and recent wakes, and steer one without opening chat: pause, resume, wake, top up, abandon, leave a note, confirm an item, report a step done or answer a proposed completion. You can also set the hosts and skills an assignment may use. Assignments are still started and changed in chat. See docs/features/assignments.md.
 - **`istota-stack reclaim` shows what the stack left on your disk.** It lists leftovers such as an old state volume and the old shared browser profile, both of which hold private data, with their sizes. `reclaim --apply` removes the ones you name. See docs/deployment/running-the-stack.md.
 - **Jobs that run with nobody watching ask before they reach out.** A new scheduled job can no longer fetch a page, reach a host from its shell, or use the browser, the devbox or another skill that reaches outside Istota until you approve it in Settings, Scheduled jobs. A refusal raises one bell row per job, and the job's page lists what was refused with Add and Dismiss. Services your operator configured stay reachable.

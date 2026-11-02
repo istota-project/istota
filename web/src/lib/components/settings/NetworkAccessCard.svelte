@@ -384,7 +384,7 @@
   <form class="vstack" onsubmit={addHost} novalidate>
     <Field
       label="Add a host"
-      description="An exact name such as news.example.com. It also serves anyone else's account on a shared platform."
+      description="An exact name such as news.example.com, which also serves anyone else's account on a shared platform. An internal service takes host:port, such as 192.168.1.10:8080, if this deployment allows it."
       error={hostError}
     >
       <Input bind:value={host} monospace autocomplete="off" invalid={Boolean(hostError)} />
