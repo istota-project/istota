@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.48.0] - 2026-11-02
+
 Settings now has a page for your scheduled jobs: create and edit one with everything CRON.md holds, see its last run and error, run it now, and decide on its own page what it may reach. A new job asks before it goes outside Istota. Web chat has incognito rooms, which load none of your memory and add nothing to it. Istota can read a calendar from any provider through its iCal address, keep a calendar of its own that you subscribe to or get as invitations, and work in a folder shared from another Nextcloud. The file viewer shows CSV and TSV as a sortable table and HTML as a rendered page, and you can change briefings, shared blocks and group briefings from chat.
 
 Admins can give the bot a goal it works on over days in short runs, within a budget, and steer it from a new Assignments page. Models come from one catalogue, and OpenRouter, Anthropic and your own endpoints sit side by side as providers, chosen per room or job. Admins can open a user's live browser in the web app to finish a login. Health records medications, the Taxes page shows what your self-employment patterns match, tasks can run long commands in the background, and `istota-stack reclaim` shows what the stack left on your disk. This release is 471 commits, against 562 in 0.47.0 and 68 in 0.46.0; the rest is security work on the browser, the sandbox and mail from other people, and fixes across jobs, web chat and native-brain summaries.
@@ -3477,7 +3479,8 @@ Breaking changes this release:
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://github.com/istota-project/istota/compare/v0.47.0...main
+[Unreleased]: https://github.com/istota-project/istota/compare/v0.48.0...main
+[0.48.0]: https://github.com/istota-project/istota/releases/tag/v0.48.0
 [0.47.0]: https://github.com/istota-project/istota/releases/tag/v0.47.0
 [0.46.0]: https://github.com/istota-project/istota/releases/tag/v0.46.0
 [0.45.0]: https://github.com/istota-project/istota/releases/tag/v0.45.0
