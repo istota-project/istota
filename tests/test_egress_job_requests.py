@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from istota import db, scheduler
+from istota.commands import retry_task
 from istota.config import Config, SecurityConfig, load_config
 from istota.cron_loader import (
     CronJob,
@@ -280,6 +281,70 @@ def _occurrence(conn, cfg, **fields):
     created = _tick(conn, cfg)
     assert len(created) == 1
     return db.get_task(conn, created[0])
+
+
+class TestAOnceJobRunByHand:
+    """`run_scheduled_job_now` holds where the tick holds (#918): a manual run would
+    otherwise run limited, delete the job and take the request with it."""
+
+    def _run(self, conn, config):
+        job = db.get_user_scheduled_jobs(conn, USER)[0]
+        return scheduler.run_scheduled_job_now(conn, config, job)
+
+    def test_it_is_refused_while_waiting_and_keeps_its_rows(self, conn, config):
+        _due_once_job(conn, egress=("example.com",))
+        task_id, refusal = self._run(conn, config)
+        assert task_id is None
+        assert "waiting for you to approve" in refusal
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+        assert len(db.get_user_scheduled_jobs(conn, USER)) == 1
+        assert _asked(conn) == {"example.com"}
+
+    def test_it_uses_the_deployments_ceiling(self, conn, path, tmp_path):
+        _due_once_job(conn, reach="public")
+        task_id, refusal = self._run(conn, _config_at(path, tmp_path, "limited"))
+        assert task_id is None and "waiting for you to approve" in refusal
+        task_id, refusal = self._run(conn, _config_at(path, tmp_path, "public"))
+        assert task_id is not None and refusal == ""
+
+    def test_it_runs_once_approved(self, conn, config):
+        _due_once_job(conn, egress=("example.com",))
+        egress.add_grant(conn, USER, SUBJECT, "example.com", decided_via="web")
+        conn.commit()
+        task_id, refusal = self._run(conn, config)
+        assert task_id is not None and refusal == ""
+
+    def test_a_once_job_that_asks_for_nothing_still_runs(self, conn, config):
+        _due_once_job(conn)
+        task_id, refusal = self._run(conn, config)
+        assert task_id is not None and refusal == ""
+
+    def test_a_recurring_job_with_an_open_request_still_runs(self, conn, config):
+        _sync(conn, _job(egress=("example.com",)))
+        task_id, refusal = self._run(conn, config)
+        assert task_id is not None and refusal == ""
+
+    def test_a_disabled_job_is_refused_though_the_page_does_not_show_it_waiting(self, conn, config):
+        # A successful run would still delete it, so the hold outlasts the tick's interest.
+        _due_once_job(conn, egress=("example.com",))
+        db.disable_scheduled_job(conn, db.get_user_scheduled_jobs(conn, USER)[0].id)
+        assert not egress.describe_subject(conn, USER, SUBJECT)["job"]["waiting"]
+        task_id, refusal = self._run(conn, config)
+        assert task_id is None and "waiting for you to approve" in refusal
+
+    def test_retry_on_an_earlier_occurrence_is_refused_too(self, conn, config):
+        _due_once_job(conn, egress=("example.com",))
+        job = db.get_user_scheduled_jobs(conn, USER)[0]
+        old = db.create_task(
+            conn, prompt="check the news", user_id=USER, source_type="scheduled",
+            scheduled_job_id=job.id, queue="background",
+        )
+        db.update_task_status(conn, old, "failed", error="attempts exhausted")
+        out = retry_task(conn, config, USER, db.get_task(conn, old))
+        assert isinstance(out, str) and "waiting for you to approve" in out
+        assert conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE parent_task_id = ?", (old,),
+        ).fetchone()[0] == 0
 
 
 class TestTheReachField:
