@@ -1695,6 +1695,7 @@ def cmd_egress(args):
     approvals can be changed, since this is the host's terminal. Hostnames and job
     text are printed here for that operator.
     """
+    from .notifications.resolvers import egress_refused
     from .rooms import egress
 
     config = load_config(Path(args.config) if args.config else None)
@@ -1756,6 +1757,7 @@ def cmd_egress(args):
         except egress.EntryRefused as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
+        egress_refused.resolve_if_settled(conn, args.user, args.subject, by="cli")
         conn.commit()
     print("state=changed")
 

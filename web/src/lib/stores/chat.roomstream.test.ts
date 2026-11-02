@@ -590,6 +590,207 @@ describe('chat store — live room stream', () => {
     s.teardown();
   });
 
+  describe('a row landing during a live turn (#911)', () => {
+    async function liveTurn() {
+      vi.useFakeTimers();
+      api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+      api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+      const s = await freshSession();
+      await s.init();
+      queueEvents(
+        [
+          row(10, 't1', {
+            role: 'user',
+            text: 'question',
+            task_id: 96,
+            status: 'running',
+            created_at: '2026-07-26T10:00:00Z',
+          }),
+        ],
+        10,
+      );
+      await vi.advanceTimersByTimeAsync(2000);
+      return s;
+    }
+    const order = (s: Awaited<ReturnType<typeof freshSession>>) =>
+      get(s.messages).map((m) => `${m.role}:${m.taskId ?? '-'}:${m.text}`);
+
+    it('puts another task’s finished row above the placeholder, below the question', async () => {
+      const s = await liveTurn();
+      queueEvents(
+        [
+          row(11, 't1', {
+            text: 'scheduled result',
+            task_id: 90,
+            created_at: '2026-07-26T10:00:07Z',
+          }),
+        ],
+        11,
+      );
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(order(s)).toEqual([
+        'user:96:question',
+        'assistant:90:scheduled result',
+        'assistant:96:',
+      ]);
+      // The answer finishes in the placeholder, at the bottom: where a reload,
+      // which sorts on `created_at`, shows it.
+      queueEvents(
+        [row(12, 't1', { text: 'answer', task_id: 96, created_at: '2026-07-26T10:01:58Z' })],
+        12,
+      );
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(order(s)).toEqual([
+        'user:96:question',
+        'assistant:90:scheduled result',
+        'assistant:96:answer',
+      ]);
+      s.teardown();
+    });
+
+    it('lets the next row go below once the answer has arrived', async () => {
+      const s = await liveTurn();
+      queueEvents(
+        [row(11, 't1', { text: 'answer', task_id: 96, created_at: '2026-07-26T10:00:30Z' })],
+        11,
+      );
+      await vi.advanceTimersByTimeAsync(2000);
+      queueEvents(
+        [row(12, 't1', { role: 'system', text: 'alert', created_at: '2026-07-26T10:00:40Z' })],
+        12,
+      );
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(order(s)).toEqual(['user:96:question', 'assistant:96:answer', 'system:-:alert']);
+      s.teardown();
+    });
+
+    it('keeps order when the viewer is refused a co-member’s task stream', async () => {
+      api.getTaskEvents.mockRejectedValue(new Error('not your task'));
+      vi.useFakeTimers();
+      api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+      api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+      const s = await freshSession();
+      await s.init();
+      const carol = { author: 'Carol', author_id: 'carol' };
+      queueEvents(
+        [
+          row(10, 't1', {
+            role: 'user',
+            text: 'q1',
+            task_id: 97,
+            status: 'running',
+            created_at: '2026-07-26T10:00:00Z',
+            ...carol,
+          }),
+          row(11, 't1', { text: 'a1', task_id: 97, created_at: '2026-07-26T10:00:10Z' }),
+          row(12, 't1', {
+            role: 'user',
+            text: 'q2',
+            task_id: 98,
+            status: 'running',
+            created_at: '2026-07-26T10:00:30Z',
+            ...carol,
+          }),
+        ],
+        12,
+      );
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(order(s)).toEqual(['user:97:q1', 'assistant:97:a1', 'user:98:q2', 'assistant:98:']);
+      s.teardown();
+    });
+
+    it('keeps finished rows in order after a reload during the turn', async () => {
+      vi.useFakeTimers();
+      api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+      api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+      api.getRoomMessages.mockResolvedValue({
+        ...emptyHistory,
+        messages: [
+          row(10, 't1', {
+            role: 'user',
+            text: 'question',
+            task_id: 96,
+            status: 'running',
+            created_at: '2026-07-26T10:00:00Z',
+          }),
+          {
+            role: 'assistant',
+            text: '',
+            task_id: 96,
+            status: 'running',
+            created_at: '2026-07-26T10:00:00Z',
+          },
+          row(11, 't1', {
+            text: 'first result',
+            task_id: 90,
+            status: 'completed',
+            created_at: '2026-07-26T10:00:07Z',
+          }),
+        ],
+        active_tasks: [{ id: 96, status: 'running' }],
+      });
+      const s = await freshSession();
+      await s.init();
+      expect(order(s)).toEqual(['user:96:question', 'assistant:90:first result', 'assistant:96:']);
+      queueEvents(
+        [
+          row(12, 't1', {
+            text: 'second result',
+            task_id: 91,
+            status: 'completed',
+            created_at: '2026-07-26T10:00:20Z',
+          }),
+        ],
+        12,
+      );
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(order(s)).toEqual([
+        'user:96:question',
+        'assistant:90:first result',
+        'assistant:91:second result',
+        'assistant:96:',
+      ]);
+      s.teardown();
+    });
+
+    it('puts a notice with no task above the placeholder too', async () => {
+      const s = await liveTurn();
+      queueEvents(
+        [row(11, 't1', { role: 'system', text: 'alert', created_at: '2026-07-26T10:00:07Z' })],
+        11,
+      );
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(order(s)).toEqual(['user:96:question', 'system:-:alert', 'assistant:96:']);
+      s.teardown();
+    });
+
+    it('moves a second turn’s question up and leaves its placeholder below the first', async () => {
+      const s = await liveTurn();
+      queueEvents(
+        [
+          row(11, 't1', {
+            role: 'user',
+            text: 'second',
+            task_id: 97,
+            status: 'pending',
+            author: 'Carol',
+            author_id: 'carol',
+            created_at: '2026-07-26T10:00:07Z',
+          }),
+        ],
+        11,
+      );
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(order(s)).toEqual([
+        'user:96:question',
+        'user:97:second',
+        'assistant:96:',
+        'assistant:97:',
+      ]);
+      s.teardown();
+    });
+  });
+
   it('does not open a task stream for a settled turn', async () => {
     vi.useFakeTimers();
     api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });

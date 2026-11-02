@@ -10,10 +10,13 @@ replaced.
 
 from __future__ import annotations
 
+import argparse
+from unittest.mock import patch
+
 import pytest
 
-from istota import db
-from istota.config import Config
+from istota import db, scheduler
+from istota.config import Config, UserConfig
 from istota.cron_loader import CronJob, sync_cron_jobs_to_db
 from istota.executor import file_egress_refusals
 from istota.notifications import sources as notification_sources
@@ -249,13 +252,6 @@ class TestItCloses:
             conn.commit()
         assert _open(config) == []
 
-    def test_when_the_briefing_is_gone(self, config, sends):
-        with db.get_db(config.db_path) as conn:
-            egress.note_refused(conn, USER, "briefing:morning", HOSTILE_HOST)
-            conn.commit()
-            egress.raise_refused_bell(config, conn, USER, ["briefing:morning"])
-        assert _open(config) == []
-
     def test_when_the_assignment_is_closed(self, config, sends):
         with db.get_db(config.db_path) as conn:
             conn.execute(
@@ -288,11 +284,205 @@ class TestItCloses:
         assert _open(config) == []
 
 
+class TestTheBadgeIsRightWithNoPanelOpen:
+    """`counts()` runs no resolvers, so a removed subject has to close its own row."""
+
+    def _badge(self, config, user=USER):
+        with db.get_db(config.db_path) as conn:
+            return store.counts(conn, user, strict=True)["open"]
+
+    def _closed_by(self, config):
+        [row] = _rows(config)
+        with db.get_db(config.db_path) as conn:
+            by = conn.execute(
+                "SELECT resolved_by FROM notifications WHERE source = 'egress_refused'",
+            ).fetchone()[0]
+        return row["state"], by
+
+    def test_a_deleted_job_closes_its_row(self, config, sends):
+        task = _job_task(config)
+        _refuse(config, task, HOSTILE_HOST)
+        assert self._badge(config) == 1
+        with db.get_db(config.db_path) as conn:
+            db.delete_scheduled_job(conn, task.scheduled_job_id)
+            conn.commit()
+        assert self._badge(config) == 0
+        assert self._closed_by(config) == ("resolved", "subject_deleted")
+
+    def test_it_leaves_another_users_row_of_the_same_name(self, config, sends):
+        _refuse(config, _job_task(config), HOSTILE_HOST)
+        bob_task = _job_task(config, user="bob")
+        _refuse(config, bob_task, HOSTILE_HOST)
+        with db.get_db(config.db_path) as conn:
+            db.delete_scheduled_job(conn, bob_task.scheduled_job_id)
+            conn.commit()
+        assert self._badge(config, "bob") == 0
+        assert self._badge(config, USER) == 1
+
+    def test_a_new_job_under_an_old_name_starts_with_no_row(self, config, sends):
+        _refuse(config, _job_task(config), HOSTILE_HOST)
+        with db.get_db(config.db_path) as conn:
+            conn.execute("DELETE FROM scheduled_jobs")
+            job = CronJob(name=HOSTILE_NAME, cron="0 9 * * *", prompt="another")
+            sync_cron_jobs_to_db(conn, USER, [job], is_admin=False)
+            conn.commit()
+        assert self._badge(config) == 0
+
+    def test_that_job_asking_for_something_pushes_again(self, config, sends):
+        _refuse(config, _job_task(config), HOSTILE_HOST)
+        assert len(sends) == 1
+        with db.get_db(config.db_path) as conn:
+            conn.execute("DELETE FROM scheduled_jobs")
+            job = CronJob(name=HOSTILE_NAME, cron="0 9 * * *", prompt="another", reach="public")
+            subjects = sync_cron_jobs_to_db(conn, USER, [job], is_admin=False)
+            conn.commit()
+            egress.raise_refused_bell(config, conn, USER, subjects)
+        assert self._badge(config) == 1
+        assert len(sends) == 2
+
+    def test_a_refusal_filed_after_the_subject_went_raises_nothing(self, config, sends):
+        with db.get_db(config.db_path) as conn:
+            egress.note_refused(conn, USER, "cron:gone", HOSTILE_HOST)
+            conn.commit()
+            egress.raise_refused_bell(config, conn, USER, ["cron:gone"])
+        assert _rows(config) == []
+        assert sends == []
+
+    def _job_asking(self, config, **fields):
+        job = CronJob(name=HOSTILE_NAME, cron="0 9 * * *", prompt="p", **fields)
+        with db.get_db(config.db_path) as conn:
+            subjects = sync_cron_jobs_to_db(conn, USER, [job], is_admin=False)
+            egress.raise_refused_bell(config, conn, USER, subjects)
+        assert self._badge(config) == 1
+
+    def test_an_edit_that_withdraws_the_request_closes_its_row(self, config, sends):
+        self._job_asking(config, reach="public")
+        job = CronJob(name=HOSTILE_NAME, cron="0 9 * * *", prompt="p")
+        with db.get_db(config.db_path) as conn:
+            sync_cron_jobs_to_db(conn, USER, [job], is_admin=False)
+        assert self._badge(config) == 0
+
+    def test_a_declared_entry_taken_out_closes_its_row(self, config, sends):
+        self._job_asking(config, egress=("example.com",))
+        job = CronJob(name=HOSTILE_NAME, cron="0 9 * * *", prompt="p")
+        with db.get_db(config.db_path) as conn:
+            sync_cron_jobs_to_db(conn, USER, [job], is_admin=False)
+        assert self._badge(config) == 0
+
+    def test_a_ceiling_that_now_covers_the_request_closes_its_row(self, config, sends):
+        self._job_asking(config, reach="public")
+        job = CronJob(name=HOSTILE_NAME, cron="0 9 * * *", prompt="p", reach="public")
+        with db.get_db(config.db_path) as conn:
+            sync_cron_jobs_to_db(conn, USER, [job], is_admin=False, ceiling="public")
+        assert self._badge(config) == 0
+
+    def test_a_host_still_refused_keeps_its_row_through_an_edit(self, config, sends):
+        _refuse(config, _job_task(config), HOSTILE_HOST)
+        job = CronJob(name=HOSTILE_NAME, cron="0 9 * * *", prompt="read the news")
+        with db.get_db(config.db_path) as conn:
+            sync_cron_jobs_to_db(conn, USER, [job], is_admin=False)
+        assert self._badge(config) == 1
+
+    def test_the_cli_answering_the_last_refusal_closes_its_row(self, config, sends, tmp_path):
+        from istota.cli import cmd_egress
+
+        _refuse(config, _job_task(config), "news.example.com")
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(f'db_path = "{config.db_path}"\n')
+        cmd_egress(argparse.Namespace(
+            config=str(config_path), egress_action="grant", user=USER, subject=SUBJECT,
+            entry="news.example.com", json=False, digest=None,
+        ))
+        assert self._badge(config) == 0
+
+    def test_removing_a_user_takes_the_row(self, config, sends):
+        from istota import user_profiles
+
+        _refuse(config, _job_task(config), HOSTILE_HOST)
+        user_profiles.ensure_profile(config.db_path, USER)
+        assert user_profiles.delete_profile(config.db_path, USER) is True
+        assert _rows(config) == []
+
+    def _module_job_with_a_row(self, config):
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "INSERT INTO scheduled_jobs (user_id, name, cron_expression, command) "
+                "VALUES (?, '_module.feeds.prune', '0 3 * * *', 'true')",
+                (USER,),
+            )
+            egress.note_refused(conn, USER, "cron:_module.feeds.prune", HOSTILE_HOST)
+            conn.commit()
+            egress.raise_refused_bell(config, conn, USER, ["cron:_module.feeds.prune"])
+        assert self._badge(config) == 1
+
+    def _sync_modules(self, config, *, jobs):
+        with db.get_db(config.db_path) as conn:
+            scheduler._sync_module_jobs(
+                conn, config, module_name="feeds", module_prefix="_module.feeds.",
+                resolve_for_user=lambda user_id, cfg, conn=None: object(),
+                jobs_for_user=lambda ctx, user_id: jobs,
+                user_not_found_exc=LookupError,
+            )
+            conn.commit()
+
+    def _module_user(self, config):
+        return Config(
+            db_path=config.db_path, temp_dir=config.temp_dir, users={USER: UserConfig()},
+        )
+
+    def test_a_module_job_no_longer_wanted_closes_its_row(self, config, sends):
+        self._module_job_with_a_row(config)
+        module_config = self._module_user(config)
+        with patch.object(Config, "is_module_enabled", return_value=True):
+            self._sync_modules(module_config, jobs=[])
+        assert self._badge(config) == 0
+        with db.get_db(config.db_path) as conn:
+            assert egress.list_refused(conn, USER, "cron:_module.feeds.prune") == []
+
+    def test_a_disabled_modules_jobs_close_their_rows(self, config, sends):
+        self._module_job_with_a_row(config)
+        module_config = self._module_user(config)
+        with patch.object(Config, "is_module_enabled", return_value=False):
+            self._sync_modules(module_config, jobs=[])
+        assert self._badge(config) == 0
+        with db.get_db(config.db_path) as conn:
+            assert egress.list_refused(conn, USER, "cron:_module.feeds.prune") == []
+            assert conn.execute("SELECT COUNT(*) FROM scheduled_jobs").fetchone()[0] == 0
+
+
+class TestAModuleSyncMatchesItsPrefixLiterally:
+    """`_` is a LIKE wildcard, and a job name is the user's or a task's own."""
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_a_look_alike_job_survives(self, config, enabled):
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt) "
+                "VALUES (?, 'xmodule.feeds.mine', '0 9 * * *', 'p')",
+                (USER,),
+            )
+            conn.commit()
+            module_config = Config(
+                db_path=config.db_path, temp_dir=config.temp_dir, users={USER: UserConfig()},
+            )
+            with patch.object(Config, "is_module_enabled", return_value=enabled):
+                scheduler._sync_module_jobs(
+                    conn, module_config, module_name="feeds", module_prefix="_module.feeds.",
+                    resolve_for_user=lambda user_id, cfg, conn=None: object(),
+                    jobs_for_user=lambda ctx, user_id: [],
+                    user_not_found_exc=LookupError,
+                )
+            conn.commit()
+            names = [row[0] for row in conn.execute("SELECT name FROM scheduled_jobs")]
+        assert names == ["xmodule.feeds.mine"]
+
+
 class TestAFailureNeverDecides:
     def test_a_bell_failure_is_a_warning(self, config, monkeypatch, caplog):
         def broken(*args, **kwargs):
             raise RuntimeError("boom")
 
+        _job_task(config)
         monkeypatch.setattr("istota.notifications.store.write_notification", broken)
         with db.get_db(config.db_path) as conn:
             egress.raise_refused_bell(config, conn, USER, [SUBJECT])

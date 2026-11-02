@@ -10299,9 +10299,10 @@ def _chat_room_messages(
         if tid is not None:
             seen.add((r["role"], tid))
 
-    # 2. Tasks fill the gaps, oldest-first. The room runs tasks one at a time
-    #    (the per-channel claim gate serializes them), so in-flight ones stream
-    #    in this order. `active_task` is kept as the oldest for back-compat. An
+    # 2. Tasks fill the gaps, oldest-first. The room runs its foreground tasks
+    #    one at a time (the per-channel claim gate serializes them), so in-flight
+    #    ones stream in this order; a background task, such as a scheduled job,
+    #    can overlap them. `active_task` is kept as the oldest for back-compat. An
     #    older page (before set) carries terminal statuses only, so active_tasks
     #    stays empty there.
     active_tasks: list[dict] = []

@@ -139,6 +139,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A browser request refused for a private address now says so.** Over plain http, `browse render` and `browse get` returned `status: ok` with the refusal text as the page, which a scheduled check read as a successful fetch. They now return `status: error` with `private_address_refused`, also after a redirect. An https refusal still reads as `navigation_mismatch`, because Chrome does not report the reason.
+- The notification bell no longer counts a network access request for something that is gone. Deleting a refused job, including a one-time job removing itself after it runs, or closing an assignment now closes its request. The badge used to stay up until you opened the panel, which then showed nothing.
+- A scheduled result that lands in web chat while the bot is answering no longer merges with that answer or pushes it out of order. The result now appears above the answer in progress with its own header, and the answer finishes at the bottom, the same order a reload shows.
 - Updates no longer keep up to 2 GB of build cache from older builds. A successful update now drops all cache that build did not use, and the next update stays fast. Downloaded package files are also cleared when the host is provisioned.
 - `istota doctor` now warns when the disk holding the databases runs low, including on Nextcloud installs, where the workspace disk check does not apply. On a VM this disk also holds Docker's images and volumes.
 - A skill refused for want of network approval now answers with the JSON error a skill's caller reads (`status: error`, `reason: egress_not_approved`), rather than plain text that broke anything parsing `status`.

@@ -391,6 +391,14 @@ export const hasPriorProgress = (m: ChatMessage) => m.segments.some((s) => s.kin
  */
 export const isClientOnly = (m: ChatMessage) => isStranded(m) || isQueued(m);
 
+/**
+ * A turn whose answer has not been stored yet. `streaming` alone does not say
+ * so: an adopted answer leaves it on until the task stream settles, and a viewer
+ * refused that stream (a co-member's task) never sees it settle.
+ */
+export const isAwaitingAnswer = (m: ChatMessage) =>
+  m.role === 'assistant' && m.streaming && !m.storedAnswer && m.msgId == null;
+
 // ---- Helpers ----------------------------------------------------------------
 
 let _textSegSeq = 0;

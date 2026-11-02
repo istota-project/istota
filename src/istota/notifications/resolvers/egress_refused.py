@@ -12,8 +12,9 @@ There is no Allow here. A hostile page chooses the hostname, so a click on the b
 would be the weakest point in the design.
 
 Object-backed: open while the subject is live and has a refusal not dismissed. The
-resolver answers None past that, which closes the row, and a later refusal of
-something new reopens it.
+badge counts rows without running a resolver, so whatever ends the subject or settles
+its refusals closes the row (`close`, `resolve_if_settled`). The resolver answering
+None is the backstop, and a later refusal of something new reopens the row.
 """
 
 from __future__ import annotations
@@ -67,13 +68,19 @@ def write(conn: "sqlite3.Connection", user_id: str, subject: str) -> "RaiseResul
     )
 
 
+def close(conn: "sqlite3.Connection", user_id: str, subject: str, *, by: str) -> int:
+    """Close the row on the caller's transaction, for a subject that has ended."""
+    from istota.notifications.store import resolve_by_object
+
+    return resolve_by_object(conn, user_id, SOURCE, OBJECT_TYPE, subject, by=by)
+
+
 def resolve_if_settled(conn: "sqlite3.Connection", user_id: str, subject: str, *, by: str) -> None:
     """Close the row now, on the caller's transaction, once nothing is left to ask."""
-    from istota.notifications.store import resolve_by_object
     from istota.rooms import egress
 
     if not egress.has_open_refusal(conn, user_id, subject):
-        resolve_by_object(conn, user_id, SOURCE, OBJECT_TYPE, subject, by=by)
+        close(conn, user_id, subject, by=by)
 
 
 class EgressRefusedResolver:

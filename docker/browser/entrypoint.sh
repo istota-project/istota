@@ -68,6 +68,9 @@ fi
 as_browser websockify --web "$BROWSER_RUNTIME_DIR/web" --cert "$CERT_DIR/combined.pem" \
     --token-plugin TokenFile --token-source "$BROWSER_RUNTIME_DIR/vnc-tokens" 6080 &
 
+# Proves a refusal came from the proxy, so a site cannot send one (egress_proxy.py).
+export BROWSER_REFUSAL_MARK="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+
 # Chrome's only way out (egress_proxy.py). Restarted, not waited for: while it is
 # down Chrome reaches nothing.
 (

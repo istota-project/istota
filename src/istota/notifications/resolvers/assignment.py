@@ -39,7 +39,7 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from . import _common
+from . import _common, egress_refused
 
 if TYPE_CHECKING:
     import sqlite3
@@ -354,6 +354,10 @@ def settle(conn: "sqlite3.Connection", assignment_id: int) -> int:
                 closed += resolve_notification(
                     conn, assignment.user_id, SOURCE, row[0], by="system",
                 )
+        if assignment.state in _TERMINAL_STATES:
+            closed += egress_refused.close(
+                conn, assignment.user_id, f"assignment:{assignment.id}", by="system",
+            )
     except Exception:
         logger.warning("could not settle the notices of assignment %s", assignment_id, exc_info=True)
     return closed

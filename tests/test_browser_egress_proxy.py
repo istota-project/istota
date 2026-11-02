@@ -164,11 +164,13 @@ class TestRefused:
         assert _ask(port, _connect_request("mixed.example:443")).startswith(b"HTTP/1.1 403")
         assert connected == []
 
-    def test_plain_http_to_a_private_address_says_why(self, run_proxy):
+    def test_plain_http_to_a_private_address_says_why(self, run_proxy, monkeypatch):
+        monkeypatch.setenv("BROWSER_REFUSAL_MARK", "per-start-mark")
         port, connected = run_proxy({})
         reply = _ask(port, b"GET http://127.0.0.1:9223/health HTTP/1.1\r\nHost: 127.0.0.1:9223\r\n\r\n")
         assert reply.startswith(b"HTTP/1.1 403")
         assert b"private address" in reply
+        assert b"X-Istota-Refused: per-start-mark\r\n" in reply
         assert connected == []
 
     def test_each_request_resolves_again(self, run_proxy):

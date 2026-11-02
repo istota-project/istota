@@ -1769,6 +1769,8 @@ def _sync_job_approvals(
     An edit whose new text already holds its grant asks nothing: the owner kept the
     approval when saving on the page, which may land on either side of this tick.
     """
+    from istota.notifications.resolvers import egress_refused
+
     subject = egress.cron_subject(fj.name)
     digest = egress.job_digest(file_values)
     if existing is None:
@@ -1812,6 +1814,7 @@ def _sync_job_approvals(
         existing.egress_request if existing is not None else None,
         ask=runs_as == egress.REACH_LIMITED,
     )
+    egress_refused.resolve_if_settled(conn, user_id, subject, by="system")
     return bool(ask) or declared_new
 
 
