@@ -112,6 +112,7 @@ BAD_HOOK_VALUES: dict[str, object] = {
     "security.wallet_requests_per_task": -1,
     "security.wallet_fills_per_purchase": -1,
     "security.wallet_authorization_minutes": "soon",
+    "security.scheduled_job_max_unapproved": "sometimes",
     "brain.fallback": 5,
     "brain.source_type_overrides": "scheduled",
     "brain.room_selectable": "native",

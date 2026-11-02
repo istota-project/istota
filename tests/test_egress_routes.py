@@ -198,7 +198,7 @@ class TestAddingAndRemoving:
         assert row[0] == "web"
 
     @pytest.mark.parametrize("entry", [
-        "https://news.example.com", "news", "*.example.com", "192.0.2.1", "a.example:443",
+        "https://news.example.com", "news", "*.example.com", "192.0.2.1", "a.example:0",
         "news.example.com/path", "",
     ])
     async def test_a_malformed_host_is_refused_plainly(self, signed_client, config, entry):  # noqa: F811
@@ -234,6 +234,25 @@ class TestAddingAndRemoving:
             BASE + "/grants", json={"subject": SUBJECT, "entry": f"open:{digest}"}, headers=ORIGIN,
         )
         assert response.status_code == 400
+        assert _grants(config) == frozenset()
+
+    async def test_an_endpoint_the_operator_allows_can_be_granted(self, signed_client, config):  # noqa: F811
+        _job(config)
+        config.egress.private_hosts = ["192.168.1.10"]
+        response = await signed_client.post(
+            BASE + "/grants", json={"subject": SUBJECT, "entry": "192.168.1.10:8080"}, headers=ORIGIN,
+        )
+        assert response.status_code == 200, response.text
+        assert _grants(config) == {"192.168.1.10:8080"}
+
+    async def test_one_the_operator_does_not_says_so_beside_the_field(self, signed_client, config):  # noqa: F811
+        _job(config)
+        response = await signed_client.post(
+            BASE + "/grants", json={"subject": SUBJECT, "entry": "192.168.1.10:8080"}, headers=ORIGIN,
+        )
+        assert response.status_code == 400
+        assert "not one this deployment allows" in response.text
+        assert "192.168.1.10" not in response.text
         assert _grants(config) == frozenset()
 
     async def test_remove_takes_the_entry_off(self, signed_client, config):  # noqa: F811
@@ -638,6 +657,18 @@ class TestTheOperatorCli:
         assert stop.value.code == 1
         assert "Traceback" not in capsys.readouterr().err
         assert _grants(config) == frozenset()
+
+    def test_an_endpoint_follows_the_config_it_loads(self, config, capsys):  # noqa: F811
+        _job(config)
+        args = self._args(config, "grant", entry="192.168.1.10:8080")
+        with pytest.raises(SystemExit):
+            cmd_egress(args)
+        assert "not one this deployment allows" in capsys.readouterr().err
+        config.db_path.parent.joinpath("cfg.toml").write_text(
+            f'db_path = "{config.db_path}"\n[private_hosts]\n"192.168.1.10" = ["egress"]\n'
+        )
+        cmd_egress(args)
+        assert _grants(config) == {"192.168.1.10:8080"}
 
     def test_open_uses_the_rows_text_and_prints_it(self, config, capsys):  # noqa: F811
         digest = _job(config)

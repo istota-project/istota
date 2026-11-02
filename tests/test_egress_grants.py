@@ -60,7 +60,7 @@ class TestParseEntry:
         "localhost",
         "https://example.com",
         "example.com/path",
-        "example.com:443",
+        "example.com:0",
         "*.example.com",
         "example.*",
         "127.0.0.1",

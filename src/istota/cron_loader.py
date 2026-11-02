@@ -651,8 +651,9 @@ def _validate_egress(
 
     Names no entry in a log line: a hostname can carry data and this file is
     model-writable. `open:` and `public:` are refused because they name a job's
-    text, which has its own request. A skill its owner could not approve is
-    dropped, or a `once` job would wait on a button that refuses.
+    text, which has its own request. A skill its owner could not approve, or an
+    endpoint the deployment does not allow, is dropped, or a `once` job would wait
+    on a button that refuses.
     """
     if errors is None:
         errors = []
@@ -663,6 +664,7 @@ def _validate_egress(
     entries: dict[str, None] = {}
     kept: list[str] = []
     skills = None
+    endpoints = None
     for position, raw in enumerate(value, start=1):
         try:
             parsed = egress.parse_entry(raw)
@@ -670,7 +672,7 @@ def _validate_egress(
             logger.warning("Job '%s' (user %s): egress entry %d refused", name, user_id, position)
             errors.append(f"Job '{name}': egress entry {position}: {exc}")
             continue
-        if parsed.kind not in ("host", "skill"):
+        if parsed.kind not in (*egress.HOST_KINDS, "skill"):
             logger.warning("Job '%s' (user %s): egress entry %d refused", name, user_id, position)
             errors.append(
                 f"Job '{name}': egress entry {position} must be a host or skill:<name>; "
@@ -687,6 +689,19 @@ def _validate_egress(
                 errors.append(
                     f"Job '{name}': egress entry {position}: skill:{parsed.value} is not a "
                     "skill that needs approval and that you can use"
+                )
+                kept.append(parsed.text)
+                continue
+        if parsed.kind == "endpoint":
+            if endpoints is None:
+                endpoints = _allowed_endpoints(config, user_id)
+            if endpoints is not None and not endpoints.allows(parsed.value):
+                logger.warning(
+                    "Job '%s' (user %s): egress entry %d refused", name, user_id, position,
+                )
+                errors.append(
+                    f"Job '{name}': egress entry {position}: that address is not one this "
+                    "deployment allows"
                 )
                 kept.append(parsed.text)
                 continue
@@ -708,6 +723,19 @@ def _approvable_skills(config, user_id: str):
         return _loader.usable_external_skills(config, user_id)
     except Exception as exc:  # noqa: BLE001 - one job's field must not stop the file
         logger.warning("cron_egress_skills_unavailable: %s", type(exc).__name__)
+        return None
+
+
+def _allowed_endpoints(config, user_id: str):
+    """What this owner's deployment allows, or None when that cannot be read now, which
+    keeps the entry as `_approvable_skills` does. The task's own check still decides."""
+    from . import db
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            return egress.operator_endpoints(conn, config, user_id)
+    except Exception as exc:  # noqa: BLE001 - one job's field must not stop the file
+        logger.warning("cron_egress_endpoints_unavailable: %s", type(exc).__name__)
         return None
 
 
