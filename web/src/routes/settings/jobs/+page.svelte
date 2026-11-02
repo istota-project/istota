@@ -268,6 +268,7 @@
     ? undefined
     : 'Your scheduled jobs and what each may reach. Work you start yourself is not limited here.'}
   headerActions={selected || creating ? undefined : newJob}
+  viewKey={selectedId}
   {loading}
   {loadError}
   onRetry={retry}

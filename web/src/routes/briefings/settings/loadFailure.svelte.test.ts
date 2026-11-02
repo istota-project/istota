@@ -59,6 +59,7 @@ vi.mock('$lib/platform/native', () => ({
 import Page from './+page.svelte';
 import { page } from '../../../../vitest-stubs/app-state.svelte';
 import Harness from '$lib/currentUserHarness.test.svelte';
+import InShell from '../../settings/inShell.test.svelte';
 
 const person: User = {
   username: 'alice',
@@ -209,5 +210,21 @@ describe('briefings settings first load', () => {
     await screen.findByRole('checkbox', { name: /Send as HTML/ });
     expect(container.querySelector('.center-msg.error')).toBeNull();
     expect(screen.queryByText('Schedules unavailable')).toBeNull();
+  });
+});
+
+describe('moving between sections', () => {
+  it('starts the next section at the top of the pane', async () => {
+    page.url = new URL('http://localhost/istota/briefings/settings?name=morning');
+    render(InShell, {
+      component: Harness,
+      pageProps: { component: Page, user: person },
+    });
+    await waitFor(() => expect(api.getBriefings).toHaveBeenCalled());
+    const pane = document.querySelector('.shell-main') as HTMLElement;
+    pane.scrollTop = 400;
+
+    page.url = new URL('http://localhost/istota/briefings/settings?view=delivery');
+    await waitFor(() => expect(pane.scrollTop).toBe(0));
   });
 });

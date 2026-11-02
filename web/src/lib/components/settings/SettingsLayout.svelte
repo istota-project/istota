@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Alert, LoadState, PageHeader } from '@minot/ui';
+  import { Alert, LoadState, PageHeader, getShellScrollRoot } from '@minot/ui';
   import type { Snippet } from 'svelte';
 
   interface Props {
@@ -17,6 +17,9 @@
     onRetry?: () => void;
     info?: string;
     headerActions?: Snippet;
+    /** What the page is showing, for a page that swaps its whole view in place:
+     *  a change starts the new view at the top. */
+    viewKey?: unknown;
     children: Snippet;
   }
 
@@ -29,8 +32,18 @@
     onRetry,
     info = '',
     headerActions,
+    viewKey,
     children,
   }: Props = $props();
+
+  // The shell's pane outlives the page inside it, and SvelteKit's scroll reset only
+  // moves the window, so a section switch or a new view would keep the old offset.
+  const getScrollRoot = getShellScrollRoot();
+  $effect(() => {
+    void viewKey;
+    const root = getScrollRoot?.();
+    if (root) root.scrollTop = 0;
+  });
 </script>
 
 <div class="settings">
