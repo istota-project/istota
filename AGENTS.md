@@ -72,7 +72,7 @@ src/istota/
 │   ├── _tool_harness.py  # The shared tool-server start (native and CLI) and the CLI tool harness: the launcher config, hello and gate files, the pid reader with its descent check, the watcher; `tool_harness`, `HarnessHandle`, `set_cli_root`, `release_calls` → brain.md
 │   └── _web_fetch_mcp.py # The harness's second MCP server, `istota_web`: the daemon-side WebFetch for the CLI, unwrapped, env cleared, its policy from a 0600 file → brain.md
 ├── memory/               # search.py, knowledge_graph.py, sleep_cycle.py, curation/
-├── assignments/          # Goals Istota carries across days: store.py (row access), charter.py, validators.py, lifecycle.py (the one state writer), caller.py (user turn, wake or neither), budget.py (the ledger and ceilings), wakes.py (due wakes, the wake task, pickup, orphan reaping), scratchpad.py (snapshots, user edits, repair), prompt.py (the wake prompt) → assignments.md
+├── assignments/          # Goals Istota carries across days: store.py (row access), charter.py, validators.py, lifecycle.py (the one state writer), caller.py (user turn, wake or neither), budget.py (the ledger and ceilings), wakes.py (due wakes, the wake task, pickup, orphan reaping), scratchpad.py (snapshots, user edits, repair), prompt.py (the wake prompt), view.py (the board the CLI and the page share) → assignments.md
 ├── skills/               # Self-contained skills (skill.md + optional CLI)
 │   └── _group_access.py  # The one gate for `kv --group` and `memory --group`: current member and in the task's resolved group set → memory.md
 ├── session/              # The native brain's application layer: compaction, results, transcripts
@@ -195,7 +195,10 @@ src/istota/
 │   ├── map_basemap.py    # Where the map's background tiles come from → leaf-modules.md
 │   ├── admin_logs.py     # Read-only log sources for the admin UI: the rotating app log (+ rotation chain, paged reader, live tail) and `task_logs`
 │   ├── admin_config_view.py  # Redacted, sectioned rendering of the loaded Config for the admin UI (credentials never leave the process)
-│   ├── egress_routes.py  # Settings, Network access: a user's own approvals and refusals → sandbox.md
+│   ├── egress_routes.py  # A subject's network access for the job and assignment pages: a user's own approvals and refusals → sandbox.md
+│   ├── job_routes.py     # Settings, Scheduled jobs: a user's own jobs, the file merged with the table, and the writes → sandbox.md
+│   ├── assignment_routes.py  # Settings, Assignments: a user's own assignments, read and steered → assignments.md
+│   ├── settings_http.py  # What the per-user settings routers share: the refusal shape, the id parser, the config off the app → sandbox.md
 │   ├── chat_files.py     # Which paths `/chat/files` will serve, and the stored-answer check that rewrites links it would refuse
 │   └── nextcloud_sharing.py  # The user's calendars and address books, and their DAV shares to the bot, over the user's own token through `nextcloud_files.dav_request` → web-ui.md
 ├── maintenance/          # Backups, migrators, sweepers, host instrumentation → maintenance.md

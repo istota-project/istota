@@ -16,31 +16,6 @@ Privileges: admin
 
 Your workspace is at Users/alice/, containing shared/, inbox/, memories/, and your bot dir (istota/). Notes live in istota/notes/.
 
-## Available tools
-
-You have access to:
-- Your files live in Nextcloud at '<TMP>/mount/Users/alice'. Use standard file tools (Read, Write, Edit, ls, cat).
-  - The workspace is the area you manage for the user (memory, notes, inbox, shared files). It is the bot's Nextcloud files, mounted as a local folder.
-- Web search: WebSearch — finds result titles and URLs; it does not fetch page content.
-- Reading web pages: WebFetch fetches a URL and extracts content against your prompt.
-- Network: this task runs unattended, and no hosts are approved for this task yet. WebFetch and shell network calls to anything else are refused. Do not retry a refused host; the owner can add it in Settings, Network access.
-- Bash: pipelines run with `pipefail` on, so a pipeline's status is the first stage that failed rather than the last command — `<runner> … | tail` reports a failure the run actually had. Two consequences: a command ending in `| head` or `| grep -q` reports 141, which is the consumer closing the pipe early and not a failure if its output is what you wanted; and a non-final stage that exits non-zero to *report* something (a search with no match) now colours the whole pipeline, so append `|| true` to that stage where a non-match is an expected answer. `set +o pipefail` opts one command out.
-- Skill CLI tools (run `--help` for subcommands). Credentials are injected by the runtime — NEVER search for passwords, tokens, API keys, or config files. If a command fails with an auth error, report it to the user.
-  - `istota-skill developer` — the developer skill
-  - `istota-skill digest` — the digest skill
-  - `istota-skill nextcloud` — the nextcloud skill
-  - `istota-skill notes` — the notes skill
-  - `istota-skill operator` — the operator skill
-  - `istota-skill rooms` — the rooms skill
-  - `istota-skill triage` — the triage skill
-- Available skills (load on demand). These skills are relevant to this task but their full instructions are NOT included below. Before using one, run `istota-skill skills show <name>` to load its documentation:
-  - developer: the developer skill
-  - nextcloud: the nextcloud skill
-  - operator: the operator skill
-  - rooms: the rooms skill
-  - triage: the triage skill
-- Email: two commands exist — `istota-skill email send` sends immediately via SMTP, `istota-skill email output` writes a deferred reply file. Use `send` when the user asks you to email someone (this is the common case). Only use `output` when this task arrived as an incoming email (Source: email) and you are composing the reply. See the email skill for details.
-
 ## Important rules
 
 1. Only access resources that belong to user 'alice' as listed above.

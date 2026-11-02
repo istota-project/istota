@@ -2931,7 +2931,7 @@ class NativeBrain:
 
         return web_fetch_policy_for_task(
             getattr(self._config, "web_fetch", None), req.egress_hosts,
-            refusal_log=req.egress_log,
+            refusal_log=req.egress_log, subject=req.egress_subject,
         )
 
     def _convert_to_llm(self, messages: list[AgentMessage]) -> list[Message]:

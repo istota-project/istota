@@ -5,9 +5,10 @@ import {
   KeyRound,
   Plug,
   Wallet,
-  Globe,
+  CalendarClock,
   Bell,
   Smartphone,
+  Target,
 } from '@lucide/svelte';
 import type { LucideIcon } from '@lucide/svelte';
 
@@ -24,6 +25,8 @@ export interface UserSettingsSection {
   href: string;
   label: string;
   icon: LucideIcon;
+  /** Shown only where `/me` turns this feature on. Display only: the routes decide. */
+  feature?: 'assignments';
 }
 
 export const USER_SETTINGS_SECTIONS: UserSettingsSection[] = [
@@ -33,7 +36,8 @@ export const USER_SETTINGS_SECTIONS: UserSettingsSection[] = [
   { href: '/delivery', label: 'Delivery', icon: Send },
   { href: '/credentials', label: 'Credentials', icon: KeyRound },
   { href: '/wallet', label: 'Wallet', icon: Wallet },
-  { href: '/network', label: 'Network access', icon: Globe },
+  { href: '/jobs', label: 'Scheduled jobs', icon: CalendarClock },
+  { href: '/assignments', label: 'Assignments', icon: Target, feature: 'assignments' },
   { href: '/connections', label: 'Connections', icon: Plug },
   { href: '/devices', label: 'Devices', icon: Smartphone },
 ];

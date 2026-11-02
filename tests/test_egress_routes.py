@@ -1,4 +1,5 @@
-"""Settings > Network access, and `istota egress`, over the real store.
+"""The network access routes behind the job and assignment pages, and `istota egress`,
+over the real store.
 
 What matters: a route reaches only the signed-in user's subjects, every write needs
 an origin, an approval names the text the page showed and is refused once that text
@@ -19,6 +20,7 @@ from istota.rooms import egress
 from tests.test_web_app import app, client, config  # noqa: F401 -- shared fixtures
 
 BASE = "/istota/api/settings/network"
+JOBS = "/istota/api/settings/jobs"
 ORIGIN = {"Origin": "https://example.com"}
 SUBJECT = "cron:digest"
 HOST = "news.example.com"
@@ -73,9 +75,14 @@ def _open_rows(config, user="alice"):  # noqa: F811
 
 
 async def _listing(http):
-    response = await http.get(BASE)
+    """Each subject as the Scheduled jobs page reads it."""
+    response = await http.get(JOBS)
     assert response.status_code == 200, response.text
-    return response.json()
+    data = response.json()
+    return {
+        "subjects": [job["network"] for job in data["jobs"] if job["network"]],
+        "external_skills": data["external_skills"],
+    }
 
 
 def _subject(data, subject=SUBJECT):
@@ -83,8 +90,12 @@ def _subject(data, subject=SUBJECT):
 
 
 class TestTheListing:
+    async def test_the_old_listing_is_gone(self, signed_client):
+        """Both pages read a subject from their own listing, and nothing reads this."""
+        assert (await signed_client.get(BASE)).status_code in (404, 405)
+
     async def test_it_needs_a_session(self, client):  # noqa: F811
-        assert (await client.get(BASE)).status_code == 401
+        assert (await client.get(JOBS)).status_code == 401
 
     async def test_a_new_job_is_limited_with_nothing_approved(self, signed_client, config):  # noqa: F811
         digest = _job(config)
@@ -126,7 +137,7 @@ class TestTheListing:
     async def test_it_holds_only_the_callers_subjects(self, signed_client, config):  # noqa: F811
         _job(config, user="bob", name="bobs-secret-job")
         _refused(config, user="bob", subject="cron:bobs-secret-job", entry="bob.example.com")
-        response = await signed_client.get(BASE)
+        response = await signed_client.get(JOBS)
         assert "bob" not in response.text
 
     async def test_a_module_job_shows_only_with_a_refusal(self, signed_client, config):  # noqa: F811
@@ -162,7 +173,7 @@ class TestTheListing:
         assert "feeds" not in data["external_skills"]
 
     async def test_it_is_not_cached(self, signed_client):
-        response = await signed_client.get(BASE)
+        response = await signed_client.get(JOBS)
         assert "no-store" in response.headers["cache-control"]
 
 
@@ -307,6 +318,34 @@ async def _choose(http, access, digest, subject=SUBJECT):
         json={"subject": subject, "access": access, "digest": digest},
         headers=ORIGIN,
     )
+
+
+class TestRetiredSubjects:
+    """A personal briefing and TASKS.md hold nothing a person can grant, so the page
+    treats them as any other subject that does not exist."""
+
+    @pytest.fixture(autouse=True)
+    def _briefing(self, config):  # noqa: F811
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "INSERT INTO briefing_configs "
+                "(user_id, name, cron_expression, conversation_token, output, components) "
+                "VALUES ('alice', 'morning', '0 7 * * *', '', 'email', '{}')",
+            )
+            conn.commit()
+
+    async def test_the_page_does_not_list_a_briefing(self, signed_client, config):  # noqa: F811
+        _job(config)
+        data = await _listing(signed_client)
+        assert [item["subject"] for item in data["subjects"]] == [SUBJECT]
+
+    @pytest.mark.parametrize("subject", ["briefing:morning", "tasks-file"])
+    async def test_a_grant_is_the_same_404(self, signed_client, config, subject):  # noqa: F811
+        response = await signed_client.post(
+            BASE + "/grants", json={"subject": subject, "entry": HOST}, headers=ORIGIN,
+        )
+        assert response.status_code == 404
+        assert _grants(config, subject=subject) == frozenset()
 
 
 class TestChoosingAccess:
@@ -474,7 +513,13 @@ class TestChoosingAccess:
         assert _grants(config, subject="cron:_module.money") == frozenset()
 
     async def test_only_a_job_has_access_to_choose(self, signed_client, config):  # noqa: F811
-        response = await _choose(signed_client, "open", "0" * 64, subject=egress.TASKS_FILE_SUBJECT)
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "INSERT INTO assignments (id, user_id, slug, title, goal, budget, dir_relpath, state) "
+                "VALUES (7, 'alice', 's', 't', 'g', '{}', 'assignments/s', 'active')",
+            )
+            conn.commit()
+        response = await _choose(signed_client, "open", "0" * 64, subject="assignment:7")
         assert response.status_code == 404
 
     async def test_someone_elses_job_reads_as_absent(self, signed_client, config):  # noqa: F811
@@ -609,6 +654,12 @@ class TestTheOperatorCli:
     def test_an_unknown_subject_is_refused(self, config):  # noqa: F811
         with pytest.raises(SystemExit):
             cmd_egress(self._args(config, "grant", subject="cron:nothing"))
+
+    @pytest.mark.parametrize("subject", ["briefing:morning", "tasks-file"])
+    def test_a_retired_subject_is_refused(self, config, subject):  # noqa: F811
+        with pytest.raises(SystemExit):
+            cmd_egress(self._args(config, "grant", subject=subject))
+        assert _grants(config, subject=subject) == frozenset()
 
 
 class TestRunState:

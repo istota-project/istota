@@ -4,7 +4,7 @@
 // mentionProvider drives `@name`, fed by the open room's members from the page.
 
 import { fetchChatCommands, type ChatCommands, type SelectableBrain } from '$lib/api';
-import type { ModelChoices } from '../modelPicker';
+import { modelChoicesFrom, type ModelChoices } from '../modelPicker';
 import type { CompletionProvider, Suggestion } from './types';
 import { codeRanges, inCode, mentionText } from '$lib/mentions';
 import { latest } from '@minot/ui/ui/latest';
@@ -243,19 +243,7 @@ export async function getInheritedBrain(): Promise<SelectableBrain | null> {
  *  (ISSUE-417). Defensive about the shape, since an older server sends no
  *  `models`. */
 export async function getRoomModelChoices(roomId: number, brain?: string): Promise<ModelChoices> {
-  const catalogue = await loadRoomCatalogue(roomId, brain);
-  return {
-    aliases: Array.isArray(catalogue.model_aliases) ? catalogue.model_aliases : [],
-    models: Array.isArray(catalogue.models)
-      ? catalogue.models.filter((m) => typeof m?.ref === 'string')
-      : [],
-    defaultModel: catalogue.default_model ?? null,
-    roomModel: catalogue.room_model ?? null,
-    providers: Array.isArray(catalogue.providers)
-      ? catalogue.providers.filter((p) => typeof p?.id === 'string')
-      : [],
-    roomProvider: typeof catalogue.room_provider === 'string' ? catalogue.room_provider : null,
-  };
+  return modelChoicesFrom(await loadRoomCatalogue(roomId, brain));
 }
 
 /** Prefix matches first, then substring matches; input order preserved within

@@ -16,6 +16,7 @@
     Field,
     TextArea,
   } from '@minot/ui';
+  import { DeliveryFields } from '$lib/components/settings';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
   import { notifyError } from '@minot/ui/stores/notices';
   import { briefingSettingsUrl, channelLabel, derivedTitle, slugify } from './briefingSettings';
@@ -189,29 +190,14 @@
       />
     </Field>
   {:else}
-    <div class="field-row">
-      <Field label="Delivery">
-        <Select
-          value={personalOutput}
-          options={outputs.map((o) => ({ value: o, label: channelLabel(o) }))}
-          onValueChange={(v) => (output = v)}
-          ariaLabel="Delivery"
-          fullWidth
-        />
-      </Field>
-      {#if personalOutput === 'talk'}
-        <Field label="Talk room">
-          <Select
-            value={room}
-            options={rooms.map((r) => ({ value: r.token, label: r.name }))}
-            onValueChange={(v) => (room = v)}
-            placeholder="Choose a room"
-            ariaLabel="Talk room"
-            fullWidth
-          />
-        </Field>
-      {/if}
-    </div>
+    <DeliveryFields
+      {outputs}
+      talkRooms={rooms}
+      output={personalOutput}
+      {room}
+      onOutputChange={(v) => (output = v)}
+      onRoomChange={(v) => (room = v)}
+    />
   {/if}
   <div class="actions">
     <span class="caption"

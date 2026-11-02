@@ -34,6 +34,21 @@ EGRESS_LIMITED_VAR = "ISTOTA_EGRESS_LIMITED"
 #: grant a verb.
 EGRESS_LIMITED_REASON = "egress_limited"
 
+_APPROVAL_PAGES = {
+    "cron": "Settings, Scheduled jobs",
+    "assignment": "Settings, Assignments",
+}
+#: A TASKS.md line, or a task whose job row is gone, has nothing a grant could hang on.
+NOTHING_CAN_BE_APPROVED = "nothing can be approved for this task."
+
+
+def refusal_advice(subject: str | None) -> str:
+    """What a refused task is told about getting the host or skill approved. Fixed
+    text, chosen by the subject's kind, so no job name reaches a refusal."""
+    kind = subject.partition(":")[0] if subject else ""
+    page = _APPROVAL_PAGES.get(kind)
+    return f"the owner can add it in {page}." if page else NOTHING_CAN_BE_APPROVED
+
 
 def egress_limited() -> bool:
     return os.environ.get(EGRESS_LIMITED_VAR) == "1"

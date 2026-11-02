@@ -186,6 +186,8 @@ export interface User {
     sharing?: boolean;
     /** Open Cloud Mesh folder shares are received on this server. */
     sharing_ocm?: boolean;
+    /** Settings > Assignments; absent on a server that predates it. */
+    assignments?: boolean;
   };
   // null when the operator hasn't enabled encrypted token storage.
   nextcloud_token?: NextcloudTokenStatus | null;
@@ -5817,9 +5819,17 @@ export function isSafeActionPath(path: string | null | undefined): path is strin
 /** Whether an action path is answered by the server rather than by a page.
  *  `/chat/r/<room>[/t/<task>]` is the deep-link redirect (#624) and
  *  `/files/assignments/<id>` an assignment's folder (#848), `/files/shares` the
- *  index of shares from other servers (#849): the frontend is prerendered with
- *  no route there, so their links must make the client do a full navigation. */
-const SERVER_ACTION_PREFIXES = ['/chat/r/', '/files/assignments/', '/files/shares'];
+ *  index of shares from other servers (#849), `/settings/jobs/open/<id>` and
+ *  `/settings/assignments/open/<id>` a job's or an assignment's page: the frontend
+ *  is prerendered with no route there, so their links must make the client do a
+ *  full navigation. */
+const SERVER_ACTION_PREFIXES = [
+  '/chat/r/',
+  '/files/assignments/',
+  '/files/shares',
+  '/settings/jobs/open/',
+  '/settings/assignments/open/',
+];
 
 export function isServerActionPath(path: string | null | undefined): boolean {
   return isSafeActionPath(path) && SERVER_ACTION_PREFIXES.some((prefix) => path.startsWith(prefix));
@@ -5981,9 +5991,32 @@ async function credentialWrite<T = CredentialWriteResult>(
   prefix = '/settings/credentials',
   signal?: AbortSignal,
 ) {
+  return refusableWrite<T>(
+    `${prefix}${path}`,
+    method,
+    body,
+    (message, status, raw) =>
+      new CredentialWriteError(
+        message,
+        typeof raw.field === 'string' ? raw.field : null,
+        typeof raw.reason === 'string' ? raw.reason : null,
+      ),
+    signal,
+  );
+}
+
+/** A JSON write whose refusal is more than its message, so it is outside `apiFetch`,
+ *  which keeps only the message. `refuse` builds the caller's own error from the body. */
+async function refusableWrite<T>(
+  path: string,
+  method: string,
+  body: unknown,
+  refuse: (message: string, status: number | null, raw: Record<string, unknown>) => Error,
+  signal?: AbortSignal,
+): Promise<T> {
   let resp: Response;
   try {
-    resp = await fetch(`${base}/api${prefix}${path}`, {
+    resp = await fetch(`${base}/api${path}`, {
       method,
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
@@ -5992,10 +6025,7 @@ async function credentialWrite<T = CredentialWriteResult>(
     });
   } catch {
     noteTransport(false, 'unreachable');
-    throw new CredentialWriteError(
-      'Istota could not be reached. Check the list before trying again.',
-      null,
-    );
+    throw refuse('Istota could not be reached. Check the list before trying again.', null, {});
   }
   noteTransport(true);
   if (resp.status === 401) throw new AuthError();
@@ -6006,16 +6036,12 @@ async function credentialWrite<T = CredentialWriteResult>(
     payload = null;
   }
   if (!resp.ok) {
-    const raw = (payload ?? {}) as { detail?: unknown; field?: unknown; reason?: unknown };
+    const raw = (payload ?? {}) as Record<string, unknown>;
     const message =
       typeof raw.detail === 'string' && raw.detail.trim()
         ? raw.detail
         : `API error: ${resp.status}`;
-    throw new CredentialWriteError(
-      message,
-      typeof raw.field === 'string' ? raw.field : null,
-      typeof raw.reason === 'string' ? raw.reason : null,
-    );
+    throw refuse(message, resp.status, raw);
   }
   return payload as T;
 }
@@ -6222,12 +6248,152 @@ export interface NetworkSubject {
   waiting_on: string[];
   refused: NetworkRefusal[];
 }
-export interface NetworkAccess {
-  subjects: NetworkSubject[];
-  external_skills: string[];
+export interface ScheduledJobDefinition {
+  kind: 'prompt' | 'command';
+  prompt: string;
+  prompt_file: string;
+  command: string;
+  target: string;
+  room: string;
+  silent_unless_action: boolean;
+  skip_log_channel: boolean;
+  model: string;
+  effort: string;
+  brain: string;
+  provider: string;
+  publish_shared_kv: string;
+  publish_shared_kv_trusted: boolean;
+  egress: string[];
+  egress_kept: string[];
 }
-export function getNetworkAccess(): Promise<NetworkAccess> {
-  return apiFetch('/settings/network');
+export interface ScheduledJob {
+  /** Null while the job is in CRON.md and not yet in the table. */
+  id: number | null;
+  pending: boolean;
+  name: string;
+  cron: string;
+  enabled: boolean;
+  once: boolean;
+  state: 'running' | 'disabled' | 'suspended';
+  last_run_at: string | null;
+  last_success_at: string | null;
+  consecutive_failures: number;
+  last_error: string | null;
+  definition: ScheduledJobDefinition;
+  revision: string | null;
+  editable: boolean;
+  network: NetworkSubject | null;
+  /** Why the sync drops this job: in the file, and never to be a row. */
+  file_error?: string;
+}
+export interface ScheduledJobs {
+  jobs: ScheduledJob[];
+  file: { readable: boolean; errors: string[] };
+  options: {
+    outputs: string[];
+    rooms: { talk: TalkRoomOption[]; web: WebRoomOption[] };
+    /** Empty for a non-admin, and where the operator listed no kinds. */
+    selectable_brains: SelectableBrain[];
+    can_publish: boolean;
+  };
+  external_skills: string[];
+  timezone: string;
+}
+export function getScheduledJobs(): Promise<ScheduledJobs> {
+  return apiFetch('/settings/jobs');
+}
+/** What the model picker offers a job, on the lane it runs on. */
+export type JobModelChoices = Pick<
+  ChatCommands,
+  'model_aliases' | 'models' | 'default_model' | 'providers'
+>;
+/** `brain` and `provider` are what the form holds now, which the file may not yet. The
+ *  server ignores either from a non-admin, and a brain off the operator's list. */
+export function getJobModelChoices(brain: string, provider: string): Promise<JobModelChoices> {
+  const params = new URLSearchParams();
+  if (brain) params.set('brain', brain);
+  if (provider) params.set('provider', provider);
+  const query = params.toString();
+  return apiFetch(`/settings/jobs/model-choices${query ? `?${query}` : ''}`);
+}
+/** What a job's form sends. On an edit, only what changed: what is absent stays as the file has it. */
+export interface ScheduledJobFields {
+  name?: string;
+  cron?: string;
+  kind?: 'prompt' | 'command';
+  prompt?: string;
+  command?: string;
+  target?: string;
+  room?: string;
+  enabled?: boolean;
+  once?: boolean;
+  silent_unless_action?: boolean;
+  skip_log_channel?: boolean;
+  /** On create only: the Access control sets it afterwards. */
+  reach?: 'limited' | 'public' | 'full';
+  model?: string;
+  effort?: string;
+  brain?: string;
+  provider?: string;
+  publish_shared_kv?: string;
+  publish_shared_kv_trusted?: boolean;
+  egress?: string[];
+}
+/** A refused save. `field` names the field it belongs beside, `errors` are the parser's sentences. */
+export class JobSaveError extends Error {
+  readonly status: number | null;
+  readonly code: string | null;
+  readonly field: string | null;
+  readonly errors: string[];
+  constructor(
+    message: string,
+    status: number | null,
+    code: string | null,
+    field: string | null,
+    errors: string[],
+  ) {
+    super(message);
+    this.name = 'JobSaveError';
+    this.status = status;
+    this.code = code;
+    this.field = field;
+    this.errors = errors;
+  }
+}
+function jobWrite<T>(path: string, method: string, body: unknown): Promise<T> {
+  return refusableWrite<T>(`/settings/jobs${path}`, method, body, (message, status, raw) => {
+    const errors = Array.isArray(raw.errors)
+      ? raw.errors.filter((line): line is string => typeof line === 'string')
+      : [];
+    return new JobSaveError(
+      message,
+      status,
+      typeof raw.error === 'string' ? raw.error : null,
+      typeof raw.field === 'string' ? raw.field : null,
+      errors,
+    );
+  });
+}
+export function createScheduledJob(fields: ScheduledJobFields): Promise<{ applies: string }> {
+  return jobWrite('', 'POST', fields);
+}
+export function updateScheduledJob(
+  id: number,
+  fields: ScheduledJobFields & { revision: string; keep_access?: 'open' | 'public' },
+): Promise<{ applies: string; access_kept: boolean | null }> {
+  return jobWrite(`/${id}`, 'PUT', fields);
+}
+export function setScheduledJobEnabled(
+  id: number,
+  enabled: boolean,
+): Promise<{ outcome: AdminJobOutcome }> {
+  return apiFetch(`/settings/jobs/${id}/${enabled ? 'enable' : 'disable'}`, { method: 'POST' });
+}
+export function runScheduledJob(id: number): Promise<{ task_id: number }> {
+  return apiFetch(`/settings/jobs/${id}/run`, { method: 'POST' });
+}
+export function deleteScheduledJob(id: number): Promise<{ deleted: boolean; id: number }> {
+  return apiFetch(`/settings/jobs/${id}`, { method: 'DELETE' });
 }
 function postNetwork(path: string, body: Record<string, string>): Promise<{ ok: boolean }> {
   return apiFetch(`/settings/network${path}`, {
@@ -6251,6 +6417,146 @@ export function removeNetworkGrant(subject: string, entry: string): Promise<{ ok
 }
 export function dismissNetworkRefusal(subject: string, entry: string): Promise<{ ok: boolean }> {
   return postNetwork('/refused/dismiss', { subject, entry });
+}
+export type AssignmentState =
+  'draft' | 'sleeping' | 'active' | 'waiting' | 'paused' | 'completed' | 'abandoned';
+export interface AssignmentSummary {
+  id: number;
+  slug: string;
+  title: string;
+  state: AssignmentState;
+  /** A system pause's reason, or on an abandoned assignment the words the user gave. */
+  state_reason: string | null;
+  waiting_on: string[];
+  deadline: string | null;
+  next_wake_at: string | null;
+  cadence_minutes: number;
+  /** List-price dollars and wakes: a budget unit, not spend. */
+  budget: { max_cost_usd?: number; max_wakes?: number };
+  auto_complete: boolean;
+  model: string | null;
+  effort: string | null;
+  directory: string;
+  created_at: string;
+  activated_at: string | null;
+  closed_at: string | null;
+}
+export interface AssignmentLedger {
+  cost_usd: number;
+  wakes: number;
+  unmeasured_wakes: number;
+  billed_input_tokens: number;
+  output_tokens: number;
+  remaining: { cost_usd: number; wakes: number };
+  cheapest_wake_usd: number | null;
+}
+export interface AssignmentListRow extends AssignmentSummary {
+  open_handoffs: number;
+  ledger: AssignmentLedger;
+}
+export interface AssignmentItem {
+  id: number;
+  position: number;
+  kind: 'mechanical' | 'confirmed';
+  text: string;
+  status: 'open' | 'passing' | 'failing' | 'confirmed';
+  detail: string | null;
+  checked_at: string | null;
+}
+export interface AssignmentHandoff {
+  id: number;
+  text: string;
+  report: string | null;
+  due_at: string | null;
+  created_at: string;
+}
+export interface AssignmentWake {
+  seq: number;
+  fired_by: string;
+  started_at: string | null;
+  ended_at: string | null;
+  outcome: string | null;
+  cost_usd: number | null;
+  progress_signals: unknown;
+  summary: string | null;
+  summary_truncated: boolean;
+}
+export interface AssignmentDetail {
+  assignment: AssignmentSummary;
+  wake_due: string | null;
+  charter: string;
+  ledger: AssignmentLedger;
+  items: AssignmentItem[];
+  frozen: { id: number; name: string; value: string }[];
+  open_handoffs: AssignmentHandoff[];
+  wakes: AssignmentWake[];
+  notice: string;
+  goal: string;
+  autonomy: string;
+  completion_evidence: string | null;
+  /** Null on a finished assignment. */
+  network: NetworkSubject | null;
+  external_skills: string[];
+  chat_href: string;
+  folder_href: string;
+}
+export interface AssignmentTopUpResult {
+  /** Present when a budget pause stays in place after the top-up. */
+  still_paused?: {
+    remaining: { cost_usd: number; wakes: number };
+    cheapest_wake_usd: number | null;
+  };
+}
+export function getAssignments(): Promise<{ assignments: AssignmentListRow[] }> {
+  return apiFetch('/assignments');
+}
+export function getAssignment(id: number): Promise<AssignmentDetail> {
+  return apiFetch(`/assignments/${id}`);
+}
+function postAssignment<T>(id: number, verb: string, body?: Record<string, unknown>): Promise<T> {
+  return apiFetch(`/assignments/${id}/${verb}`, {
+    method: 'POST',
+    ...(body
+      ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+      : {}),
+  });
+}
+export function pauseAssignment(id: number): Promise<unknown> {
+  return postAssignment(id, 'pause');
+}
+export function resumeAssignment(id: number): Promise<unknown> {
+  return postAssignment(id, 'resume');
+}
+export function wakeAssignment(id: number): Promise<unknown> {
+  return postAssignment(id, 'wake');
+}
+export function abandonAssignment(id: number, reason: string): Promise<unknown> {
+  return postAssignment(id, 'abandon', { reason });
+}
+export function topUpAssignment(
+  id: number,
+  amount: { usd: number } | { wakes: number },
+): Promise<AssignmentTopUpResult> {
+  return postAssignment(id, 'topup', amount);
+}
+export function noteAssignment(id: number, text: string): Promise<unknown> {
+  return postAssignment(id, 'note', { text });
+}
+export function completeAssignment(id: number): Promise<unknown> {
+  return postAssignment(id, 'close', { completed: true });
+}
+export function sendBackAssignment(id: number, reject: string): Promise<unknown> {
+  return postAssignment(id, 'close', { reject });
+}
+export function confirmAssignmentItem(id: number, itemId: number): Promise<unknown> {
+  return postAssignment(id, `items/${itemId}/confirm`);
+}
+export function completeAssignmentHandoff(
+  id: number,
+  actionId: number,
+  report: string,
+): Promise<unknown> {
+  return postAssignment(id, `handoffs/${actionId}/done`, { report });
 }
 export function getWallet(): Promise<WalletSettings> {
   return apiFetch('/settings/wallet');

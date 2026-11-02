@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from istota.lib.egress_log import NOTHING_CAN_BE_APPROVED, refusal_advice
 from istota.sandbox.user_scope import is_within
 
 
@@ -58,6 +59,8 @@ class WebFetchPolicy:
     exact_hosts: tuple[str, ...] | None = None
     # Where a refusal by `exact_hosts` is recorded (`lib/egress_log.py`).
     refusal_log: str = ""
+    # The last words of a refusal by `exact_hosts`: where its owner can answer it.
+    refusal_advice: str = NOTHING_CAN_BE_APPROVED
 
 
 def web_fetch_policy_from_config(cfg) -> WebFetchPolicy | None:
@@ -87,7 +90,7 @@ def web_fetch_policy_from_config(cfg) -> WebFetchPolicy | None:
 
 
 def web_fetch_policy_for_task(
-    cfg, egress_hosts: frozenset[str] | None, *, refusal_log=None,
+    cfg, egress_hosts: frozenset[str] | None, *, refusal_log=None, subject: str | None = None,
 ) -> WebFetchPolicy | None:
     """One task's policy: the configured one, narrowed to `Reach.egress_hosts`.
 
@@ -100,6 +103,7 @@ def web_fetch_policy_for_task(
         policy,
         exact_hosts=tuple(sorted(egress_hosts)),
         refusal_log=str(refusal_log) if refusal_log else "",
+        refusal_advice=refusal_advice(subject),
     )
 
 

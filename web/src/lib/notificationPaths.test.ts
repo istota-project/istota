@@ -14,7 +14,7 @@
  * one the spec names, plus the two the anchor fields add.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { isSafeActionPath, runNotificationAction } from '$lib/api';
+import { isSafeActionPath, isServerActionPath, runNotificationAction } from '$lib/api';
 
 const HOSTILE = [
   // Traversal — the shape an opaque `object_id` makes reachable.
@@ -126,5 +126,17 @@ describe('runNotificationAction', () => {
     expect(init?.method).toBe('POST');
     // Same-origin only; the session cookie must not ride to a third party.
     expect(init?.credentials).toBe('same-origin');
+  });
+});
+
+describe('isServerActionPath', () => {
+  it('takes the job and assignment redirects as server navigations', () => {
+    expect(isServerActionPath('/settings/jobs/open/7')).toBe(true);
+    expect(isServerActionPath('/settings/assignments/open/7')).toBe(true);
+  });
+
+  it('leaves the pages themselves to the client', () => {
+    expect(isServerActionPath('/settings/jobs')).toBe(false);
+    expect(isServerActionPath('/settings/assignments')).toBe(false);
   });
 });

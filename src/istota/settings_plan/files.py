@@ -102,9 +102,9 @@ def _validate_cron(conn, config, user, job, path, previous=None):
     if job.provider and cron_loader.fj_provider_or_none(job, is_admin) is None:
         raise ExecutionError("validation_error", [*path, "provider"])
     if job.publish_shared_kv or job.publish_shared_kv_trusted:
-        from istota.scheduler import _parse_shared_kv_target
+        from istota.briefings.sources.kv import parse_shared_kv_target
 
-        namespace, key = _parse_shared_kv_target(job.publish_shared_kv)
+        namespace, key = parse_shared_kv_target(job.publish_shared_kv)
         if not config.is_shared_kv_writer(user) or not namespace or not key:
             raise ExecutionError("validation_error", [*path, "publish_shared_kv"])
     # A cron room may be a legacy Talk binding or a canonical room token. It

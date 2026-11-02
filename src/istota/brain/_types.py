@@ -291,6 +291,8 @@ class BrainRequest:
     egress_hosts: frozenset[str] | None = None
     # `egress-refused.jsonl` in the task's control directory.
     egress_log: Path | None = None
+    # `Reach.egress_subject`, for what the daemon-side WebFetch says when it refuses.
+    egress_subject: str | None = None
 
     # ClaudeCodeBrain-specific: optional fallback file the model writes its
     # final result to when stream parsing fails. Other brains may ignore.

@@ -178,10 +178,13 @@ class TestBuildCommandDisallowedTools:
         assert "--tools" not in cmd
         assert "--strict-mcp-config" not in cmd
 
-    def test_no_tool_flags_when_text_only(self, tmp_path):
-        # Empty allowed_tools => text-only invocation: no tool flags and no
-        # skip-permissions, so the call can't reach a tool.
+    def test_text_only_empties_the_tool_set(self, tmp_path):
+        # Empty allowed_tools => no built-ins, no MCP servers (the account's
+        # claude.ai connectors included) and no skip-permissions.
         cmd = ClaudeCodeBrain._build_command(self._req(tmp_path, []))
+        assert cmd[cmd.index("--tools") + 1] == ""
+        assert "--strict-mcp-config" in cmd
+        assert "--mcp-config" not in cmd
         assert "--allowedTools" not in cmd
         assert "--disallowedTools" not in cmd
         assert "--dangerously-skip-permissions" not in cmd

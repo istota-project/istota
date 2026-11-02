@@ -444,7 +444,7 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_user ON scheduled_jobs(user_id);
 -- existing job is brought in as `open` once.
 CREATE TABLE IF NOT EXISTS egress_grants (
     user_id TEXT NOT NULL,
-    subject TEXT NOT NULL,            -- 'cron:<name>', 'briefing:<name>', 'assignment:<id>', 'tasks-file'
+    subject TEXT NOT NULL,            -- 'cron:<name>', 'assignment:<id>'
     entry TEXT NOT NULL,              -- host, 'skill:<name>', 'public:<digest>', 'open:<digest>'
     decided_at TEXT NOT NULL DEFAULT (datetime('now')),
     decided_via TEXT NOT NULL,        -- 'web' | 'cli' | 'migration'

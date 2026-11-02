@@ -10590,7 +10590,7 @@ def check_egress_open_jobs(config: "Config", probe: bool) -> CheckResult:
             "public host",
             remedy=(
                 'Set scheduled_job_max_unapproved = "public" to keep a job that holds private '
-                "data to what its owner approved in Settings, Network access."
+                "data to what its owner approved in Settings, Scheduled jobs."
             ),
         )
     db_path = Path(config.db_path)
@@ -10622,7 +10622,7 @@ def check_egress_open_jobs(config: "Config", probe: bool) -> CheckResult:
         f"{count} scheduled job(s) run with full access, so instructions a job reads "
         f"can send private data to any public host{stopped_note}",
         remedy=(
-            "Each job's owner can narrow it in Settings, Network access, by removing "
+            "Each job's owner can narrow it in Settings, Scheduled jobs, by removing "
             "Full access and adding the hosts it needs."
         ),
     )

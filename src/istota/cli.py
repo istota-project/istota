@@ -5869,7 +5869,7 @@ def main():
         "grant", help="Approve a host, skill:<name>, open or public", allow_abbrev=False,
     )
     egress_grant.add_argument("user")
-    egress_grant.add_argument("subject", help="cron:<job>, briefing:<name>, assignment:<id> or tasks-file")
+    egress_grant.add_argument("subject", help="cron:<job> or assignment:<id>")
     egress_grant.add_argument("entry")
     egress_grant.add_argument("--digest", help="For open or public: refuse unless the job's text has this digest")
     egress_revoke = egress_subparsers.add_parser("revoke", help="Remove an entry", allow_abbrev=False)
