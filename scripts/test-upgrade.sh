@@ -9,7 +9,7 @@
 #   scripts/test-upgrade.sh                                   # from the floor, before a release
 #   scripts/test-upgrade.sh --shape volume                    # the same, named
 #   scripts/test-upgrade.sh --from v0.38.0                    # reproduce a specific report
-#   scripts/test-upgrade.sh --platform amd64                  # before a release
+#   scripts/test-upgrade.sh --platform amd64                  # on an amd64 host; not on a Mac, bwrap fails under emulation
 #   scripts/test-upgrade.sh --refresh                         # ignore the cached capture
 #   scripts/test-upgrade.sh -- -x -k drift                    # pytest args after `--`
 #

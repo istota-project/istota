@@ -154,8 +154,8 @@ When to run each:
 | Tier | Run it when | Cost |
 |---|---|---|
 | `scripts/test-linux.sh` | you touched the sandbox, the network proxy, the skill proxy, per-task cgroups, or anything else whose behaviour differs on Linux | minutes; the whole suite, in a container on macOS and on the host itself on Linux |
-| `-m image` | you touched either Dockerfile, the entrypoint or `istota setup`, or anything about where a binary lives | under a minute against a warm layer cache; builds both images natively |
-| `-m image --platform amd64` | before a release, on a non-amd64 machine | about ten minutes under emulation. It checks the deployment architecture rather than reaching tests nothing else runs — since ISSUE-280 the devbox image builds natively too, so its assertions are covered by a plain `-m image` |
+| `-m image` | you touched either Dockerfile, the entrypoint or `istota setup`, or anything about where a binary lives; and before a release | under a minute against a warm layer cache; builds both images natively |
+| `-m image --platform amd64` | on an amd64 host, when you need the deployment architecture itself; not on a Mac, where it takes over an hour under emulation and the sandbox tests fail because bwrap cannot start | a plain `-m image` before a release covers the same assertions natively, including the devbox image's |
 | `-m smoke` | you touched the developer skill's forge chain, the sandbox, the entrypoint, the compose stack, ntfy, feeds, or outbound email | about three minutes against a warm layer cache: one stack per profile rather than per test, so most of it is the six boots |
 | `-m full` | you touched `entrypoint.sh`, `provision-nc.sh`, `docker-compose.yml`, Talk, Nextcloud storage or shares, or anything about first-boot provisioning; and before a release | minutes, most of it one cold boot of six containers — 50 to 84 seconds to both healthchecks on warm base images, then the scenarios |
 | `-m testbed` | you touched inbound email — routing, threading, the confirmation gate, the DMARC canary — or anything in `skills/email/` | about half a minute, one small container |
