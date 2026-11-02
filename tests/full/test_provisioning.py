@@ -133,8 +133,11 @@ class TestFirstInstallProvisioning:
     def test_both_login_methods_are_enabled(self, provisioned, service):
         # The venv's interpreter, not `uv run`: web's root is read-only, and uv
         # wants to write its cache and lock before it runs anything.
+        # `Stack.exec` drops only for the daemon service; web's database belongs
+        # to uid 10001 too, and its exec starts as root with no capabilities.
+        drop = ["istota-drop"] if service == "web" else []
         result = provisioned.exec([
-            "/app/.venv/bin/python", "-c",
+            *drop, "/app/.venv/bin/python", "-c",
             "import json; from pathlib import Path; from istota.config import load_config; "
             "print(json.dumps(load_config(Path('/data/config/config.toml')).web.auth))",
         ], service=service)

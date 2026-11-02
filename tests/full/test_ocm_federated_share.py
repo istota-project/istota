@@ -24,7 +24,8 @@ spec, Stage 1, and its full-tier bullet), and this module's fixture sets each:
 - that certificate in the Nextcloud container's system store with
   `update-ca-certificates`, because the OCM calls ignore
   `occ security:certificates:import`;
-- `overwritehost` and `overwrite.cli.url` naming the in-network `nextcloud`,
+- `overwritehost` and `overwrite.cli.url` naming the in-network `nextcloud`, in a
+  config file that outranks the image's `OVERWRITEHOST` handling,
   so the owner's cloud id is `testuser@http://nextcloud`, which istota can
   reach, and which is therefore in this profile's `[sharing] private_hosts`.
 
@@ -73,6 +74,11 @@ pytestmark = [pytest.mark.full]
 SITE = "istota.test"
 FRONT_IMAGE = "nginx:alpine"
 OFFER_WAIT_SECONDS = 90
+OVERWRITE_CONFIG = "/var/www/html/config/zz-ocm-test.config.php"
+OVERWRITE_PHP = (
+    "<?php\n$CONFIG = ['overwritehost' => 'nextcloud', 'overwriteprotocol' => 'http', "
+    "'overwrite.cli.url' => 'http://nextcloud'];\n"
+)
 
 OCM_PROFILE = replace(
     profiles.FULL,
@@ -153,9 +159,14 @@ def ocm_stack(stacks, tmp_path_factory):
         assert trusted.returncode == 0, trusted.stderr
         nextcloud._occ("config:system:set", "allow_local_remote_servers",
                        "--value=true", "--type=boolean")
-        nextcloud._occ("config:system:set", "overwritehost", "--value=nextcloud")
-        nextcloud._occ("config:system:set", "overwrite.cli.url", "--value=http://nextcloud")
-        nextcloud._occ("config:system:set", "overwriteprotocol", "--value=http")
+        # A file rather than `occ config:system:set`: the image's reverse-proxy.php
+        # applies the fixture's OVERWRITEHOST after config.php, so a value set in
+        # config.php is silently outranked. Later files in config/ outrank it.
+        written = stack.exec(
+            ["sh", "-c", f"printf '%s' \"$0\" > {OVERWRITE_CONFIG}", OVERWRITE_PHP],
+            service="nextcloud", user="www-data",
+        )
+        assert written.returncode == 0, written.stderr
         # A failed discovery is cached in APCu for five minutes; a graceful
         # restart clears it, so a control run after a green one is not served
         # the green run's cache (or the reverse).
@@ -163,12 +174,11 @@ def ocm_stack(stacks, tmp_path_factory):
         yield stack
     finally:
         _docker("rm", "-f", front)
-        for key in ("overwritehost", "overwrite.cli.url", "overwriteprotocol",
-                    "allow_local_remote_servers"):
-            try:
-                nextcloud._occ("config:system:delete", key)
-            except Exception:  # noqa: BLE001 — teardown of a stack being released
-                pass
+        stack.exec(["rm", "-f", OVERWRITE_CONFIG], service="nextcloud", user="www-data")
+        try:
+            nextcloud._occ("config:system:delete", "allow_local_remote_servers")
+        except Exception:  # noqa: BLE001 — teardown of a stack being released
+            pass
         stacks.release(stack)
 
 
@@ -313,7 +323,8 @@ def _bash_task(stack, command: str, prompt: str) -> str:
         {"tool_calls": [{"id": "call-1", "name": "Bash", "arguments": {"command": command}}]},
         {"text": "done with the shared folder"},
     ])
-    task_id = stack.submit(prompt)
+    # A credential grant is in scope only for a task in a conversation.
+    task_id = stack.submit(prompt, conversation_token="ocm-share-room")
     stack.probe.wait_for_task(status="completed", task_id=task_id, timeout=TASK_WAIT_SECONDS)
     return stack.endpoint.transcript()
 

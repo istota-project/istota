@@ -1711,7 +1711,7 @@ class Stack:
             )
         return int(port)
 
-    def submit(self, prompt: str, *, user_id: str = "testuser") -> int:
+    def submit(self, prompt: str, *, user_id: str = "testuser", conversation_token: str = "") -> int:
         """Enqueue a task through the shipped CLI and return its id.
 
         Through `istota task` rather than by writing a row directly: inserting
@@ -1726,6 +1726,7 @@ class Stack:
             [
                 "uv", "run", "istota", "-c", CONTAINER_CONFIG,
                 "task", prompt, "-u", user_id, "--source-type", "cli",
+                *(["-t", conversation_token] if conversation_token else []),
             ],
             timeout=120,
         )
