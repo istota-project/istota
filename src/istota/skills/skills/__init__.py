@@ -43,7 +43,8 @@ def _load_context():
     skill_index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
     reach = _room_reach(config, user_id, skill_index)
     return skill_context(config, user_id, skill_index, reach.withheld,
-                         overlays_load=reach.standing_memory_loads)
+                         overlays_load=reach.standing_memory_loads,
+                         restricted=reach.restricted)
 
 
 def _overlay_out_of_reach(name: str, ctx: dict) -> bool:
@@ -55,7 +56,7 @@ def _overlay_out_of_reach(name: str, ctx: dict) -> bool:
 
 def skill_context(
     config, user_id: str, skill_index, withheld: frozenset[str],
-    *, overlays_load: bool | None = None,
+    *, overlays_load: bool | None = None, restricted: bool | None = None,
 ) -> dict:
     """The context `_guard_skill` reads, for a caller whose withheld set is known.
 
@@ -87,6 +88,7 @@ def skill_context(
         "skill_index": skill_index,
         "disabled": disabled,
         "withheld": withheld,
+        "restricted": bool(withheld) if restricted is None else restricted,
         "overlays_load": "memory" not in withheld if overlays_load is None else overlays_load,
         "is_admin": is_admin,
         "enabled_features": enabled_features,
@@ -106,7 +108,9 @@ def _room_reach(config, user_id: str, skill_index):
     `room_scopes.reach_for_task` the executor calls, since only the row says
     the turn is a guest's, a correspondent's or nobody asked it in the room.
     The posture comes from the row alone, so the environment's set can never
-    open an overlay by itself.
+    open an overlay by itself. An `external` skill in the environment's set
+    counts as an egress loss, not a restriction, when a row was read: the set
+    is from the task's start, so it still names a skill granted since.
 
     No task (an operator's shell, the heartbeat's id 0) reads the environment
     alone. A database that cannot be read withholds every scope.
@@ -121,6 +125,7 @@ def _room_reach(config, user_id: str, skill_index):
     raw = os.environ.get(WITHHELD_SCOPES_VAR, "")
     withheld = {part.strip() for part in raw.split(",") if part.strip()}
     author = "own"
+    egress_withheld: frozenset[str] = frozenset()
     try:
         task_id = int(os.environ.get("ISTOTA_TASK_ID", "") or 0)
     except ValueError:
@@ -137,11 +142,15 @@ def _room_reach(config, user_id: str, skill_index):
                     conn, task, skill_index=skill_index,
                     own_addresses=own_addresses(config, user_id),
                 )
+                egress_withheld = reach.egress_withheld | (
+                    withheld & room_scopes._external_skills(skill_index)
+                )
                 withheld |= reach.withheld
                 author = reach.author
     except Exception:
         withheld |= room_scopes.all_scopes(skill_index)
-    return room_scopes.Reach(frozenset(withheld), author)
+        egress_withheld = frozenset()
+    return room_scopes.Reach(frozenset(withheld), author, egress_withheld=egress_withheld)
 
 
 def _guard_skill(name: str, ctx: dict) -> str | None:

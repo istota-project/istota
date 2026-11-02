@@ -105,7 +105,7 @@ Errors are `{"status": "error", "error": "<code>", "message": "..."}`:
 | `feature_disabled` | The `assignment` skill is disabled for this user or unavailable on this deployment |
 | `not_admin` | The caller is not an admin |
 | `not_found` | No such assignment, item, hand-off or frozen commitment for this user |
-| `not_a_user_turn` | The verb needs your own turn in your private chat, or the task has scopes withheld |
+| `not_a_user_turn` | The verb needs your own turn in your private chat, or the task has restricted reach (a guest's or correspondent's turn, a public job, or a task nobody asked in a shared room) |
 | `not_a_wake` | A wake-only verb from something other than a running wake |
 | `wrong_assignment` | A wake named another assignment |
 | `bad_state` | Not allowed in the current state, which the error names |
