@@ -354,6 +354,18 @@ class TestTheViewLinksToTheChatAndTheFolder:
         _end(config, made)
         return a
 
+    def test_the_fixed_text_names_the_page_as_well_as_chat(self, config, notify):
+        self._handed_off(config)
+        view = _view(config, "handoff")
+        assert "on its page or in chat" in view.body
+        assert "on its page or in chat" in view.status_note
+        for line in (
+            notices._STATUS_NOTE["completion"],
+            notices._PAUSE_TEXT["budget"],
+        ):
+            assert "on its page or in chat" in line
+            assert "\n" not in line
+
     def test_a_handoff_opens_the_activation_room_and_the_folder(self, config, notify):
         a = self._handed_off(config)
         with db.get_db(config.db_path) as conn:

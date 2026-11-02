@@ -82,13 +82,13 @@ _SEVERITY = {
     "closed": "success",
 }
 _STATUS_NOTE = {
-    "handoff": "Clears when you report the step done in chat.",
+    "handoff": "Clears when you report the step done, on its page or in chat.",
     "paused": "Clears when the assignment is resumed, topped up or abandoned.",
-    "completion": "Clears when you confirm the completion in chat, or say what is missing.",
+    "completion": "Clears when you confirm the completion or say what is missing, on its page or in chat.",
     "budget_low": "Clears when the budget is topped up or the assignment ends.",
 }
 _PAUSE_TEXT = {
-    "budget": "Its budget is spent, or too little is left for another wake. Top it up in chat to resume it, or close or abandon it.",
+    "budget": "Its budget is spent, or too little is left for another wake. Top it up on its page or in chat to resume it, or close or abandon it.",
     "stalled": "Its last wakes made no progress that could be measured. Resume it, change the charter, or abandon it.",
     "failures": "Its last wakes failed. Resume it once the cause is fixed, or abandon it.",
     "thrash": "It kept failing on the same step. Resume it with a note on another approach, or abandon it.",
@@ -152,7 +152,7 @@ def _handoff_body(conn, assignment, ref) -> str:
         lines.append(f"Report back: {_flat(action.report_spec)}")
     if action.due_at:
         lines.append(f"Due: {action.due_at[:10]}")
-    lines.append("Say so in chat when it is done.")
+    lines.append("Say so on its page or in chat when it is done.")
     return "\n".join(lines)
 
 
@@ -240,7 +240,7 @@ def body_for(conn: "sqlite3.Connection", assignment, kind: str, ref: object = No
     if kind == "completion":
         return _completion_body(conn, assignment)
     if kind == "budget_low":
-        return _spend_line(conn, assignment) + " Top it up in chat if it needs more."
+        return _spend_line(conn, assignment) + " Top it up on its page or in chat if it needs more."
     if kind == "report":
         return _report_body(conn, assignment, ref)
     if kind == "closed":
