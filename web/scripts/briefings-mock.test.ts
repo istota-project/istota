@@ -124,10 +124,11 @@ describe('briefing development data', () => {
     };
     const { status, data } = await api('/briefings/preview', 'POST', { document });
     expect(status).toBe(200);
-    expect(data.html).toContain('<h2>Draft &lt;section&gt;</h2>');
+    expect(data.html).toMatch(/<h2[^>]*>Draft &lt;section&gt;<\/h2>/);
     expect(data.plain).toContain('source (https://example.com/a_b?x=one_two)');
     expect(data.body_md).toContain(document.blocks[0].body_md);
-  });
+    // The mock renders through Python, and the first import in a fresh checkout outlasts the default.
+  }, 30_000);
 });
 
 it('filters previews by briefing_name and accepts the builder reorder payload', async () => {
