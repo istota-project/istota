@@ -7,9 +7,10 @@ real task rows, so the caller classification is the one the proxy would see.
 from __future__ import annotations
 
 import json
+import os
 import pytest
 
-from istota import db
+from istota import db, user_profiles
 from istota.assignments import budget, caller, lifecycle, store
 from istota.config import UserConfig
 from istota.skills._loader import build_disclosure_index, load_skill_index
@@ -189,6 +190,91 @@ class TestRefusals:
 
     def test_withheld_scopes(self, config, turn, monkeypatch):
         monkeypatch.setenv("ISTOTA_WITHHELD_SCOPES", "files,memory")
+        code, out = _run("list")
+        assert (code, out["error"]) == (1, "not_a_user_turn")
+
+    def _wake(self, config, turn, monkeypatch) -> int:
+        assignment_id = _create()["assignment"]["id"]
+        with db.get_db(config.db_path) as conn:
+            task_id = _running(conn, user_id="alice", source_type="assignment",
+                               assignment_id=assignment_id, max_attempts=1)
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+        return assignment_id
+
+    def _reach(self, config):
+        from istota.rooms import scopes as room_scopes
+        from istota.skills.skills import _load_context
+
+        index = _load_context()["skill_index"]
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, int(os.environ["ISTOTA_TASK_ID"]))
+            return room_scopes.reach_for_task(conn, task, skill_index=index), index
+
+    def test_a_limited_wake_is_not_refused_for_the_skills_it_lost(self, config, turn, monkeypatch):
+        assignment_id = self._wake(config, turn, monkeypatch)
+        reach, _ = self._reach(config)
+        assert reach.egress_withheld, "the wake must be a limited one for this to mean anything"
+        assert not reach.restricted
+        # What the proxy puts in the CLI's environment.
+        monkeypatch.setenv("ISTOTA_WITHHELD_SCOPES", ",".join(sorted(reach.withheld)))
+        assert _run("show", str(assignment_id))[0] == 0
+
+    def test_a_skill_granted_during_the_wake_does_not_refuse_it(self, config, turn, monkeypatch):
+        from istota.rooms import egress
+
+        assignment_id = self._wake(config, turn, monkeypatch)
+        reach, index = self._reach(config)
+        monkeypatch.setenv("ISTOTA_WITHHELD_SCOPES", ",".join(sorted(reach.withheld)))
+        granted = sorted(reach.egress_withheld)[0]
+        with db.get_db(config.db_path) as conn:
+            egress.add_grant(conn, "alice", f"assignment:{assignment_id}", f"skill:{granted}",
+                             decided_via="web", skill_index=index)
+        assert _run("show", str(assignment_id))[0] == 0
+
+    def test_a_guests_turn(self, config, turn, monkeypatch):
+        with db.get_db(config.db_path) as conn:
+            conn.execute("UPDATE tasks SET guest_participant_id = 1 WHERE id = ?", (turn,))
+        code, out = _run("list")
+        assert code == 1
+        assert out["error"] == "feature_disabled"
+
+    def test_a_correspondents_turn(self, config, monkeypatch):
+        with db.get_db(config.db_path) as conn:
+            task_id = _running(conn, user_id="alice", source_type="email")
+            db.mark_email_processed(conn, "uid-them", "stranger@example.com", user_id="alice",
+                                    task_id=task_id, routing_method="plus_address")
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+        assert self._reach(config)[0].author == "correspondent"
+        code, out = _run("list")
+        assert code == 1
+        assert out["error"] == "feature_disabled"
+
+    def test_a_task_nobody_asked_in_a_shared_room(self, config, monkeypatch):
+        with db.get_db(config.db_path) as conn:
+            room = db.create_web_chat_room(conn, "alice", "Family")
+            db.add_room_member(conn, room.token, "bob")
+            task_id = _running(conn, user_id="alice", source_type="subtask",
+                               conversation_token=room.token)
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+        assert self._reach(config)[0].restricted
+        code, out = _run("list")
+        assert code == 1
+        assert out["error"] == "feature_disabled"
+
+    def test_a_correspondents_turn_allowed_the_skill(self, config, monkeypatch):
+        # The one posture that passes `_guard_skill`, so only the restricted read refuses it.
+        user_profiles.ensure_profile(config.db_path, "alice")
+        user_profiles.update_profile(config.db_path, "alice", correspondent_scopes=["assignment"])
+        with db.get_db(config.db_path) as conn:
+            task_id = _running(conn, user_id="alice", source_type="email")
+            db.mark_email_processed(conn, "uid-them", "stranger@example.com", user_id="alice",
+                                    task_id=task_id, routing_method="plus_address")
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(task_id))
+        code, out = _run("list")
+        assert (code, out["error"]) == (1, "not_a_user_turn")
+
+    def test_the_environment_alone_with_no_task_still_refuses(self, config, monkeypatch):
+        monkeypatch.setenv("ISTOTA_WITHHELD_SCOPES", "browse")
         code, out = _run("list")
         assert (code, out["error"]) == (1, "not_a_user_turn")
 

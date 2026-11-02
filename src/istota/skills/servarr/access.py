@@ -11,7 +11,7 @@ refuse the CLI too.
 Three tiers. ``admin`` (`config.is_admin`) gets every verb and flag;
 ``requester`` (listed in ``[servarr] requesters``) may ask for things and see
 what is happening to them; ``none`` gets nothing. The room caps the tier: a
-turn with any withheld scope gets ``none``, and a turn in an email-thread room
+task with restricted reach gets ``none``, and a turn in an email-thread room
 gets ``requester`` at most and may not pass ``--confirmed``, because an
 admitted correspondent's mail runs as the host.
 
@@ -101,7 +101,7 @@ def resolve_tier(ctx: dict, connection=INSTALL) -> Tier:
     refusal = _guard_skill("servarr", ctx)
     if refusal:
         return Tier(NONE, f"The servarr skill is not available here: {refusal}.")
-    if ctx["withheld"]:
+    if ctx["restricted"]:
         return Tier(NONE, "The arr stack is not reachable from this turn: the room "
                           "withholds the caller's scopes (a guest's turn, or a task "
                           "nobody asked in a shared room).")

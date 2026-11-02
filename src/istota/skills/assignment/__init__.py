@@ -1,7 +1,7 @@
 """`istota-skill assignment`: the user's verbs on an assignment, and the read verbs.
 
 Runs host-side through the skill proxy. Every verb refuses unless the caller
-is an admin (`admin_only` gates only selection), and refuses while the calling task has scopes withheld, since
+is an admin (`admin_only` gates only selection), and refuses while the calling task has restricted reach, since
 an assignment is the user's personal record. Every assignment lookup is scoped
 by `ISTOTA_USER_ID`, so another user's id or slug answers `not_found`.
 
@@ -115,9 +115,9 @@ def _gate() -> dict:
     refusal = _guard_skill("assignment", ctx)
     if refusal:
         raise Refusal("feature_disabled", refusal)
-    if ctx["withheld"]:
+    if ctx["restricted"]:
         raise Refusal(
-            "not_a_user_turn", "assignments are unavailable in a task that runs with scopes withheld",
+            "not_a_user_turn", "assignments are unavailable in a task that runs with restricted reach",
         )
     return ctx
 

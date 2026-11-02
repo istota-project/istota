@@ -102,7 +102,18 @@ def test_withheld_scope_refuses_even_admin(usage_env, monkeypatch):
     monkeypatch.setenv("ISTOTA_WITHHELD_SCOPES", "memory")
     code, result = _run()
     assert code == 1
-    assert "withheld" in result["error"]
+    assert "restricted reach" in result["error"]
+
+
+def test_a_limited_task_reads_its_owners_usage(usage_env, monkeypatch):
+    with db.get_db(usage_env.db_path) as conn:
+        task = db.create_task(conn, user_id="alice", source_type="doctor", prompt="usage")
+    monkeypatch.setenv("ISTOTA_TASK_ID", str(task))
+    # The one external skill it lost, as the proxy names it.
+    monkeypatch.setenv("ISTOTA_WITHHELD_SCOPES", "browse")
+    code, result = _run()
+    assert code == 0, result
+    assert "groups" in result
 
 
 @pytest.mark.parametrize("source,guest,allowed", [("web", False, True),
