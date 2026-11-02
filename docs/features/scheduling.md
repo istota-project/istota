@@ -73,7 +73,7 @@ All job types go through the same task queue with retry logic, `!stop` support, 
 | `room` | no | The room the job runs in, as its canonical token. A room made in web chat has a `web-…` token, not a Talk one — see "Delivering into a room" below |
 | `target` | no | `talk`, `email`, `ntfy`, `both`, `all`, or a `surface:channel` / comma-list descriptor. See "Delivering into a room" below |
 | `enabled` | no | `false` parks a job without deleting it (default `true`) |
-| `once` | no | Auto-delete after successful execution |
+| `once` | no | Auto-delete after successful execution. If you edit the prompt, command or skill while a run is in flight, or turn `once` off, the job stays. An entry that no longer loads stays in the file for you to fix |
 | `silent_unless_action` | no | Suppress output unless response has `ACTION:` prefix |
 | `skip_log_channel` | no | Suppress log channel output for frequent jobs |
 | `model` | no | Model override for this job (e.g. `"general"` for the active brain's current general model) |
@@ -193,7 +193,7 @@ Three things lift a suspension:
 
 ## Catch-up suppression after outages
 
-When the daemon returns from a long outage, it does not fire every missed cron instance at once. If a job or briefing's computed next fire time is more than `cron_max_staleness_minutes` (default 60) behind the current time, the fire is skipped and `last_run_at` is bumped so the schedule resumes from the next future fire. This prevents a thundering herd of stale tasks from flooding the queue after a restart.
+When the daemon returns from a long outage, it does not fire every missed cron instance at once. If a job or briefing's computed next fire time is more than `cron_max_staleness_minutes` (default 60) behind the current time, the fire is skipped and `last_run_at` is bumped so the schedule resumes from the next future fire. This prevents a thundering herd of stale tasks from flooding the queue after a restart. A `once` job that has not run yet is exempt and fires late, since skipping its slot could leave it waiting a year.
 
 Set `cron_max_staleness_minutes = 0` in `[scheduler]` to restore the prior behavior (unconditional catch-up of all missed fires).
 

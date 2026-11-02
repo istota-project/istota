@@ -8154,7 +8154,7 @@ once = true
     ):
         """The row goes whatever the file does, so a lost removal must be said.
 
-        The table row is deleted before CRON.md is touched, so if the file
+        The table row is deleted whatever the writer answers, so if the file
         keeps the job the next sync re-inserts it and a `once = true` job runs
         a second time. Until ISSUE-369 `remove_job_from_cron_md` returned an
         unconditional True and could not report a refused write at all, so
@@ -8354,10 +8354,10 @@ once = true
                 scheduled_job_id=job_id,
             )
 
-        real_remove = cron_loader.remove_job_from_cron_md
+        real_remove = cron_loader.remove_finished_once_job
         probe: dict[str, object] = {}
 
-        def probe_then_remove(cfg, user_id, job_name):
+        def probe_then_remove(cfg, user_id, job_name, ran_text):
             other = sqlite3.connect(db_path, timeout=0.2)
             try:
                 other.execute("UPDATE tasks SET priority = priority")
@@ -8368,10 +8368,10 @@ once = true
                 probe["error"] = str(exc)
             finally:
                 other.close()
-            return real_remove(cfg, user_id, job_name)
+            return real_remove(cfg, user_id, job_name, ran_text)
 
         with patch.object(
-            cron_loader, "remove_job_from_cron_md", probe_then_remove
+            cron_loader, "remove_finished_once_job", probe_then_remove
         ):
             process_one_task(config)
 
@@ -8387,19 +8387,13 @@ once = true
     def test_a_cron_sync_racing_the_cron_md_write_does_not_resurrect_the_job(
         self, mock_arun, mock_exec, db_path, tmp_path
     ):
-        """Hoisting the file write out of the transaction opened a window
-        (ISSUE-387 review).
+        """A sync can land between the commit and the CRON.md write (ISSUE-387).
 
-        The row delete and the CRON.md write are no longer one step. In
-        between, `_sync_cron_files` runs on the main loop with CRON.md as the
-        authority — it reads a file that still names the job and re-inserts
-        the row this task just deleted, which is the `once = true` job that
-        runs a second time. Before the hoist the order was the other way
-        round, so a sync in the window saw a row the file did not name and
-        deleted it. The flush deletes the row again to close it.
-
-        The sync is simulated by re-inserting the row from inside the patched
-        writer, which is exactly where the real one would land.
+        `_sync_cron_files` runs on the main loop with CRON.md as the authority,
+        and at that instant the file still names the job. The flush deletes the
+        row by name after the write, so what the sync left does not run a second
+        time. The sync runs from inside the patched writer, which is exactly where
+        the real one would land.
         """
         from istota import cron_loader
         from istota.storage import get_user_cron_path
@@ -8440,22 +8434,18 @@ once = true
                 scheduled_job_id=job_id,
             )
 
-        real_remove = cron_loader.remove_job_from_cron_md
+        real_remove = cron_loader.remove_finished_once_job
 
-        def resync_then_remove(cfg, user_id, job_name):
-            # Stand in for `_sync_cron_files` on the main loop: CRON.md still
-            # names the job at this instant, so the sync re-inserts it.
+        def resync_then_remove(cfg, user_id, job_name, ran_text):
             with db.get_db(db_path) as conn:
-                conn.execute(
-                    """INSERT INTO scheduled_jobs
-                       (user_id, name, cron_expression, prompt, enabled, once)
-                       VALUES (?, ?, ?, ?, 1, 1)""",
-                    (user_id, job_name, "0 15 20 2 *", "One-time reminder"),
+                cron_loader.sync_cron_jobs_to_db(
+                    conn, user_id, cron_loader.load_cron_jobs(cfg, user_id),
                 )
-            return real_remove(cfg, user_id, job_name)
+                assert db.get_scheduled_job_by_name(conn, user_id, job_name) is not None
+            return real_remove(cfg, user_id, job_name, ran_text)
 
         with patch.object(
-            cron_loader, "remove_job_from_cron_md", resync_then_remove
+            cron_loader, "remove_finished_once_job", resync_then_remove
         ):
             process_one_task(config)
 
@@ -8520,10 +8510,10 @@ once = true
                 scheduled_job_id=job_id,
             )
 
-        def boom(cfg, user_id, job_name):
+        def boom(cfg, user_id, job_name, ran_text):
             raise OSError(107, "Transport endpoint is not connected")
 
-        with patch.object(cron_loader, "remove_job_from_cron_md", boom):
+        with patch.object(cron_loader, "remove_finished_once_job", boom):
             result = process_one_task(config)
 
         # The task still finished: it returned normally and is `completed`.
