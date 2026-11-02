@@ -4632,9 +4632,11 @@ class TestWritesKeepEntriesThatDidNotLoad:
         with db.get_db(db_path) as conn:
             sync_cron_jobs_to_db(conn, "alice", load_cron_document(config, "alice").jobs)
             row = db.get_scheduled_job_by_name(conn, "alice", "reminder")
-            db.delete_scheduled_job(conn, row.id)
+            ran_text = egress.task_text_digest(
+                {c: getattr(row, c) for c in egress.TASK_TEXT_COLUMNS},
+            )
 
-        scheduler._remove_once_job_from_cron_md(config, "alice", "reminder")
+        scheduler._remove_once_job_from_cron_md(config, "alice", "reminder", ran_text)
 
         doc = load_cron_document(config, "alice")
         with db.get_db(db_path) as conn:

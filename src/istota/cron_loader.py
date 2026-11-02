@@ -1435,7 +1435,8 @@ FILE_OWNED_COLUMNS = frozenset({
 
 #: Columns the daemon authors. The sync never writes one *from the file*, and
 #: the three exceptions are resets rather than values out of CRON.md: the
-#: ``last_run_at`` reset on a cron-expression change, the
+#: ``last_run_at`` reset on a cron-expression change or on an edit to what a
+#: ``once`` job dispatches, the
 #: ``auto_disabled_at`` / ``consecutive_failures`` / ``last_error`` reset on a
 #: change to what the job dispatches, and the ``disabled_at`` reset when the
 #: file says ``enabled = true``, which retracts a ``!cron disable``. All three
@@ -1713,6 +1714,14 @@ def sync_cron_jobs_to_db(
             values = list(updates.values())
             if cron_changed:
                 set_parts.append("last_run_at = datetime('now')")
+            elif fj.once and existing.once and egress.task_text_digest(
+                file_values,
+            ) != egress.task_text_digest(
+                {column: getattr(existing, column) for column in egress.TASK_TEXT_COLUMNS},
+            ):
+                # The slot an earlier occurrence spent was not spent on this text. A
+                # dated `once` job would otherwise next come due in a year (#920).
+                set_parts.append("last_run_at = NULL")
             if file_values["enabled"]:
                 # The third deliberate exception, and a reset rather than a
                 # value out of the file: `disabled_at` records that the
@@ -2047,14 +2056,14 @@ def remove_job_from_cron_md(config, user_id: str, job_name: str) -> bool:
     again (ISSUE-917).
 
     **False, never an exception**, on every path. ``_write_cron_md`` states
-    that contract and explains why it matters; this is the name the scheduler
-    calls, so it is restated here. The two steps in front of that call hold it
-    too: ``load_cron_document`` returns ``None`` for every case the file cannot
-    be read as one (its reader, ``storage.read_user_config_file``, logs a
-    refusal rather than raising), and filtering the job list cannot fail. The
-    scheduler's once-job caller runs after its write transaction has committed
-    (ISSUE-387), so an exception here would leave the task recorded complete
-    and its answer undelivered.
+    that contract and explains why it matters; ``remove_finished_once_job``
+    shares this path, so it is restated here. The two steps in front of that
+    call hold it too: ``load_cron_document`` returns ``None`` for every case the
+    file cannot be read as one (its reader, ``storage.read_user_config_file``,
+    logs a refusal rather than raising), and filtering the job list cannot fail.
+    The scheduler's once-job caller runs after its write transaction has
+    committed (ISSUE-387), so an exception here would leave the task recorded
+    complete and its answer undelivered.
     """
     if not config.has_workspace:
         return False
@@ -2134,11 +2143,66 @@ def _document_names_job(doc: "CronDocument", job_name: str) -> bool:
     )
 
 
+ONCE_REMOVED = "removed"
+ONCE_EDITED = "edited"
+ONCE_NOT_REMOVED = "not_removed"
+
+
+def remove_finished_once_job(config, user_id: str, job_name: str, ran_text: str) -> str:
+    """Take a finished ``once`` job out of CRON.md, unless its entry has been edited.
+
+    ``ran_text`` is ``egress.task_text_digest`` of what the occurrence ran. An entry
+    saying anything else is text that has not run, including an edit no sync has read
+    yet, so it stays and the answer is ``ONCE_EDITED``. So does an entry no longer
+    marked ``once``. A `prompt_file` that could not be read this tick says nothing about
+    an edit, and is removed as before. Compared under the file's lock, so a save that
+    takes the lock cannot land between this and the write.
+
+    An entry that names the job and did not load is left in the file and answers
+    ``ONCE_NOT_REMOVED``, because it may be an edit nobody can read yet. The row still
+    goes: the sync would hold it unchanged where the entry is the file's only job, and
+    it would fire the text that just ran at every slot until the file is fixed.
+
+    ``ONCE_REMOVED``, or ``ONCE_NOT_REMOVED`` wherever ``remove_job_from_cron_md`` says
+    False, and it holds the same never-raises contract.
+    """
+    if not config.has_workspace:
+        return ONCE_NOT_REMOVED
+    outcome = ONCE_NOT_REMOVED
+
+    def locked() -> bool:
+        nonlocal outcome
+        doc = load_cron_document(config, user_id)
+        if doc is None:
+            return False
+        job = next((j for j in doc.jobs if j.name == job_name), None)
+        if job is None:
+            if job_name not in doc.unread_names and _document_names_job(doc, job_name):
+                return False
+        else:
+            cmd_val, skill_val, skill_args_val = _resolve_job_dispatch(job)
+            if not job.once or egress.task_text_digest(_file_owned_values(
+                job, cmd_val, skill_val, skill_args_val, None,
+            )) != ran_text:
+                outcome = ONCE_EDITED
+                return False
+        if _remove_job_from_document(config, user_id, job_name, doc):
+            outcome = ONCE_REMOVED
+            return True
+        return False
+
+    _with_cron_md_lock(config, user_id, locked)
+    return outcome
+
+
 def _remove_job_locked(config, user_id: str, job_name: str) -> bool:
     doc = load_cron_document(config, user_id)
     if doc is None:
         return False
+    return _remove_job_from_document(config, user_id, job_name, doc)
 
+
+def _remove_job_from_document(config, user_id: str, job_name: str, doc: "CronDocument") -> bool:
     if document_hides_jobs(doc):
         block = _cut_job_from_block(doc.block or "", job_name)
         if block is None:
