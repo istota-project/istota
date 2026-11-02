@@ -356,6 +356,7 @@ class TestTheImage:
 
         monkeypatch.setattr(compose_support, "up", fake_up)
         monkeypatch.setattr(compose_support, "down", lambda *a, **k: None)
+        monkeypatch.setattr(compose_support, "taken_subnets", lambda: [])
         control = dataclasses.replace(profiles.BASE, image="istota-test/no-forge:pinned")
 
         with pytest.raises(compose_support.StackError):

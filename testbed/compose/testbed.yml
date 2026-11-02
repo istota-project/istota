@@ -89,5 +89,19 @@ services:
     build: !reset null
     image: ${ISTOTA_TEST_BROWSER_IMAGE:-istota-test/browser:unbuilt}
 
+# Small subnets from the testbed's own range, because a default Docker daemon's
+# address pools run out at about fifteen stacks (ISSUE-919). `network_env` picks
+# them per stack. Added by this file rather than the shipped one, which an
+# operator's VM boots with its own browser subnet.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${ISTOTA_TESTBED_DEFAULT_SUBNET:?the harness must export ISTOTA_TESTBED_DEFAULT_SUBNET}
+  browser:
+    ipam:
+      config:
+        - subnet: ${ISTOTA_TESTBED_BROWSER_SUBNET:?the harness must export ISTOTA_TESTBED_BROWSER_SUBNET}
+
 volumes:
   testbed_mount:

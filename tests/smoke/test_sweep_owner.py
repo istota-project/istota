@@ -25,6 +25,7 @@ services:
   idle:
     image: busybox:1.37
     command: ["sleep", "600"]
+    network_mode: none
 """
 
 
@@ -38,10 +39,7 @@ def _projects(prefix: str) -> set[str]:
 
 
 def _up(compose_file, project: str) -> None:
-    subprocess.run(
-        ["docker", "compose", "-f", str(compose_file), "--project-name", project, "up", "--detach"],
-        capture_output=True, text=True, timeout=120, check=True,
-    )
+    stack_support.up(stack_support.compose_args(compose_file, project=project), build=False)
 
 
 def test_the_sweep_removes_only_stacks_with_no_live_owner(tmp_path):

@@ -53,9 +53,10 @@ PASSWORD = "a long enough passphrase for the smoke tier"
 SERVER_TIMEOUT = 180
 BUILD_TIMEOUT = 3600
 
-#: The setup run's overlay: the checkout's image, and the shipped `rslave`
-#: workspace bind replaced as `testbed.yml` replaces it. Not `testbed.yml`
-#: itself, whose config bind is read-only: setup is the one run that writes it.
+#: The setup run's overlay: the checkout's image, the shipped `rslave` workspace
+#: bind replaced as `testbed.yml` replaces it, and the same pinned networks, which
+#: this run creates and the stack after it joins. Not `testbed.yml` itself, whose
+#: config bind is read-only: setup is the one run that writes it.
 SETUP_OVERLAY = (
     "services:\n"
     "  daemon:\n"
@@ -63,6 +64,15 @@ SETUP_OVERLAY = (
     "    image: ${ISTOTA_TEST_IMAGE}\n"
     "    volumes:\n"
     "      - testbed_mount:/mnt/shared\n"
+    "networks:\n"
+    "  default:\n"
+    "    ipam:\n"
+    "      config:\n"
+    "        - subnet: ${ISTOTA_TESTBED_DEFAULT_SUBNET:?}\n"
+    "  browser:\n"
+    "    ipam:\n"
+    "      config:\n"
+    "        - subnet: ${ISTOTA_TESTBED_BROWSER_SUBNET:?}\n"
     "volumes:\n"
     "  testbed_mount:\n"
 )
@@ -152,6 +162,11 @@ def web_booted(pytestconfig, tmp_path_factory):
             [*lean_args, "build", "daemon"], capture_output=True, text=True, timeout=BUILD_TIMEOUT,
         )
         assert built.returncode == 0, (built.stdout + built.stderr)[-4000:]
+
+        # After the build, which can outlast another session's boots. There is
+        # no retry here: the setup run below is what creates the networks.
+        environment.update(stack_support.network_env(stack_support.taken_subnets()))
+        stack_support.write_env_file(env_file, environment)
 
         port = stack_support.reserve_port()
         log = scratch / "setup.log"

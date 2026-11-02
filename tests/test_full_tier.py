@@ -467,6 +467,7 @@ class TestTheProcessEnvironmentGuard:
             "ISTOTA_SECRETS_DIR", "ISTOTA_WEB_OAUTH2_CLIENT_ID",
             "ISTOTA_WEB_OAUTH2_CLIENT_SECRET", "ISTOTA_TEST_IMAGE",
             "ISTOTA_TESTBED_COMPOSE_DIR", "ISTOTA_TEST_BROWSER_IMAGE",
+            "ISTOTA_TESTBED_DEFAULT_SUBNET", "ISTOTA_TESTBED_BROWSER_SUBNET",
         }
         assert {k for k in environment if k.startswith("ISTOTA_")} == allowed
 
