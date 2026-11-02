@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { Alert, LoadState, PageHeader, getShellScrollRoot } from '@minot/ui';
+  import { Alert, LoadState, PageHeader } from '@minot/ui';
+  import ShellScrollReset from '$lib/components/ShellScrollReset.svelte';
   import type { Snippet } from 'svelte';
 
   interface Props {
@@ -35,16 +36,9 @@
     viewKey,
     children,
   }: Props = $props();
-
-  // The shell's pane outlives the page inside it, and SvelteKit's scroll reset only
-  // moves the window, so a section switch or a new view would keep the old offset.
-  const getScrollRoot = getShellScrollRoot();
-  $effect(() => {
-    void viewKey;
-    const root = getScrollRoot?.();
-    if (root) root.scrollTop = 0;
-  });
 </script>
+
+<ShellScrollReset key={viewKey} />
 
 <div class="settings">
   <!-- Held back while loading, and on a failed load, so the pane shows nothing

@@ -4,6 +4,7 @@
   import { page } from '$app/state';
   import { Icon, AppShell, ShellHeader, HeaderNav, Chip } from '@minot/ui';
   import { HeaderSave } from '$lib/components/settings';
+  import ShellScrollReset from '$lib/components/ShellScrollReset.svelte';
   import { Cog } from '@lucide/svelte';
 
   let { children } = $props();
@@ -68,6 +69,7 @@
     </ShellHeader>
   {/snippet}
 
+  <ShellScrollReset key={page.url.pathname} />
   <div class="content-frame health-frame">
     {@render children()}
   </div>

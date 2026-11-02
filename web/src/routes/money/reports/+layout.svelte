@@ -64,11 +64,15 @@
      rides on the same element as the cap, mirroring `content-frame
      health-frame` — its rules are whole-selector `:global()`, so they match
      from wherever it sits. -->
-<div class="money-section-body">
-  <div class="content-frame report-frame">
-    {@render children()}
+<!-- Keyed because this is the scroller, not the shell's pane, and it outlives
+     the page inside it: a new element starts the next sub-route at the top. -->
+{#key page.url.pathname}
+  <div class="money-section-body">
+    <div class="content-frame report-frame">
+      {@render children()}
+    </div>
   </div>
-</div>
+{/key}
 
 <style>
   /* The `.reports-header` modifier on the header above is what reorders the

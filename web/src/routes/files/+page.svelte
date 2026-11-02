@@ -75,6 +75,7 @@
   } from '$lib/components/workspace/indexViews';
   import { getCurrentUser } from '$lib/userContext';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
+  import ShellScrollReset from '$lib/components/ShellScrollReset.svelte';
   import { loadSetting, saveSetting } from '@minot/ui/ui/persisted';
   import { latest } from '@minot/ui/ui/latest';
   import PlaceList from '$lib/components/workspace/PlaceList.svelte';
@@ -689,6 +690,7 @@
       </Sidebar>
     {/if}
   {/snippet}
+  <ShellScrollReset key={`${selected?.view}:${selected?.place}:${selected?.path}`} />
   {#if pinError}
     <div class="pin-error" role="alert">
       <span class="form-error">{pinError}</span>{#if pinError === 'Could not load pins.'}<Button

@@ -346,3 +346,12 @@ it('refreshes authoritative counts after a named bulk read, retaining other name
   });
   expect(bulkRequests()).toHaveLength(1);
 });
+
+it('starts another briefing at the top of the pane', async () => {
+  await openReader();
+  const pane = screen.getByText('Body of briefing 1').closest('.shell-main') as HTMLElement;
+  pane.scrollTop = 250;
+  await fireEvent.click(screen.getByRole('button', { name: /^Briefing 2 / }));
+  await screen.findByText('Body of briefing 2');
+  expect(pane.scrollTop).toBe(0);
+});

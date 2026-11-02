@@ -4,6 +4,7 @@ import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { __history } from '../../../../vitest-stubs/app-navigation';
 import Groups from './+page.svelte';
 import Layout from '../+layout.svelte';
+import InShell from '../../settings/inShell.test.svelte';
 import { createRawSnippet } from 'svelte';
 import { formatDate } from '@minot/ui/dateFormat';
 
@@ -126,6 +127,17 @@ it('swaps the group details in place, keeping the current ones until the next ar
   await screen.findByRole('heading', { name: 'Family' });
   expect(screen.getByRole('heading', { name: 'Family' }).closest('[aria-busy="true"]')).toBeNull();
   expect(__history.entries).toHaveLength(2);
+});
+it('starts another group at the top of the pane', async () => {
+  const family = { ...group, group_id: 'family', display_name: 'Family' };
+  api.getAdminGroups.mockResolvedValue({ groups: [group, family] });
+  render(InShell, { component: Groups });
+  await screen.findByRole('heading', { name: 'Team' });
+  const pane = document.querySelector('.shell-main') as HTMLElement;
+  pane.scrollTop = 400;
+  __history.reset('/istota/admin/groups/?group=family');
+  await waitFor(() => expect(api.getAdminGroup).toHaveBeenLastCalledWith('family'));
+  expect(pane.scrollTop).toBe(0);
 });
 it('creates a group with explicit enabled owners, without automatically adding the admin', async () => {
   render(Groups);

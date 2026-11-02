@@ -36,6 +36,8 @@ Beside minot's components, this app's own live in `lib/components/`. Two groups 
 
 `LoadingOctopus`, the chat transcript's loading state, is `components/chat/LoadingOctopus.svelte`.
 
+`ShellScrollReset` (`components/ShellScrollReset.svelte`) sets the shell's pane back to the top on mount and when its `key` changes. It renders nothing and goes inside the `AppShell`, since the shell's context does not reach the script of whatever renders it. A section layout keys it on `page.url.pathname`, a page that swaps its whole view by URL selection on the selection, and `SettingsLayout` passes its `viewKey`. It moves only `.shell-main`, so it cannot reach a scroller inside the page: the admin layout's instance leaves the log viewer's alone, and chat and feeds, which position their own panes, have none. A scroller that outlives its content inside a page resets itself: money's portfolio and reports frames key their `.money-section-body` on the path, and transactions resets `.txn-scroll` on its selection.
+
 Not everything shared is a primitive. A block used by two or three pages of one module lives with that module rather than in the barrel, and is still not something to copy:
 
 | Component / module                            | Shared by                             | Notes                                                                                                                                                                                                                                                                                                                                                        |

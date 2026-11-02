@@ -33,6 +33,7 @@
   } from '$lib/api';
   import { getCurrentUser } from '$lib/userContext';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
+  import ShellScrollReset from '$lib/components/ShellScrollReset.svelte';
   import { latest } from '@minot/ui/ui/latest';
   import { notifyError } from '@minot/ui/stores/notices';
 
@@ -249,6 +250,8 @@
     };
   });
 </script>
+
+<ShellScrollReset key={selected} />
 
 <div class="settings admin-page card-pane">
   <LoadState {loading} {error} loadingLabel="Loading groups…" onRetry={load}>
