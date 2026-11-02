@@ -139,6 +139,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Assignments work again after the network access change.** A wake was refused every assignment command because it had lost its external skills, so it could not report, hand off a step or say when to wake next. Limited scheduled tasks could not read their owner's usage either, and one approved for the arr stack could not reach it.
 - **A browser request refused for a private address now says so.** Over plain http, `browse render` and `browse get` returned `status: ok` with the refusal text as the page, which a scheduled check read as a successful fetch. They now return `status: error` with `private_address_refused`, also after a redirect. An https refusal still reads as `navigation_mismatch`, because Chrome does not report the reason.
 - Enabling or disabling a job no longer deletes a CRON.md entry that did not load. The change now applies to the running job only, you are warned that the next sync will undo it, and the file is left alone until it is fixed.
 - Running a one-time job by hand is refused while it waits for you to approve what it asked for. It used to run limited and delete itself along with the request.

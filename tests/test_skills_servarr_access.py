@@ -253,6 +253,26 @@ class TestTheRoom:
         assert envelope["reason"] == "not_authorized"
         assert arr.requests == []
 
+    def test_a_limited_task_granted_the_skill_reaches_the_stack(self, arr, monkeypatch):
+        from istota.rooms import egress
+
+        as_user(monkeypatch, "alice")
+        config = arr.state["config"]
+        with db.get_db(config.db_path) as conn:
+            job = conn.execute(
+                "INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt) "
+                "VALUES ('alice', 'digest', '0 9 * * *', 'p')").lastrowid
+            task = db.create_task(conn, user_id="alice", source_type="scheduled", prompt="p",
+                                  scheduled_job_id=job)
+            index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
+            egress.add_grant(conn, "alice", "cron:digest", "skill:servarr",
+                             decided_via="web", skill_index=index)
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(task))
+        monkeypatch.setenv("ISTOTA_WITHHELD_SCOPES", "browse")
+        code, envelope = run("apps")
+        assert code == 0, envelope
+        assert envelope["tier"] == "admin"
+
     def _thread_room(self, config) -> str:
         with db.get_db(config.db_path) as conn:
             token = db.register_room(conn, None, "alice", origin="email", name="Thread").token

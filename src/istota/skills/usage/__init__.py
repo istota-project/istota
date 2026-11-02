@@ -12,8 +12,8 @@ _NO_SUCH_USER = "\x00"
 
 def cmd_usage(args):
     ctx = _load_context()
-    if ctx["withheld"]:
-        fail("Usage is personal data and is unavailable when scopes are withheld")
+    if ctx["restricted"]:
+        fail("Usage is personal data and is unavailable in a task with restricted reach")
     refusal = _guard_skill("usage", ctx)
     if refusal:
         fail(refusal)
