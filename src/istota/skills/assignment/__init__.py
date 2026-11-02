@@ -37,6 +37,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
 
+from istota.assignments import view
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
 from istota.skills._cli import fail
 from istota.skills._turn_access import INCOGNITO_HINT, INCOGNITO_REFUSAL, calling_task_incognito
@@ -44,9 +45,6 @@ from istota.skills._hostpath import NOT_A_PATH, host_path
 from istota.skills._turn_access import calling_task_id as _task_id
 
 STATES = ("draft", "active", "sleeping", "waiting", "paused", "completed", "abandoned")
-DEFAULT_SHOW_WAKES = 3
-MAX_SHOW_WAKES = 20
-SUMMARY_SHOW_CHARS = 2000
 
 
 class Refusal(Exception):
@@ -164,54 +162,8 @@ def _resolve(ctx: _Ctx, ident: str):
     return found
 
 
-def _summary(assignment) -> dict:
-    return {
-        "id": assignment.id,
-        "slug": assignment.slug,
-        "title": assignment.title,
-        "state": assignment.state,
-        "state_reason": assignment.state_reason,
-        "waiting_on": assignment.waiting_on,
-        "deadline": assignment.deadline,
-        "next_wake_at": assignment.next_wake_at,
-        "cadence_minutes": assignment.cadence_minutes,
-        "budget": assignment.budget,
-        "auto_complete": assignment.auto_complete,
-        "model": assignment.model,
-        "effort": assignment.effort,
-        "directory": assignment.dir_relpath,
-        "created_at": assignment.created_at,
-        "activated_at": assignment.activated_at,
-        "closed_at": assignment.closed_at,
-    }
-
-
-def _rewrite(ctx: _Ctx, assignment_id: int) -> str:
-    """Commit, then re-render `CHARTER.md`; the DB is the authority either way."""
-    from istota.assignments import charter
-
-    ctx.conn.commit()
-    return charter.rewrite_charter_file(ctx.config, ctx.conn, assignment_id)
-
-
-def _wake_due(ctx: _Ctx, assignment_id: int) -> str | None:
-    """Whether the next gate tick wakes it, and why: a wait an inbox event has
-    already ended reads `inbox`, not stuck (ISSUE-853)."""
-    from istota.assignments import store, wakes
-
-    current = store.get_assignment(ctx.conn, assignment_id)
-    return wakes.wake_due(ctx.conn, ctx.config, current) if current is not None else None
-
-
 def _changed(ctx: _Ctx, assignment, **extra: Any) -> dict:
-    rendered = _rewrite(ctx, assignment.id)
-    from istota.assignments import store
-
-    current = store.get_assignment(ctx.conn, assignment.id)
-    return {
-        "status": "ok", "assignment": _summary(current), "wake_due": _wake_due(ctx, assignment.id),
-        "charter": rendered, **extra,
-    }
+    return view.changed(ctx.conn, ctx.config, assignment, **extra)
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +220,7 @@ def cmd_create(ctx: _Ctx, args) -> dict:
     directory = charter.create_directory(ctx.config, ctx.conn, assignment)
     rendered = charter.render_current(ctx.conn, assignment.id)
     return {
-        "status": "ok", "assignment": _summary(assignment), "charter": rendered,
+        "status": "ok", "assignment": view.summary(assignment), "charter": rendered,
         "directory_written": directory,
     }
 
@@ -429,8 +381,7 @@ def cmd_frozen_remove(ctx: _Ctx, args) -> dict:
 
 
 def _state_result(ctx: _Ctx, assignment, **extra: Any) -> dict:
-    ctx.conn.commit()
-    return {"status": "ok", "assignment": _summary(assignment), "wake_due": _wake_due(ctx, assignment.id), **extra}
+    return view.state_result(ctx.conn, ctx.config, assignment, **extra)
 
 
 def cmd_activate(ctx: _Ctx, args) -> dict:
@@ -447,7 +398,7 @@ def cmd_activate(ctx: _Ctx, args) -> dict:
     current = store.get_assignment(ctx.conn, assignment.id)
     result = {
         "status": row["state"], "request_id": row["id"],
-        "needs_confirmation": row["state"] == "held", "assignment": _summary(current),
+        "needs_confirmation": row["state"] == "held", "assignment": view.summary(current),
     }
     if row["state"] == "held":
         result["preview"] = row["preview"]
@@ -497,17 +448,7 @@ def cmd_topup(ctx: _Ctx, args) -> dict:
         ctx.conn, ctx.cfg, assignment.id, user_id=ctx.user_id, usd=args.usd, wakes=args.wakes,
         by_task_id=_task_id(),
     )
-    extra: dict[str, Any] = {}
-    if updated.state == "paused" and updated.state_reason == "budget":
-        from istota.assignments import budget
-
-        spent = budget.totals(ctx.conn, updated.id)
-        # Still paused: the top-up left less than a wake costs (ISSUE-853).
-        extra["still_paused"] = {
-            "remaining": budget.remaining(updated, spent),
-            "cheapest_wake_usd": spent.cheapest_wake_usd,
-        }
-    return _changed(ctx, updated, **extra)
+    return _changed(ctx, updated, **view.still_paused(ctx.conn, updated))
 
 
 def cmd_note(ctx: _Ctx, args) -> dict:
@@ -655,52 +596,12 @@ def cmd_list(ctx: _Ctx, args) -> dict:
 
     states = [args.state] if args.state else None
     rows = store.list_assignments(ctx.conn, ctx.user_id, states=states)
-    return {"status": "ok", "state": args.state, "assignments": [_summary(a) for a in rows]}
+    return {"status": "ok", "state": args.state, "assignments": [view.summary(a) for a in rows]}
 
 
 def cmd_show(ctx: _Ctx, args) -> dict:
-    from istota.assignments import budget, charter, store
-    from istota.assignments.prompt import UNTRUSTED_NOTICE
-
     assignment = _resolve(ctx, args.id)
-    limit = max(0, min(args.wakes if args.wakes is not None else DEFAULT_SHOW_WAKES, MAX_SHOW_WAKES))
-    spent = budget.totals(ctx.conn, assignment.id)
-    items = store.list_items(ctx.conn, assignment.id)
-    frozen = store.list_frozen(ctx.conn, assignment.id)
-    wakes = store.list_wakes(ctx.conn, assignment.id, limit=limit) if limit else []
-    return {
-        "status": "ok",
-        "assignment": _summary(assignment),
-        "wake_due": _wake_due(ctx, assignment.id),
-        "charter": charter.render(assignment, items, frozen),
-        "ledger": {
-            "cost_usd": round(spent.cost_usd, 4),
-            "wakes": spent.wakes,
-            "unmeasured_wakes": spent.unmeasured_wakes,
-            "billed_input_tokens": spent.billed_input_tokens,
-            "output_tokens": spent.output_tokens,
-            "remaining": budget.remaining(assignment, spent),
-            "cheapest_wake_usd": spent.cheapest_wake_usd,
-        },
-        "items": [
-            {"id": i.id, "position": i.position, "kind": i.kind, "text": i.text, "status": i.status,
-             "detail": i.detail, "checked_at": i.checked_at}
-            for i in items
-        ],
-        "frozen": [{"id": f.id, "name": f.name, "value": f.value} for f in frozen],
-        "open_handoffs": [
-            {"id": a.id, "text": a.text, "report": a.report_spec, "due_at": a.due_at, "created_at": a.created_at}
-            for a in store.list_actions(ctx.conn, assignment.id, status="open")
-        ],
-        "wakes": [
-            {"seq": w.seq, "fired_by": w.fired_by, "started_at": w.started_at, "ended_at": w.ended_at,
-             "outcome": w.outcome, "cost_usd": w.cost_usd, "progress_signals": w.progress_signals,
-             "summary": (w.summary or "")[:SUMMARY_SHOW_CHARS] or None,
-             "summary_truncated": len(w.summary or "") > SUMMARY_SHOW_CHARS}
-            for w in wakes
-        ],
-        "notice": UNTRUSTED_NOTICE,
-    }
+    return {"status": "ok", **view.show(ctx.conn, ctx.config, assignment, wake_count=args.wakes)}
 
 
 # ---------------------------------------------------------------------------
@@ -854,7 +755,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("show", help="One assignment in full")
     p.add_argument("id")
-    p.add_argument("--wakes", type=int, help=f"Recent wakes to include (default {DEFAULT_SHOW_WAKES})")
+    p.add_argument("--wakes", type=int, help=f"Recent wakes to include (default {view.DEFAULT_SHOW_WAKES})")
 
     return parser
 

@@ -3,6 +3,7 @@
 import json
 
 from istota import db, scheduler
+from istota.briefings.sources.kv import parse_shared_kv_target
 from istota.config import Config, UserConfig
 
 
@@ -31,12 +32,12 @@ def _make_job(conn, user_id, *, publish, trusted=False, name="pub"):
 
 class TestParseTarget:
     def test_bare_key_maps_to_shared_block_ns(self):
-        assert scheduler._parse_shared_kv_target("film-digest") == (
+        assert parse_shared_kv_target("film-digest") == (
             "briefing_shared_blocks", "film-digest",
         )
 
     def test_ns_slash_key(self):
-        assert scheduler._parse_shared_kv_target("custom/thing") == ("custom", "thing")
+        assert parse_shared_kv_target("custom/thing") == ("custom", "thing")
 
 
 class TestPublish:

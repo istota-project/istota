@@ -140,6 +140,7 @@ def run_confined_command(
         group_ids=group_ids,
         egress_hosts=limit,
         egress_withheld=reach.egress_withheld,
+        egress_subject=reach.egress_subject,
         egress_log=egress_log,
     )
 

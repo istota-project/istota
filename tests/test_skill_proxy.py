@@ -494,6 +494,19 @@ class TestProxyInformativeRejections:
         assert body["error"] == resp["stderr"]
         assert json.loads(log.read_text()) == {"channel": "skill", "entry": "skill:browse"}
         assert unknown["reason"] == "unknown_skill"
+        assert "nothing can be approved for this task" in resp["stderr"]
+
+    def test_a_withheld_skill_names_the_page_of_the_tasks_subject(self, sock_path):
+        with SkillProxy(
+            sock_path, {}, {"PATH": "/usr/bin"},
+            allowed_skills=frozenset({"email"}),
+            egress_withheld=frozenset({"browse"}),
+            egress_subject="cron:digest",
+            task_id=42,
+        ):
+            resp = self._send_request(sock_path, {"skill": "browse", "args": []})
+        assert "the owner can add it in Settings, Scheduled jobs." in resp["stderr"]
+        assert "cron:digest" not in resp["stderr"]
 
     def test_unknown_skill_falls_back_to_allowed_when_no_authorized(self, sock_path):
         """If authorized_skills not set, error message lists all CLI skills."""

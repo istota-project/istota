@@ -7,6 +7,7 @@
     setNetworkJobAccess,
     type NetworkSubject,
   } from '$lib/api';
+  import { accessBadge } from '$lib/settings/jobState';
   import { getCurrentUser } from '$lib/userContext';
   import {
     Alert,
@@ -23,11 +24,16 @@
   import { createConfirm } from '@minot/ui/ui/confirm.svelte';
 
   let {
+    title,
     subject,
+    showJobText = true,
     externalSkills,
     onChanged,
   }: {
+    title: string;
     subject: NetworkSubject;
+    /** Off where the page around the card already shows it. The approval still does. */
+    showJobText?: boolean;
     externalSkills: string[];
     onChanged: () => void | Promise<void>;
   } = $props();
@@ -37,11 +43,6 @@
   // Each of these reaches past anything a host list bounds: the browser and the
   // devbox send wherever a page or a command says.
   const UNBOUNDED_SKILLS = new Set(['browse', 'devbox']);
-  const STATES = {
-    open: { label: 'Full access', variant: 'warn' },
-    public: { label: 'Public', variant: 'info' },
-    limited: { label: 'Limited', variant: 'neutral' },
-  } as const;
   const JOB_REQUESTS = new Set(['open', 'public']);
   type Access = 'limited' | 'public' | 'open';
   const ACCESS_OPTIONS = [
@@ -51,13 +52,7 @@
   ];
 
   const job = $derived(subject.job);
-  const BY_DEFAULT = {
-    open: { label: 'Full access by default', variant: 'warn' },
-    public: { label: 'Public by default', variant: 'info' },
-  } as const;
-  const stateBadge = $derived(
-    subject.by_default ? BY_DEFAULT[subject.by_default] : STATES[subject.state],
-  );
+  const stateBadge = $derived(accessBadge(subject));
   const hostRefusals = $derived(subject.refused.filter((row) => !JOB_REQUESTS.has(row.entry)));
   const asksOpen = $derived(subject.refused.some((row) => row.entry === 'open'));
   const asksPublic = $derived(subject.refused.some((row) => row.entry === 'public'));
@@ -178,27 +173,10 @@
   {/if}
 {/snippet}
 
-<Card title={subject.label}>
+<Card {title}>
   {#snippet status()}
-    {#if job?.run_state === 'disabled'}
-      <Badge size="sm" variant="neutral">Disabled</Badge>
-    {:else if job?.run_state === 'suspended'}
-      <Badge size="sm" variant="warn">Suspended</Badge>
-    {/if}
     <Badge size="sm" variant={stateBadge.variant}>{stateBadge.label}</Badge>
   {/snippet}
-
-  {#if job?.run_state === 'disabled'}
-    <p class="caption">
-      This job is disabled, so it does not run. What is approved here applies if it is enabled
-      again.
-    </p>
-  {:else if job?.run_state === 'suspended'}
-    <p class="caption">
-      Istota stopped running this job after repeated failures, which a refused host can cause. Use
-      <code>!cron enable</code> to start it again.
-    </p>
-  {/if}
 
   {#if subject.by_default === 'public'}
     <p class="caption">
@@ -223,7 +201,7 @@
     </p>
   {/if}
 
-  {#if job}
+  {#if job && showJobText}
     <Disclosure summary="Job text">{@render jobText()}</Disclosure>
   {/if}
 
@@ -276,8 +254,8 @@
   {#if hostRefusals.length > 0}
     <h3>Asked for or refused</h3>
     <Alert appearance="inline" variant="warn">
-      A job's own file or a page it reads can make it ask for a host. Add one only if you expect
-      this job to use it.
+      Its own files or a page it reads can make it ask for a host. Add one only if you expect it to
+      use that host.
     </Alert>
     <ul class="divided-list">
       {#each hostRefusals as row (row.entry)}
@@ -372,7 +350,7 @@
   bind:open={grantSkill.open}
   title="Grant {grantSkill.target ?? 'this skill'}"
   message="This grant is unbounded. With {grantSkill.target ??
-    'this skill'}, the job can send what it holds to any host a page or a command names, and no host list applies."
+    'this skill'}, it can send what it holds to any host a page or a command names, and no host list applies."
   confirmLabel="Grant"
   busyLabel="Granting…"
   confirmVariant="danger"

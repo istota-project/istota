@@ -6,7 +6,7 @@ A single task already has compaction, `!steer`, `!stop`, retries and a turn limi
 
 ## Who can use it
 
-Assignments are on by default and for admins only. A non-admin gets `not_admin` from every command. An admin who loses admin keeps any running assignment running, the same as a scheduled job, and can no longer change it.
+Assignments are on by default and for admins only. A non-admin gets `not_admin` from every command and has no Assignments section in Settings. An admin who loses admin keeps any running assignment running, the same as a scheduled job, and can no longer change it.
 
 ## Starting one
 
@@ -23,7 +23,7 @@ After each change the bot shows you the charter as rendered text. When you are h
 
 After activation, charter changes you make in chat apply at once, and the next wake is told what changed. Raising the budget is a top-up.
 
-Only your own turn in your private chat can change the charter, activate, pause, resume, wake, top up, abandon, close, leave a note or report a step done. Email, SMS, WhatsApp, scheduled jobs, shared rooms and the wakes themselves cannot.
+Only your own turn in your private chat can change the charter, activate, pause, resume, wake, top up, abandon, close, leave a note or report a step done. Email, SMS, WhatsApp, scheduled jobs, shared rooms and the wakes themselves cannot. [The Assignments page](#the-assignments-page) can do everything on that list but change the charter and activate.
 
 ### Mechanical checks
 
@@ -47,7 +47,7 @@ A wake ends by asking for the next one: in some hours, at a time, or not until y
 
 Each assignment has a folder at `<bot folder>/assignments/<slug>/` in your files. `CHARTER.md` there is generated from the record; editing it changes nothing. `SCRATCHPAD.md` holds the bot's notes, with sections for what it is doing now, what is done, its thinking, what it rejected, problems and findings.
 
-To steer an assignment, leave it a note (`assignment note`), which the next wake reads as your words. Editing the scratchpad does not steer it. Any of your tasks can write that file, including one started by an email, a scheduled job or a turn in a shared room, so the bot cannot tell your change from theirs. The next wake is shown a change made outside a wake as untrusted material with its source unknown, never as your instruction, and a wake is free to remove those lines. A scratchpad that is missing, emptied or unreadable is restored from the last good copy. Every version is kept in the database, so a bad line can be traced to the wake that wrote it.
+To steer an assignment, leave it a note (`assignment note`, or Note on its page), which the next wake reads as your words. Editing the scratchpad does not steer it. Any of your tasks can write that file, including one started by an email, a scheduled job or a turn in a shared room, so the bot cannot tell your change from theirs. The next wake is shown a change made outside a wake as untrusted material with its source unknown, never as your instruction, and a wake is free to remove those lines. A scratchpad that is missing, emptied or unreadable is restored from the last good copy. Every version is kept in the database, so a bad line can be traced to the wake that wrote it.
 
 ## Progress, pauses and completion
 
@@ -80,9 +80,32 @@ What needs you reaches the [notifications](notifications.md) bell, under the pus
 | Progress report | A wake reports a milestone | You see it |
 | Completed | It completes | You see it |
 
-Each notice in the bell starts with the assignment's number and slug (`Assignment 1 · heat-pump-quotes`), so you can name it in chat. It has two links: Open in chat goes to the room you activated the assignment from, or your default room when that one is gone or you have left it, and Open folder opens the assignment's folder on the Files page.
+Each notice in the bell starts with the assignment's number and slug (`Assignment 1 · heat-pump-quotes`), so you can name it in chat. It has three links: Open assignment goes to its page in Settings, Open in chat goes to the room you activated the assignment from, or your default room when that one is gone or you have left it, and Open folder opens the assignment's folder on the Files page.
 
-A notice's text may quote what a wake wrote, such as the step or the report, and that text stays in the bell. A push names the assignment and points to the bell. When you confirm completion yourself in chat, the completed notice goes to the bell without a push.
+A notice's text may quote what a wake wrote, such as the step or the report, and that text stays in the bell. A push names the assignment and points to the bell. When you confirm completion yourself, in chat or on its page, the completed notice goes to the bell without a push.
+
+## The Assignments page
+
+Settings, Assignments shows your assignments and lets you steer them without opening chat. They are still started and changed in chat: the page cannot create one, change its charter or activate it, and a draft's page links back to chat.
+
+The list has the active assignments, drafts included, each with its state, its next wake or what it waits on, the budget used and any open hand-offs. Finished ones are in a closed group below them. An assignment's own page has these parts:
+
+| Part | What it has |
+|---|---|
+| Now | The state and why, when it wakes and the deadline, with Pause, Resume, Wake now and Abandon where the state allows them. A proposed completion shows its evidence, with Complete and Send back |
+| Hand-offs | Each open step, with a report field and Mark done |
+| Done when | Each item and its status, and Confirm on an item you were asked to confirm |
+| Budget | Cost and wakes against their limits, wakes that could not be measured, and Top up |
+| Note | A field for a note, which the next wake reads as your words |
+| Charter | The goal, what it may do without asking, frozen commitments and the deadline, read only, with Open folder |
+| Recent wakes | Up to 20 wakes: when, what started each one, how it ended, its cost and its summary |
+| Network access | The hosts and skills it may use, while it is not finished |
+
+Text a wake wrote is shown as plain text, so a link or markup in it does nothing. It may quote a web page or a mail, so read it as you would that source.
+
+Dollars here are list-price dollars, the unit a charter's budget is set in, and not what you were billed. A budget pause has no Resume, because a top-up is what ends it. A top-up too small to end the pause says it is still paused, with what is left and what its cheapest wake has cost.
+
+The page reads again after each action and when you come back to the tab. If the `assignment` skill is disabled for you, the section is hidden and a link to the page says assignments are not available.
 
 ## Budget and cost
 
@@ -144,7 +167,7 @@ Deployment limits, in `[assignments]`:
 ## Limits
 
 - One owner per assignment. No shared or group assignments.
-- No assignment room, questions, watchers, detached jobs or child tasks yet; you steer with notes and the commands above.
+- No assignment room, questions, watchers, detached jobs or child tasks yet; you steer with notes, the page and the commands above.
 - A wake uses the existing skills under their existing gates. Held outbound mail, relay approval and Wallet policy apply as they do to any task.
 - A save to the scratchpad while a wake is running is attributed to the wake.
 - Nothing deletes an assignment. A completed or abandoned one keeps its rows, files and ledger.

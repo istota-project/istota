@@ -54,7 +54,7 @@ it('adds a card, saves policy through the app bar and cancels a purchase through
   installMock();
   render(Harness);
   await screen.findByRole('heading', { name: 'Spending policy' });
-  for (const section of USER_SETTINGS_SECTIONS) {
+  for (const section of USER_SETTINGS_SECTIONS.filter((item) => !item.feature)) {
     expect(screen.getByRole('link', { name: section.label }).getAttribute('href')).toBe(
       `/settings${section.href}`,
     );

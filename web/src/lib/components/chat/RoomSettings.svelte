@@ -39,7 +39,7 @@
     effortOptions,
     effortsFor,
     filterOptions,
-    keepsOnProvider,
+    modelSurvivesProviderMove,
     pickerOptions,
     providerOptions,
     refusalMessage,
@@ -190,8 +190,8 @@
     // back to the provider's default rather than send what the server would
     // read as a move back.
     const value = valueOf(modelOptions, modelText);
-    const kept = next === storedProvider && value === (room.model ?? '');
-    if (!kept && !keepsOnProvider(modelOptions, value, effectiveProvider(choices, next))) {
+    const stored = { provider: storedProvider, model: room.model ?? '' };
+    if (!modelSurvivesProviderMove(choices, modelOptions, value, next, stored)) {
       modelText = '';
       effortValue = '';
     }

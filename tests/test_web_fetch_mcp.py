@@ -301,7 +301,10 @@ class TestTheEgressLimit:
 
     def test_the_document_carries_the_hosts_and_the_log_path(self, tmp_path):
         log = tmp_path / "egress-refused.jsonl"
-        policy = WebFetchPolicy(exact_hosts=("news.example.com",), refusal_log=str(log))
+        policy = WebFetchPolicy(
+            exact_hosts=("news.example.com",), refusal_log=str(log),
+            refusal_advice="the owner can add it in Settings, Scheduled jobs.",
+        )
         document = web_mcp.read_config(str(_write_config(tmp_path, policy)))
         assert document["policy"]["exact_hosts"] == ["news.example.com"]
         assert document["policy"]["refusal_log"] == str(log)

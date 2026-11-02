@@ -2444,8 +2444,12 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
         "admin": is_admin,
         "sharing": False,
         "sharing_ocm": False,
+        "assignments": False,
     }
     if _config:
+        from istota.webui.assignment_routes import can_use as _can_use_assignments
+
+        features["assignments"] = await asyncio.to_thread(_can_use_assignments, _config, username)
         # Calendar feeds have no switch of their own; the card needs the database.
         features["sharing"] = bool(_config.db_path)
         features["sharing_ocm"] = bool(_config.db_path) and bool(_config.sharing.ocm.enabled)
@@ -11228,6 +11232,70 @@ async def chat_config(user: dict = Depends(_require_api_auth)):
     }
 
 
+def _model_catalogue(username: str, brain_config, provider: str | None) -> dict:
+    """What a model picker offers this viewer on ``brain_config``'s brain and
+    ``provider``: the aliases, the models, and what no model of its own runs (None
+    when the backend picks). One source for the room picker and the job form, so the
+    two cannot disagree. Each half degrades on its own, and never raises.
+    """
+    from istota.brain._resolve import effective_provider
+
+    aliases: list[dict] = []
+    default_model: str | None = None
+    try:
+        model_brain = make_brain(brain_config)
+        bind = getattr(model_brain, "bound_to", None)
+        if callable(bind):
+            model_brain = bind(effective_provider(_config, brain_config.kind, provider))
+        aliases = [
+            {
+                "alias": alias, "target": model, "effort": effort,
+                "efforts": _alias_efforts(brain_config, alias),
+            }
+            for alias, model, effort in model_brain.list_aliases()
+        ]
+        default_model = model_brain.effective_default_model() or None
+    except Exception as e:  # noqa: BLE001 — aliases degrade independently
+        logger.warning("model_catalogue: model aliases unavailable: %s", e)
+    models: list[dict] = []
+    try:
+        models = _chat_model_choices(brain_config, username, provider)
+    except Exception as e:  # noqa: BLE001 — the model list degrades independently
+        logger.warning("model_catalogue: model list unavailable: %s", e)
+    return {"model_aliases": aliases, "models": models, "default_model": default_model}
+
+
+@api_router.get("/settings/jobs/model-choices")
+async def settings_job_model_choices(
+    brain: str | None = None,
+    provider: str | None = None,
+    user: dict = Depends(_require_api_auth),
+):
+    """The model picker's choices for a job, on the `scheduled` lane: the one
+    `cron_loader._validate_model` judges a job's model on and the job runs on.
+    `/chat/commands` answers for the web lane and a room, which can differ under
+    `[brain.source_type_overrides]`.
+
+    A brain or provider from a non-admin is ignored, since writing either is
+    admin-only, and `resolve_brain_kind` ignores a brain off the allowlist.
+    """
+    from istota.brain import resolve_brain_kind
+
+    username = user["username"]
+    is_admin = _config.is_admin(username)
+    brain_config = resolve_brain_kind(
+        "scheduled", _config.brain, override=(brain or None) if is_admin else None,
+    )
+    await asyncio.to_thread(_install_model_caches)
+    catalogue = await asyncio.to_thread(
+        _model_catalogue, username, brain_config, (provider or None) if is_admin else None,
+    )
+    return JSONResponse(
+        {**catalogue, "providers": _native_provider_choices(username, brain_config)},
+        headers=_NO_STORE,
+    )
+
+
 @api_router.get("/chat/commands")
 async def chat_commands(
     room_id: int | None = None,
@@ -11327,41 +11395,13 @@ async def chat_commands(
         else:
             logger.debug("chat_commands: ignoring brain=%r", brain)
     await asyncio.to_thread(_install_model_caches)
-    aliases: list[dict] = []
-    # What an unpinned room runs, resolved the way the admin Models card
-    # resolves it, so the room picker can name it instead of the bare "Default
-    # model" that hid #548. None = the backend's own default.
-    default_model: str | None = None
-    try:
-        from istota.brain._resolve import effective_provider
-
-        model_brain = make_brain(brain_config)
-        bind = getattr(model_brain, "bound_to", None)
-        if callable(bind):
-            model_brain = bind(effective_provider(_config, brain_config.kind, room_provider))
-        aliases = [
-            {
-                "alias": alias, "target": model, "effort": effort,
-                "efforts": _alias_efforts(brain_config, alias),
-            }
-            for alias, model, effort in model_brain.list_aliases()
-        ]
-        default_model = model_brain.effective_default_model() or None
-    except Exception as e:  # noqa: BLE001 — aliases degrade independently
-        logger.warning("chat_commands: model aliases unavailable: %s", e)
-    models: list[dict] = []
-    try:
-        models = await asyncio.to_thread(
-            _chat_model_choices, brain_config, user["username"], room_provider,
-        )
-    except Exception as e:  # noqa: BLE001 — the model list degrades independently
-        logger.warning("chat_commands: model list unavailable: %s", e)
+    catalogue = await asyncio.to_thread(
+        _model_catalogue, user["username"], brain_config, room_provider,
+    )
     payload = {
         "commands": cmds,
         "command_aliases": cmd_aliases,
-        "model_aliases": aliases,
-        "models": models,
-        "default_model": default_model,
+        **catalogue,
         # A native room's provider (D22): the stored value (null is native's
         # default) and, for an admin, the providers it may be moved to.
         "room_provider": room_provider,
@@ -13653,6 +13693,59 @@ async def files_assignment_folder(request: Request, assignment_id: str):
     except _UnauthorizedException:
         return RedirectResponse(url="/istota/files", status_code=302)
     target = await asyncio.to_thread(_assignment_folder_target, user["username"], assignment_id)
+    return RedirectResponse(url=target, status_code=302)
+
+
+def _job_page_target(username: str, job_id: str) -> str:
+    """The job's page for its owner, else the bare page, as a missing job reads."""
+    from istota.webui.settings_http import parse_id
+
+    bare = "/istota/settings/jobs"
+    parsed = parse_id(job_id)
+    if parsed is None:
+        return bare
+    with _db.get_db(_config.db_path) as conn:
+        job = _db.get_scheduled_job(conn, parsed)
+    if job is None or job.user_id != username:
+        return bare
+    return f"{bare}?job={job.id}"
+
+
+# The bell's link for a job, a redirect for the reason the two above are one.
+@auth_router.get("/settings/jobs/open/{job_id}")
+async def settings_job_open(request: Request, job_id: str):
+    try:
+        user = await asyncio.to_thread(_require_api_auth, request)
+    except _UnauthorizedException:
+        return RedirectResponse(url="/istota/settings/jobs", status_code=302)
+    target = await asyncio.to_thread(_job_page_target, user["username"], job_id)
+    return RedirectResponse(url=target, status_code=302)
+
+
+def _assignment_page_target(username: str, assignment_id: str) -> str:
+    """The assignment's page for its owner, else the bare page, as a missing one reads."""
+    from istota.assignments import store
+    from istota.webui.settings_http import parse_id
+
+    bare = "/istota/settings/assignments"
+    parsed = parse_id(assignment_id)
+    if parsed is None:
+        return bare
+    with _db.get_db(_config.db_path) as conn:
+        assignment = store.get_assignment(conn, parsed, user_id=username)
+    if assignment is None:
+        return bare
+    return f"{bare}?assignment={assignment.id}"
+
+
+# The bell's link for an assignment, a redirect for the same reason as a job's.
+@auth_router.get("/settings/assignments/open/{assignment_id}")
+async def settings_assignment_open(request: Request, assignment_id: str):
+    try:
+        user = await asyncio.to_thread(_require_api_auth, request)
+    except _UnauthorizedException:
+        return RedirectResponse(url="/istota/settings/assignments", status_code=302)
+    target = await asyncio.to_thread(_assignment_page_target, user["username"], assignment_id)
     return RedirectResponse(url=target, status_code=302)
 
 
@@ -19531,10 +19624,20 @@ app.include_router(_garmin_router, prefix="/istota/api/garmin", tags=["garmin"])
 app.dependency_overrides[_garmin_require_auth] = _require_api_auth
 app.dependency_overrides[_garmin_verify_origin] = _verify_origin
 
-# Settings > Network access. The stubs are the shared objects, overridden above.
+# A subject's network access, for the job and assignment pages. The stubs are the shared objects, overridden above.
 from istota.webui.egress_routes import router as _egress_router
 
 app.include_router(_egress_router, prefix="/istota/api", tags=["egress"])
+
+# Settings > Scheduled jobs, on the same shared stubs.
+from istota.webui.job_routes import router as _job_router
+
+app.include_router(_job_router, prefix="/istota/api", tags=["jobs"])
+
+# Settings > Assignments, on the same shared stubs.
+from istota.webui.assignment_routes import router as _assignment_router
+
+app.include_router(_assignment_router, prefix="/istota/api", tags=["assignments"])
 
 # Workspace is a core page, independent of per-user module switches.
 from istota.webui.workspace_routes import require_auth as _workspace_require_auth

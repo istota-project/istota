@@ -141,9 +141,11 @@ Consume the published value with a `shared_block` source on a briefing block. Se
 
 ## Network access
 
-A job runs with nobody watching, and a page it reads can tell it to send your data somewhere. So a new job can fetch only hosts you approved, plus services your operator configured. The same holds for a personal briefing, an assignment wake and a TASKS.md line. Settings, Network access is where you decide.
+A job runs with nobody watching, and a page it reads can tell it to send your data somewhere. So a new job can fetch only hosts you approved, plus services your operator configured. The same holds for an assignment wake. Each job's page under Settings, Scheduled jobs has a Network access card, and that is where you decide.
 
-When a job is refused a host, the bell shows one row for that job. It names no host, and it opens the page, which lists what was refused with Add and Dismiss. A page the job reads can make it ask for a host, so add one only if you expect the job to use it. Hosts are exact: `news.example.com` does not cover `www.news.example.com`.
+Two kinds of unattended work have nothing to decide. A personal briefing's model has no tools, because Istota gathers its sources before the model starts. A TASKS.md line always runs limited, with no hosts or skills, because a limited task can write a line into that file. Nothing can be approved for a line, so one that needs the web fails with a refusal in its result.
+
+When a job is refused a host, the bell shows one row for that job. It names no host, and it opens the job's page, whose card lists what was refused with Add and Dismiss. A page the job reads can make it ask for a host, so add one only if you expect the job to use it. Hosts are exact: `news.example.com` does not cover `www.news.example.com`.
 
 A job is in one of three states:
 
@@ -151,11 +153,11 @@ A job is in one of three states:
 - **Public**: open web and nothing private: no memory, no files, no credentials and no notes in its room. For research that only reads the web. Choose it on the page or set `reach = "public"`. It needs no approval on a default install. A job that needs to keep state should stay limited and use hosts.
 - **Full access**: it runs with your browser profile and every skill, and can reach any public host. Choose it on the page, or set `reach = "full"` to ask for it and approve its text there. Every job that existed when this feature arrived starts here. Choose Limited on the page to narrow it, and expect the next run to be refused the hosts it needs.
 
-Each job's card has an Access control with these three states. It writes your choice to the job's `reach` in CRON.md, because the file is what the job is read from, and CRON.md is rewritten inside its TOML block when it does, so comments in the block go. Choosing Public or Full access shows you the job's text first. If the file cannot be written, or holds an entry that does not load, a wider choice changes nothing and you are told. Limited still takes any approval off, so a job cannot stay on Full access because of a bad file. A task can edit CRON.md too, so this page does not stop a later edit changing `reach`: what that edit can reach is still bound by the table below.
+The card has an Access control with these three states. It writes your choice to the job's `reach` in CRON.md, because the file is what the job is read from, and CRON.md is rewritten inside its TOML block when it does, so comments in the block go. Choosing Public or Full access shows you the job's text first. If the file cannot be written, or holds an entry that does not load, a wider choice changes nothing and you are told. Limited still takes any approval off, so a job cannot stay on Full access because of a bad file. A task can edit CRON.md too, so this page does not stop a later edit changing `reach`: what that edit can reach is still bound by the table below.
 
 Where they need approval, Public and Full access are approved against the exact text of the job, which the page shows you. Editing `prompt`, a `prompt_file`, `command`, `skill`, `skill_args`, `publish_shared_kv` or `publish_shared_kv_trusted` drops the approval, and the job runs limited until you approve the new text. Changing the schedule, model or delivery does not. Host and skill entries stay through an edit.
 
-A job can ask ahead of its first run. `egress = ["news.example.com", "skill:browse"]` lists what it needs, and the page and the bell show the request as soon as the job is written. Nothing is granted until you add it, and a recurring job runs with what it has until then. A `once` job with an unmet `egress`, or a `reach` your operator's setting does not cover, does not fire until you approve, however long that takes, because it would otherwise run limited and delete itself along with the request. Dismissing a request does not release the job: add the entry or remove the job from CRON.md. A `once` job that asks for nothing still fires limited and is gone afterwards.
+A job can ask ahead of its first run. `egress = ["news.example.com", "skill:browse"]` lists what it needs, and the job's page and the bell show the request as soon as the job is written. Nothing is granted until you add it, and a recurring job runs with what it has until then. A `once` job with an unmet `egress`, or a `reach` your operator's setting does not cover, does not fire until you approve, however long that takes, because it would otherwise run limited and delete itself along with the request. Dismissing a request does not release the job: add the entry or remove the job from CRON.md. A `once` job that asks for nothing still fires limited and is gone afterwards.
 
 Your operator sets how far a job gets with no approval, with `[security] scheduled_job_max_unapproved`. Past that it runs limited and asks you, and a `once` job waits.
 
@@ -204,6 +206,19 @@ Scheduled job results are excluded from interactive conversation context. This p
 Natural-language reminders are implemented as one-shot cron entries (`once = true`). When a user asks "remind me to do X tomorrow at 9am", the bot creates a CRON.md entry that fires once and auto-deletes.
 
 ## Managing jobs
+
+Settings, Scheduled jobs lists your jobs with each one's schedule, state, access, last run and failures in a row. New job adds one, and opening a job shows its form, its last error and its Network access card. Saving writes CRON.md, and the job shows as waiting for the next sync until the daemon reads it, within about a minute. From the list or the job's page you can run a job now, disable or enable it, and delete it, which takes it out of CRON.md too. Enabling a job Istota suspended after repeated failures starts it again.
+
+The form covers what CRON.md authors, for whoever may set it. Model and run holds the model and effort, with a brain and provider for an admin. Publish holds the shared target and trust, for someone who may publish. Asks ahead of its first run holds the `egress` entries. A model or brain you may no longer pick stays as the file has it until you change or remove it, and the form says the job does not use it.
+
+If you change what a job dispatches or where it publishes and it holds an approval, the page asks whether to keep that access for the new text or save and run limited. Renaming a job starts its network access over, since a new name is a new job, and the page says so first. While CRON.md has a job that does not load, every job is read only, because a rewrite would drop the one that failed.
+
+Some rows have fewer actions:
+
+- A job you just added to CRON.md reads "Waiting for the next sync" until the daemon has read the file, about a minute.
+- If CRON.md holds an entry that does not load, the page says so and links to the file. Jobs are read only until it is fixed, because a rewrite would drop the entry that did not load. Delete is refused for the same reason. Enable and Disable change only the running job, and warn you that the next sync will undo them.
+- A `command` job you are not allowed to run is dropped by the sync, so it stays in the file and never gets a row. The page shows why and links to CRON.md, which is where to fix it.
+- A module's own job appears only when it was refused something, and can only be opened.
 
 In Talk, use `!cron` to list, enable, or disable scheduled jobs:
 

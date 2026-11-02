@@ -1405,6 +1405,7 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     _rebuild_skill_request_kinds(conn, "assignment_activation")
     # Reads the `scheduled_jobs` columns added above. Its own transaction.
     _migrate_egress_seed_open(conn)
+    _migrate_egress_retire_subjects(conn)
     # And then the inbox's one-shot seed, which needs that table to exist. It
     # takes a transaction of its own, so it commits whatever the migrations
     # above left open first (ISSUE-261); nothing after it depends on the
@@ -9318,6 +9319,46 @@ def _migrate_egress_seed_open(conn: sqlite3.Connection) -> None:
     except BaseException:
         conn.rollback()
         raise
+
+
+def _migrate_egress_retire_subjects(conn: sqlite3.Connection) -> None:
+    """Delete what the retired `briefing:` and `tasks-file` subjects still hold.
+
+    Nothing reads these rows, and an open bell row would stay counted, because
+    `store.counts` is plain SQL and only a panel open sweeps a stale row. So the close
+    is here too, and it is `store.resolve_by_object`'s UPDATE over every user; the
+    store imports this module. Runs on every start and changes nothing a second time.
+    """
+
+    def _table_exists(name: str) -> bool:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,),
+        ).fetchone() is not None
+
+    def _retired(column: str) -> str:
+        return f"({column} = 'tasks-file' OR substr({column}, 1, 9) = 'briefing:')"
+
+    removed = {"egress_grants": 0, "egress_refused": 0}
+    for table in removed:
+        if _table_exists(table):
+            removed[table] = conn.execute(
+                f"DELETE FROM {table} WHERE {_retired('subject')}"
+            ).rowcount
+    closed = 0
+    if _table_exists("notifications"):
+        now = iso_utc_now()
+        closed = conn.execute(
+            "UPDATE notifications "
+            "   SET state = 'resolved', resolved_at = ?, resolved_by = 'system', updated_at = ? "
+            " WHERE source = 'egress_refused' AND object_type = 'egress_subject' "
+            f"  AND state = 'open' AND {_retired('object_id')}",
+            (now, now),
+        ).rowcount
+    if removed["egress_grants"] or removed["egress_refused"] or closed:
+        logger.info(
+            "egress_subjects_retired grants=%d refused=%d bell=%d",
+            removed["egress_grants"], removed["egress_refused"], closed,
+        )
 
 
 def _migrate_room_incognito(conn: sqlite3.Connection) -> None:

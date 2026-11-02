@@ -1,15 +1,18 @@
 """Load scheduled job definitions from CRON.md files and sync to DB."""
 
+import dataclasses
 import hashlib
 import json
 import logging
 import os
 import re
 import shlex
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import tomli
+from croniter import croniter
 
 from . import db
 from .rooms import egress
@@ -17,7 +20,12 @@ from .workspace import text_files
 from .workspace.text_files import MemoryMdLocked
 from .workspace.writes import open_or_create_dirs as _open_or_create_dirs
 from istota.sandbox.host_paths import owner_path_parts
-from .storage import OWNER_FILE_MAX_BYTES, get_user_scripts_path, read_owner_text
+from .storage import (
+    OWNER_FILE_MAX_BYTES,
+    USER_CONFIG_READ_CAP_BYTES,
+    get_user_scripts_path,
+    read_owner_text,
+)
 
 # The fence markers (ISSUE-386), and this module is why `toml_fence` states
 # its bounds as loosely as it does: a marker that module does not recognise
@@ -1354,12 +1362,15 @@ def _write_cron_md(
             user_id, e.errno,
         )
         return False
+    return write_regular_file(config_dir / "CRON.md", _cron_md_content(jobs, doc))
+
+
+def _cron_md_content(jobs: list[CronJob], doc: "CronDocument | None") -> str:
+    """The whole file for this job list: spliced into ``doc``, or generated."""
     if doc is not None and doc.block_span is not None:
         start, end = doc.block_span
-        content = doc.content[:start] + render_jobs_block(jobs) + doc.content[end:]
-    else:
-        content = generate_cron_md(jobs)
-    return write_regular_file(config_dir / "CRON.md", content)
+        return doc.content[:start] + render_jobs_block(jobs) + doc.content[end:]
+    return generate_cron_md(jobs)
 
 
 # ---------------------------------------------------------------------------
@@ -1754,6 +1765,9 @@ def _sync_job_approvals(
     no row holds it, so the request returns if the ceiling narrows; a dismissed row is
     a row, so a dismissed request stays dismissed. A row just inserted starts from
     nothing, whatever an earlier job of that name left behind.
+
+    An edit whose new text already holds its grant asks nothing: the owner kept the
+    approval when saving on the page, which may land on either side of this tick.
     """
     from istota.notifications.resolvers import egress_refused
 
@@ -1779,13 +1793,17 @@ def _sync_job_approvals(
     # The deployment covers it: nothing is left to ask, whatever an edit or an earlier
     # tick did.
     covered = egress.REACH_REQUESTS.get(runs_as)
-    ask = [entry for entry in dropped if entry != covered]
+    grants = egress.grants_for(conn, user_id, subject)
+    ask = [
+        entry for entry in dropped
+        if entry != covered and f"{entry}:{digest}" not in grants
+    ]
     if covered:
         egress.clear_refused(conn, user_id, subject, covered)
     if request and request != covered and request not in ask:
         rows = {row["entry"] for row in egress.list_refused(conn, user_id, subject)}
         if (
-            f"{request}:{digest}" not in egress.grants_for(conn, user_id, subject)
+            f"{request}:{digest}" not in grants
             and (text_changed or request not in rows)
         ):
             ask.append(request)
@@ -1950,7 +1968,7 @@ def update_job_enabled_in_cron_md(config, user_id: str, job_name: str, enabled: 
 
 def _update_job_enabled_locked(config, user_id: str, job_name: str, enabled: bool) -> bool:
     doc = load_cron_document(config, user_id)
-    if doc is None:
+    if doc is None or document_hides_jobs(doc):
         return False
     jobs = doc.jobs
 
@@ -1988,9 +2006,15 @@ def update_job_reach_in_cron_md(config, user_id: str, job_name: str, reach: str)
     )
 
 
+def document_hides_jobs(doc: "CronDocument") -> bool:
+    """Whether the file holds a job ``doc.jobs`` lacks. A rewrite is built from the jobs
+    that parsed, so writing this document would delete that job from the file."""
+    return bool(doc.skipped_entries or doc.refused_names or doc.unread_names)
+
+
 def _update_job_reach_locked(config, user_id: str, job_name: str, reach: str) -> bool:
     doc = load_cron_document(config, user_id)
-    if doc is None or doc.skipped_entries or doc.refused_names or doc.unread_names:
+    if doc is None or document_hides_jobs(doc):
         return False
     for job in doc.jobs:
         if job.name == job_name:
@@ -2087,3 +2111,424 @@ def remove_job_definition(config, user_id: str, job_name: str) -> bool:
 
     config_dir = resolve_user_config_dir(config, user_id)
     return config_dir is None or not os.path.lexists(config_dir / "CRON.md")
+
+
+# ---------------------------------------------------------------------------
+# The page's writer: one whole job definition
+#
+# `validate_job_input` turns a form's fields into a `CronJob`, and
+# `save_job_definition` splices it in under the file's lock. Refusal text goes
+# back to the browser, so it names no value from the body, and the checks shared
+# with the parser are handed `_FORM_JOB` rather than the job's name, since they
+# log what they are given and a job name is model-writable.
+# ---------------------------------------------------------------------------
+
+_FORM_JOB = "(page)"
+_MAX_JOB_NAME_CHARS = 100
+_MAX_JOB_PROMPT_BYTES = 48 * 1024
+_FORM_REACHES = ("limited", "public", "full")
+_ROUTE_REFUSED = (
+    "A job cannot deliver there. Choose an output this deployment has, or one of "
+    "your own rooms that nobody else reads."
+)
+
+
+class JobFieldError(ValueError):
+    """One field of a job the page sent cannot be saved. The text is for the person."""
+
+    def __init__(self, field_name: str, message: str) -> None:
+        super().__init__(message)
+        self.field = field_name
+        self.message = message
+
+
+@dataclass(frozen=True)
+class JobSaveOutcome:
+    status: str  # ok | locked | unreadable | changed | name_taken | not_found | too_large | invalid | failed
+    errors: tuple[str, ...] = ()
+
+
+def job_revision(job: CronJob) -> str:
+    """What the page read, for the writer to compare. The job as the file renders it,
+    plus the text a `prompt_file` holds, which the rendering only names: the form shows
+    that text, so an edit of the file behind the page is a change too."""
+    digest = hashlib.sha256(render_jobs_block([job]).encode("utf-8", "surrogatepass"))
+    if job.prompt_file:
+        digest.update(job.prompt.encode("utf-8", "surrogatepass"))
+    return digest.hexdigest()
+
+
+def job_text_digest(job: CronJob, *, is_admin: bool) -> str:
+    """The digest the next sync will compute for this job, by the sync's own steps."""
+    cmd_val, skill_val, skill_args_val = _resolve_job_dispatch(job)
+    return egress.job_digest(_file_owned_values(
+        job, cmd_val, skill_val, skill_args_val,
+        fj_brain_or_none(job, is_admin), fj_provider_or_none(job, is_admin),
+    ))
+
+
+def _form_text(payload: dict, key: str, default: str) -> str:
+    """A text field, stripped as the parser strips it, so the digest taken now is the
+    one the sync computes. Absent keeps ``default``, and null is a clear."""
+    if key not in payload:
+        return default
+    value = payload[key]
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise JobFieldError(key, "This must be text.")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise JobFieldError(key, "This holds characters that cannot be stored.") from None
+    return value.strip()
+
+
+def _form_bool(payload: dict, key: str, default: bool) -> bool:
+    if key not in payload:
+        return default
+    value = payload[key]
+    if not isinstance(value, bool):
+        raise JobFieldError(key, "This must be true or false.")
+    return value
+
+
+def _check_job_name(name: str) -> None:
+    if not name:
+        raise JobFieldError("name", "A job needs a name.")
+    if len(name) > _MAX_JOB_NAME_CHARS:
+        raise JobFieldError("name", f"A job name is at most {_MAX_JOB_NAME_CHARS} characters.")
+    if any(unicodedata.category(ch) == "Cc" for ch in name):
+        raise JobFieldError("name", "A job name cannot hold control characters.")
+    if name.startswith(_MODULE_JOB_PREFIX):
+        raise JobFieldError("name", f"Names starting with {_MODULE_JOB_PREFIX} are reserved.")
+
+
+def _apply_job_text(job: CronJob, payload: dict, stored: CronJob | None, is_admin: bool) -> None:
+    """The prompt or command. Unchanged text on a `prompt_file` job keeps the reference;
+    changed text clears it, the writer externalizes as usual, and the old file stays."""
+    kind_default = "" if stored is None else ("command" if stored.command else "prompt")
+    kind = _form_text(payload, "kind", kind_default)
+    if kind == "prompt":
+        # The newlines `read_owner_text` hands back from an externalized prompt, or the
+        # digest taken now would not be the one the sync computes.
+        prompt = _form_text(payload, "prompt", job.prompt).replace("\r\n", "\n").replace("\r", "\n")
+        if not prompt:
+            raise JobFieldError("prompt", "A prompt job needs a prompt.")
+        if stored is None or prompt != stored.prompt:
+            if len(prompt.encode("utf-8")) > _MAX_JOB_PROMPT_BYTES:
+                raise JobFieldError("prompt", "A prompt is at most 48 KiB.")
+            job.prompt_file = ""
+        job.prompt = prompt
+        job.command = ""
+    elif kind == "command":
+        command = _form_text(payload, "command", job.command)
+        if not command:
+            raise JobFieldError("command", "A command job needs a command.")
+        job.command = command
+        job.prompt = ""
+        job.prompt_file = ""
+        if fj_is_disallowed_command(job, is_admin):
+            raise JobFieldError(
+                "command",
+                "Command jobs are admin-only. Use a prompt, or a plain "
+                "`istota-skill <skill> ...` command.",
+            )
+    else:
+        raise JobFieldError("kind", "A job is a prompt or a command.")
+
+
+def _check_job_target(config, user_id: str, target: str) -> None:
+    """A target the page may save. A `room:<token>` leaf delivers into that room as a
+    `web:<token>` leaf does, so it takes the same room check, which the surface list and
+    the descriptor check do not otherwise apply to it."""
+    from .transport import parse_output_target
+    from .transport.route_checks import validate_descriptor_rooms, validate_descriptor_surfaces
+
+    leaves = []
+    for leaf in parse_output_target(target):
+        if leaf.surface == "room":
+            if not leaf.channel:
+                raise JobFieldError("target", "A room target names its room.")
+            leaves.append(f"web:{leaf.channel}")
+        else:
+            leaves.append(f"{leaf.surface}:{leaf.channel}" if leaf.channel else leaf.surface)
+    descriptor = ",".join(leaves)
+    try:
+        validate_descriptor_surfaces(config, descriptor)
+        validate_descriptor_rooms(config, descriptor, user_id)
+    except ValueError:
+        raise JobFieldError("target", _ROUTE_REFUSED) from None
+
+
+def _job_room(
+    config, user_id: str, payload: dict, job: CronJob, stored: CronJob | None,
+) -> str:
+    """The `room` a job stores for its target. The server sets it for a `room:` or `web:`
+    leaf, so the answer lands as a turn (ISSUE-511). A Talk target takes the token sent.
+    A pairing the file already has on an unchanged target, such as `sms` with its private
+    room, is left as it stands, and anything else names no room."""
+    from .transport import parse_output_target
+    from .transport.route_checks import validate_talk_route_token
+
+    sent = _form_text(payload, "room", job.room)
+    leaves = parse_output_target(job.target)
+    for leaf in leaves:
+        if leaf.surface in ("room", "web") and leaf.channel:
+            return leaf.channel
+    if any(leaf.surface == "talk" for leaf in leaves):
+        if stored is None or sent != stored.room:
+            try:
+                validate_talk_route_token(config, sent, user_id)
+            except ValueError:
+                raise JobFieldError("room", _ROUTE_REFUSED) from None
+        return sent
+    if stored is not None and job.target == stored.target and sent == stored.room:
+        return sent
+    return ""
+
+
+def _is_new_value(value: str, stored: CronJob | None, name: str) -> bool:
+    """Whether a restricted field needs judging. A value unchanged from the file is
+    never judged again, so a job whose owner lost a right can still be edited, and
+    clearing one is always allowed."""
+    return bool(value) and value != (getattr(stored, name) if stored is not None else "")
+
+
+def _apply_brain_and_provider(
+    config, user_id: str, payload: dict, job: CronJob, stored: CronJob | None,
+) -> None:
+    from .brain import native_providers, resolve_brain_kind, room_selectable_kinds
+    from .brain._resolve import native_reach_ids
+
+    is_admin = config.is_admin(user_id)
+    brain = _form_text(payload, "brain", job.brain)
+    if _is_new_value(brain, stored, "brain"):
+        if not is_admin:
+            raise JobFieldError("brain", "Only an admin can pin a job to a brain.")
+        if brain not in room_selectable_kinds(config.brain):
+            raise JobFieldError("brain", "This deployment does not offer that brain.")
+    job.brain = brain
+
+    provider = _form_text(payload, "provider", job.provider)
+    if _is_new_value(provider, stored, "provider"):
+        if not is_admin:
+            raise JobFieldError("provider", "Only an admin can choose a job's provider.")
+        kind = resolve_brain_kind("scheduled", config.brain, override=brain or None).kind
+        if kind != "native":
+            raise JobFieldError("provider", "Only a job on the native brain has a provider.")
+        if provider not in native_reach_ids(config) or provider not in native_providers(config.brain):
+            raise JobFieldError("provider", "The native brain may not send to that provider.")
+    job.provider = provider
+
+
+def _apply_model_and_effort(
+    config, user_id: str, payload: dict, job: CronJob, stored: CronJob | None,
+) -> None:
+    """After the brain and provider, which the model is judged against. A model unchanged
+    from the file stays, even one its owner may no longer pick: the sync drops it, as it
+    does today. Whitespace is refused here because `_validate_model` lets it through for
+    the file's sake, before it asks who may pick what."""
+    is_admin = config.is_admin(user_id)
+    model = _form_text(payload, "model", job.model)
+    if model != (stored.model if stored is not None else ""):
+        if any(ch.isspace() for ch in model):
+            raise JobFieldError("model", "A model name has no spaces.")
+        if model and not _validate_model(
+            _FORM_JOB, user_id, model, config,
+            job.brain if is_admin else "", [],
+            provider=job.provider if is_admin else "",
+        ):
+            raise JobFieldError("model", "You cannot pick that model for this job.")
+        job.model_refused = False
+        job.model_split = None
+    job.model = model
+
+    effort = _form_text(payload, "effort", job.effort)
+    if _is_new_value(effort, stored, "effort") and effort not in _KNOWN_EFFORT_VALUES:
+        raise JobFieldError("effort", "That is not an effort level.")
+    job.effort = effort
+
+
+def _apply_publish(
+    config, user_id: str, payload: dict, job: CronJob, stored: CronJob | None,
+) -> None:
+    from istota.briefings.sources.kv import parse_shared_kv_target
+    from istota.sandbox.kv_namespaces import is_reserved_namespace
+
+    target = _form_text(payload, "publish_shared_kv", job.publish_shared_kv)
+    if _is_new_value(target, stored, "publish_shared_kv"):
+        if not config.is_shared_kv_writer(user_id):
+            raise JobFieldError("publish_shared_kv", "You cannot publish to shared content.")
+        namespace, key = parse_shared_kv_target(target)
+        if not namespace or not key:
+            raise JobFieldError("publish_shared_kv", "A publish target is <namespace>/<key>, or a key.")
+        if is_reserved_namespace(namespace):
+            raise JobFieldError("publish_shared_kv", "That namespace is reserved.")
+    job.publish_shared_kv = target
+
+    trusted = _form_bool(payload, "publish_shared_kv_trusted", job.publish_shared_kv_trusted)
+    if trusted and not (stored is not None and stored.publish_shared_kv_trusted):
+        if not config.is_shared_kv_writer(user_id):
+            raise JobFieldError("publish_shared_kv_trusted", "You cannot publish to shared content.")
+        if not target:
+            raise JobFieldError("publish_shared_kv_trusted", "Trust needs a publish target.")
+    job.publish_shared_kv_trusted = trusted and bool(target)
+
+
+def _apply_egress(
+    config, user_id: str, payload: dict, job: CronJob, stored: CronJob | None,
+) -> None:
+    """The requests a job makes. `_validate_egress`'s own skill sentence names the entry,
+    so that refusal is worded here. `egress_kept` is not the form's to change: an entry
+    in it stays and is not judged, sent or not."""
+    if "egress" not in payload:
+        return
+    raw = payload["egress"]
+    if not isinstance(raw, list):
+        raise JobFieldError("egress", "This must be a list of hosts and skill:<name> entries.")
+    held = set(stored.egress_kept) if stored is not None else set()
+    judged = [entry for entry in raw if not (isinstance(entry, str) and entry.strip() in held)]
+    errors: list[str] = []
+    declared, refused_skills = _validate_egress(_FORM_JOB, config, user_id, judged, errors)
+    if refused_skills:
+        raise JobFieldError("egress", "That is not a skill that needs approval and that you can use.")
+    if errors:
+        raise JobFieldError("egress", errors[0].removeprefix(f"Job '{_FORM_JOB}': "))
+    job.egress = declared
+
+
+def validate_job_input(config, user_id: str, payload, stored: CronJob | None) -> CronJob:
+    """The candidate job from the page's fields, or `JobFieldError`.
+
+    Starts from ``stored`` where there is one, so what the form does not send is kept.
+    Run before the file's lock is taken: `save_job_definition` compares ``stored``'s
+    revision under the lock, so a job edited since is refused there.
+    """
+    if not isinstance(payload, dict):
+        raise JobFieldError("body", "This is not a job.")
+    is_admin = config.is_admin(user_id)
+    job = dataclasses.replace(stored) if stored is not None else CronJob(name="", cron="")
+
+    name = _form_text(payload, "name", job.name)
+    if stored is None or name != stored.name:
+        _check_job_name(name)
+    job.name = name
+
+    job.cron = _form_text(payload, "cron", job.cron)
+    if not job.cron or not croniter.is_valid(job.cron):
+        raise JobFieldError("cron", "That is not a cron schedule.")
+
+    _apply_job_text(job, payload, stored, is_admin)
+
+    job.target = _form_text(payload, "target", job.target)
+    if job.target and (stored is None or job.target != stored.target):
+        _check_job_target(config, user_id, job.target)
+    job.room = _job_room(config, user_id, payload, job, stored)
+
+    job.enabled = _form_bool(payload, "enabled", job.enabled)
+    job.once = _form_bool(payload, "once", job.once)
+    job.silent_unless_action = _form_bool(payload, "silent_unless_action", job.silent_unless_action)
+    job.skip_log_channel = _form_bool(payload, "skip_log_channel", job.skip_log_channel)
+
+    # On edit the Access control sets it, through `update_job_reach_in_cron_md`.
+    if stored is None:
+        reach = _form_text(payload, "reach", "")
+        if reach and reach not in _FORM_REACHES:
+            raise JobFieldError("reach", "Access is limited, public or full.")
+        job.reach = reach
+
+    _apply_brain_and_provider(config, user_id, payload, job, stored)
+    _apply_model_and_effort(config, user_id, payload, job, stored)
+    _apply_publish(config, user_id, payload, job, stored)
+    _apply_egress(config, user_id, payload, job, stored)
+    return job
+
+
+def _candidate_errors(config, user_id: str, job: CronJob, stored: CronJob | None) -> list[str]:
+    """What the sync's own parser says of this job alone. Two things the file may hold
+    and the parser reports are left out when unchanged from ``stored``: a model its owner
+    may no longer pick and a kept `egress` entry, both of which a save keeps as they are."""
+    probe = dataclasses.replace(job)
+    if stored is not None:
+        if job.model == stored.model:
+            probe.model = ""
+        probe.egress_kept = tuple(e for e in job.egress_kept if e not in stored.egress_kept)
+    content = f"```toml\n{render_jobs_block([probe])}```\n"
+    return cron_document_errors(content, config, user_id)
+
+
+def save_job_definition(
+    config, user_id: str, job: CronJob, *,
+    original_name: str | None, expected_revision: str | None,
+) -> JobSaveOutcome:
+    """Add a job (``original_name`` None) or replace one, under the file's lock.
+
+    Must not be called inside a write transaction: the write lands on the mount
+    (ISSUE-387). The row moves on the daemon's next sync, not here, since a scheduler
+    tick holding the older text could otherwise run after this and write it back.
+    """
+    if not config.has_workspace:
+        return JobSaveOutcome("unreadable")
+    outcome: JobSaveOutcome | None = None
+
+    def locked() -> bool:
+        nonlocal outcome
+        # A copy: the writer stamps `prompt_file` on what it externalizes, even when
+        # the write then fails.
+        outcome = _save_job_locked(
+            config, user_id, dataclasses.replace(job), original_name, expected_revision,
+        )
+        return outcome.status == "ok"
+
+    _with_cron_md_lock(config, user_id, locked)
+    return outcome if outcome is not None else JobSaveOutcome("locked")
+
+
+def job_file_writable(config, user_id: str, doc: "CronDocument | None") -> bool:
+    """Whether a whole job may be written over ``doc``, this user's CRON.md as just read.
+    No document is fine only where there is no file."""
+    from .storage import resolve_user_config_dir  # noqa: PLC0415 - import cycle
+
+    if doc is None:
+        config_dir = resolve_user_config_dir(config, user_id)
+        return config_dir is not None and not os.path.lexists(config_dir / "CRON.md")
+    return not (document_hides_jobs(doc) or doc.block is None)
+
+
+def _save_job_locked(
+    config, user_id: str, job: CronJob,
+    original_name: str | None, expected_revision: str | None,
+) -> JobSaveOutcome:
+    doc = load_cron_document(config, user_id)
+    if not job_file_writable(config, user_id, doc):
+        return JobSaveOutcome("unreadable")
+    jobs = list(doc.jobs) if doc is not None else []
+
+    position = None
+    stored = None
+    if original_name is not None:
+        for index, candidate in enumerate(jobs):
+            if candidate.name == original_name:
+                position, stored = index, candidate
+                break
+        if stored is None:
+            return JobSaveOutcome("not_found")
+        if job_revision(stored) != expected_revision:
+            return JobSaveOutcome("changed")
+    if job.name != original_name and any(other.name == job.name for other in jobs):
+        return JobSaveOutcome("name_taken")
+
+    errors = _candidate_errors(config, user_id, job, stored)
+    if errors:
+        return JobSaveOutcome("invalid", tuple(errors))
+
+    if position is None:
+        jobs.append(job)
+    else:
+        jobs[position] = job
+    if len(_cron_md_content(jobs, doc).encode("utf-8")) > USER_CONFIG_READ_CAP_BYTES:
+        return JobSaveOutcome("too_large")
+    if not _write_cron_md(config, user_id, jobs, doc):
+        return JobSaveOutcome("failed")
+    return JobSaveOutcome("ok")
