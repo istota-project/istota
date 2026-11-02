@@ -159,6 +159,8 @@ Where they need approval, Public and Full access are approved against the exact 
 
 A job can ask ahead of its first run. `egress = ["news.example.com", "skill:browse"]` lists what it needs, and the job's page and the bell show the request as soon as the job is written. Nothing is granted until you add it, and a recurring job runs with what it has until then. A `once` job with an unmet `egress`, or a `reach` your operator's setting does not cover, does not fire until you approve, however long that takes, because it would otherwise run limited and delete itself along with the request. Running it by hand is refused for the same reason. Dismissing a request does not release the job: add the entry or remove the job from CRON.md. A `once` job that asks for nothing still fires limited and is gone afterwards.
 
+A job that needs an internal service can name it as `host:port`, such as `192.168.1.10:8080`, on its page or in `egress`. It takes effect only if your deployment already allows that endpoint: your operator lists it with `"192.168.1.10" = ["egress"]` in [`[private_hosts]`](../configuration/reference.md) or in `extra_hosts`, or you are an admin and it is the address of a credential you added, where a name must also resolve to a public address. Otherwise the page says the address is not one this deployment allows, and CRON.md reports it as an error and does not ask. An endpoint is for the job's shell commands, not WebFetch. A service on plain HTTP also needs a credential bound to it with HTTP allowed.
+
 Your operator sets how far a job gets with no approval, with `[security] scheduled_job_max_unapproved`. Past that it runs limited and asks you, and a `once` job waits.
 
 | Setting | With no approval | Needs your approval |

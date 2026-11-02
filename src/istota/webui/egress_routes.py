@@ -107,6 +107,7 @@ async def settings_network_grant(
             raise egress.EntryRefused("A job's text is approved from its own button.")
         egress.add_grant(
             conn, user_id, body["subject"], parsed.text, decided_via="web", skill_index=skills,
+            operator=egress.operator_endpoints(conn, config, user_id),
         )
         egress.clear_refused(conn, user_id, body["subject"], parsed.text)
 

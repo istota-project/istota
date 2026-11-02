@@ -12,6 +12,11 @@ imports this module (`tests/test_egress_grants.py`). CRON.md and prompt files ar
 model-writable, so `open:` and `public:` name a digest of the job's exact text, and
 a row whose text has moved no longer matches.
 
+An endpoint grant (`host:port`, IP literals included) reaches a private address or a
+port other than 443, so it takes effect only where the operator has already allowed
+that endpoint (`operator_endpoints`). The owner's grant narrows that decision to one
+job, and text a model wrote cannot name a LAN target into existence.
+
 No `istota.db` import: `db._migrate_egress_seed_open` calls in here, and the module
 sits below it.
 """
@@ -27,6 +32,8 @@ import sqlite3
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from istota.sandbox.net_guard import normal_host
 
 if TYPE_CHECKING:
     from istota import db
@@ -61,6 +68,14 @@ ACCESS_REACH = {REACH_LIMITED: REACH_LIMITED, POSTURE_PUBLIC: POSTURE_PUBLIC, "o
 POSTURE_PRIVATE = "private"
 #: Refusal entries that ask for a decision about a job, rather than name a host.
 JOB_REQUESTS = ("open", "public")
+#: The entry kinds that name where a task may connect.
+HOST_KINDS = ("host", "endpoint")
+#: `credential_bindings.source` values a person writes. A task's `new` is `generated`.
+_PERSON_WRITTEN_SOURCES = frozenset({"vault", "local"})
+#: `local.create`'s `system_prefix`: a `local` row whose URL came from a share's sender.
+_SENDER_WRITTEN_PREFIX = "ocm_share_"
+_HTTPS_PORT = 443
+_MAX_PORT = 65535
 MODULE_JOB_PREFIX = "_module."
 MAX_REFUSED_PER_SUBJECT = 20
 #: What a job's `egress` may list. Room is left for both job requests: at the table's
@@ -74,6 +89,7 @@ _LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 _SKILL_RE = re.compile(r"[a-z0-9_-]{1,64}")
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _NUMERIC_LABEL_RE = re.compile(r"[0-9]+|0x[0-9a-f]*")
+_PORT_RE = re.compile(r"[0-9]{1,5}")
 
 
 class EntryRefused(ValueError):
@@ -86,20 +102,21 @@ class StaleJob(EntryRefused):
 
 @dataclass(frozen=True)
 class Entry:
-    kind: str  # 'host' | 'skill' | 'public' | 'open'
+    kind: str  # 'host' | 'endpoint' | 'skill' | 'public' | 'open'
     value: str
 
     @property
     def text(self) -> str:
-        return self.value if self.kind == "host" else f"{self.kind}:{self.value}"
+        return self.value if self.kind in HOST_KINDS else f"{self.kind}:{self.value}"
 
 
 def parse_entry(text: object) -> Entry:
     """One grant entry in its normal form, or `EntryRefused`.
 
-    Hosts are exact: at least two labels, no scheme, path, port, wildcard or IP
-    literal. So a grant can never cover a subdomain, which is an exfiltration
-    channel of its own, and no public-suffix list is needed.
+    Hosts are exact: at least two labels, no scheme, path or wildcard. So a grant can
+    never cover a subdomain, which is an exfiltration channel of its own, and no
+    public-suffix list is needed. An IP literal or a port other than 443 makes it an
+    endpoint, `host:port`, and an address always states its port.
     """
     if not isinstance(text, str):
         raise EntryRefused("An entry must be text.")
@@ -117,25 +134,68 @@ def parse_entry(text: object) -> Entry:
             if not _DIGEST_RE.fullmatch(digest):
                 raise EntryRefused(f"An {kind} entry names the digest of a job's text.")
             return Entry(kind, digest)
-    return Entry("host", _normal_host(stripped))
+    return _host_entry(stripped.lower())
+
+
+def _host_entry(text: str) -> Entry:
+    host, colon, port = text.rpartition(":")
+    if not colon or _is_address(text) or not _PORT_RE.fullmatch(port):
+        return Entry("host", _normal_host(text))
+    number = int(port)
+    if not 1 <= number <= _MAX_PORT:
+        raise EntryRefused("A port is a number from 1 to 65535.")
+    address = _normal_address(host)
+    if address is not None:
+        return Entry("endpoint", f"{address}:{number}")
+    name = _normal_host(host)
+    return Entry("host", name) if number == _HTTPS_PORT else Entry("endpoint", f"{name}:{number}")
+
+
+def _is_address(text: str) -> bool:
+    try:
+        ipaddress.ip_address(text.strip("[]"))
+    except ValueError:
+        return False
+    return True
+
+
+def _normal_address(host: str) -> str | None:
+    """An endpoint's IP literal in one spelling, bracketed for IPv6, or None for a name.
+
+    The proxy connects from the daemon's network, so no grant names its loopback, and
+    none names a link-local address, which is where a cloud's metadata service is.
+    """
+    bracketed = host.startswith("[") and host.endswith("]")
+    if not bracketed and ("[" in host or "]" in host):
+        raise EntryRefused("An IPv6 address goes in brackets, such as [fd00::1]:8080.")
+    try:
+        address = ipaddress.IPv6Address(host[1:-1]) if bracketed else ipaddress.IPv4Address(host)
+    except ValueError:
+        if bracketed:
+            raise EntryRefused("An IPv6 address goes in brackets, such as [fd00::1]:8080.") from None
+        return None
+    if (
+        address.is_loopback or address.is_link_local or address.is_multicast
+        or address.is_unspecified or address.is_reserved
+        or getattr(address, "ipv4_mapped", None) is not None
+        or getattr(address, "scope_id", None) is not None
+    ):
+        raise EntryRefused("A grant cannot name that address.")
+    return f"[{address}]" if bracketed else str(address)
 
 
 def _normal_host(text: str) -> str:
-    host = text.lower()
+    host = text
     if len(host) > _MAX_HOST_CHARS:
         raise EntryRefused("That host name is too long.")
-    try:
-        ipaddress.ip_address(host.strip("[]"))
-    except ValueError:
-        pass
-    else:
-        raise EntryRefused("A host is a name, not an IP address.")
+    if _is_address(host):
+        raise EntryRefused("An address needs a port, such as 192.168.1.10:8080.")
     labels = host.split(".")
     if len(labels) < 2:
         raise EntryRefused("A host needs at least two labels, such as example.com.")
     if not all(_LABEL_RE.fullmatch(label) for label in labels):
         raise EntryRefused(
-            "A host is an exact name with no scheme, path, port or wildcard, such as "
+            "A host is an exact name with no scheme, path or wildcard, such as "
             "news.example.com."
         )
     # A resolver reads a name ending in a number as an address: 127.1, 0x7f.0.0.1.
@@ -212,8 +272,8 @@ def grants_for(conn: sqlite3.Connection, user_id: str, subject: str | None) -> f
     return frozenset(row[0] for row in rows)
 
 
-def _entries_of_kind(grants: frozenset[str], kind: str) -> frozenset[str]:
-    """The values of one kind. A row written by hand that does not parse grants nothing."""
+def _entries_of_kind(grants: frozenset[str], *kinds: str) -> frozenset[str]:
+    """The values of these kinds. A row written by hand that does not parse grants nothing."""
     values = set()
     for text in grants:
         try:
@@ -221,17 +281,111 @@ def _entries_of_kind(grants: frozenset[str], kind: str) -> frozenset[str]:
         except EntryRefused:
             logger.warning("egress_grant_malformed: dropped on read")
             continue
-        if entry.kind == kind:
+        if entry.kind in kinds:
             values.add(entry.value)
     return frozenset(values)
 
 
 def approved_hosts(conn: sqlite3.Connection, user_id: str, subject: str | None) -> frozenset[str]:
-    return _entries_of_kind(grants_for(conn, user_id, subject), "host")
+    return _entries_of_kind(grants_for(conn, user_id, subject), *HOST_KINDS)
 
 
 def approved_skills(conn: sqlite3.Connection, user_id: str, subject: str | None) -> frozenset[str]:
     return _entries_of_kind(grants_for(conn, user_id, subject), "skill")
+
+
+@dataclass(frozen=True)
+class OperatorEndpoints:
+    """Where the deployment already lets a job's owner point a grant: exact `host:port`
+    endpoints and hosts at any port the operator wrote, and an admin's credential hosts."""
+
+    endpoints: frozenset[str] = frozenset()
+    hosts: frozenset[str] = frozenset()
+    bound: frozenset[str] = frozenset()
+
+    def allows(self, endpoint: str) -> bool:
+        return endpoint in self.bound or self._operator_wrote(endpoint)
+
+    def may_be_private(self, endpoint: str) -> bool:
+        """Listing a name switches off the proxy's address check, so its DNS decides
+        where the daemon connects. A binding says which credential goes to a name, not
+        that the name is the deployment's, so it lets only a literal address through."""
+        if self._operator_wrote(endpoint):
+            return True
+        return endpoint in self.bound and _is_address(_endpoint_host(endpoint))
+
+    def _operator_wrote(self, endpoint: str) -> bool:
+        return endpoint in self.endpoints or _endpoint_host(endpoint) in self.hosts
+
+
+def _endpoint_host(endpoint: str) -> str:
+    """The host the network proxy compares: no port, no IPv6 brackets."""
+    return endpoint.rpartition(":")[0].strip("[]")
+
+
+def _table_host(host: object) -> str:
+    """A `[private_hosts]` name in the spelling an entry's host has."""
+    name = normal_host(host)
+    try:
+        return str(ipaddress.ip_address(name))
+    except ValueError:
+        return name
+
+
+def _bound_endpoint(bound: str) -> str:
+    """A credential binding's host (`credential_host`) as `host:port`. It omits a
+    scheme's default port, and only plain http keeps its scheme."""
+    authority = bound.removeprefix("http://")
+    if authority.endswith("]") or ":" not in authority:
+        return f"{authority}:{80 if authority != bound else _HTTPS_PORT}"
+    return authority
+
+
+def operator_endpoints(
+    conn: sqlite3.Connection | None, config, user_id: str,
+) -> OperatorEndpoints:
+    """What counts as the operator's decision for this user's endpoint grants.
+
+    `extra_hosts`, the `egress` grants in `[private_hosts]`, and for an admin the hosts
+    of their own person-written credentials. A task can make a credential with a URL it
+    chose (`generated`), a share's sender chooses an accepted share's, and any user can
+    add one, so none of those is the deployment deciding what is on its LAN. No other
+    consumer's `[private_hosts]` grant counts. `conn` None reads no binding, which only
+    narrows.
+    """
+    bound: set[str] = set()
+    if conn is not None and config.is_admin(user_id):
+        for row in conn.execute(
+            "SELECT name, hosts, source FROM credential_bindings WHERE user_id = ?", (user_id,),
+        ):
+            if row[2] in _PERSON_WRITTEN_SOURCES and not row[0].startswith(_SENDER_WRITTEN_PREFIX):
+                bound.update(_bound_endpoint(host) for host in json.loads(row[1]))
+    return OperatorEndpoints(
+        frozenset(str(entry).strip().lower() for entry in config.security.network.extra_hosts),
+        frozenset(_table_host(host) for host in config.egress.private_hosts),
+        frozenset(bound),
+    )
+
+
+def grants_in_force(
+    hosts: frozenset[str], operator: OperatorEndpoints,
+) -> tuple[frozenset[str], frozenset[str]]:
+    """A limited task's approved hosts as they take effect now: the ones it keeps, and
+    the names among them that may resolve to a private address.
+
+    Checked at each task as well as at the grant, so that an operator withdrawing an
+    endpoint withdraws what was granted on it. A plain name keeps its grant at 443 and
+    must resolve public unless the operator allows it.
+    """
+    kept: set[str] = set()
+    private: set[str] = set()
+    for host in hosts:
+        endpoint = host if ":" in host else f"{host}:{_HTTPS_PORT}"
+        if operator.may_be_private(endpoint):
+            private.add(_endpoint_host(endpoint))
+        if endpoint != host or operator.allows(endpoint):
+            kept.add(host)
+    return frozenset(kept), frozenset(private)
 
 
 def job_approved(conn: sqlite3.Connection, root: "db.Task", kind: str) -> bool:
@@ -426,12 +580,14 @@ def add_grant(
     *,
     decided_via: str,
     skill_index: "Mapping[str, object] | None" = None,
+    operator: OperatorEndpoints | None = None,
 ) -> Entry:
     """Approve an entry for a subject, on the caller's transaction.
 
     The writer. A task reaching this could approve itself, so its callers are
     held to a short list by `tests/test_egress_grants.py`. `skill_index` is what a
-    `skill:` entry is checked against: it must name an `external` skill.
+    `skill:` entry is checked against: it must name an `external` skill. `operator` is
+    what an endpoint is checked against, so the page can say why at the moment it asks.
     """
     if decided_via not in DECIDERS:
         raise EntryRefused("Unknown way of deciding.")
@@ -446,6 +602,11 @@ def add_grant(
             raise EntryRefused("There is no such skill.")
         if getattr(meta, "egress", "external") == "local":
             raise EntryRefused("That skill does not need approval.")
+    if parsed.kind == "endpoint" and (operator is None or not operator.allows(parsed.value)):
+        raise EntryRefused(
+            "That address is not one this deployment allows. An operator can allow it with "
+            '"egress" in [private_hosts], and an admin by binding a credential to it.'
+        )
     conn.execute(
         "INSERT OR IGNORE INTO egress_grants (user_id, subject, entry, decided_via) "
         "VALUES (?, ?, ?, ?)",
@@ -868,7 +1029,7 @@ def describe_subject(
         "label": subject_label(subject),
         "state": job_state(grants, row),
         "by_default": by_default,
-        "hosts": sorted(_entries_of_kind(grants, "host")),
+        "hosts": sorted(_entries_of_kind(grants, *HOST_KINDS)),
         "skills": sorted(_entries_of_kind(grants, "skill")),
         "approvals": sorted(
             text for text in grants if text.partition(":")[0] in JOB_REQUESTS

@@ -32,12 +32,15 @@ A row in `egress_grants` means approved, and there is no pending or denied state
 
 | Entry | Meaning |
 | --- | --- |
-| `<host>` | That exact host, for WebFetch and the shell. No subdomain, scheme, path, port, wildcard or IP literal |
+| `<host>` | That exact host at 443, for WebFetch and the shell. No subdomain, scheme, path, wildcard or IP literal. `<host>:443` is the same entry |
+| `<host>:<port>` | That exact endpoint, for the shell only, if the operator allows it (below). An IP literal goes here, with IPv6 in brackets |
 | `skill:<name>` | One `external` skill. `skill:browse` runs on the isolated profile with no credential verbs |
 | `public:<digest>` | This exact job text runs with no private data and open web |
 | `open:<digest>` | This exact job text runs as it did before, with the user's browser profile and every skill |
 
 The digest covers a job's `prompt`, `command`, `skill`, `skill_args`, `publish_shared_kv` and `publish_shared_kv_trusted`. The last two are there because a job's answer goes where they say, into other users' briefings. The sync resolves `prompt_file` into `prompt`, so the file's content is covered. Editing any of them drops the job's `open:` and `public:` approvals and asks again, unless the setting below covers the job. A schedule, model or delivery edit does not.
+
+An endpoint grant can reach a private address or a port other than 443, so it needs both sides. The owner's grant says which job, and the operator has to allow the endpoint already, in one of three ways: `[security.network] extra_hosts`, which names that exact endpoint and also opens it to every task; an `egress` grant in `[private_hosts]`, which covers any port on that host and opens nothing until a job is granted it; or, for an admin's own jobs, a credential the admin added and bound to that endpoint. A credential a task made with `istota-credential new` does not count, because the model chose its URL. Nor does an accepted share's, whose URL the sender chose, or a non-admin's, because any user can add one. No other consumer's grant in `[private_hosts]` counts. `egress.operator_endpoints` is that rule. `add_grant` refuses an endpoint the operator does not allow, and `executor._egress_grants_in_force` checks again for each task, so withdrawing the operator's side withdraws what was granted on it. A plain name in that table or in `extra_hosts` may resolve to a private address too. A credential binding lets only a literal address be private: a bound name must still resolve public, because listing a name switches off the proxy's address check and its DNS would then decide where the daemon connects. An entry cannot state a loopback, link-local, multicast, unspecified or reserved address, because the proxy connects from the daemon's network. A name the operator wrote is checked by nothing further, as it always has been. A binding adds nothing by itself: the grant is what puts an endpoint on the list. CRON.md's `egress` drops and reports an endpoint the deployment does not allow, so a `once` job does not wait on a button that refuses.
 
 Only an authenticated person writes a grant: the web route for the signed-in user's own subjects, the operator's `istota egress`, and the one-time seed. `tests/test_egress_grants.py` holds that list, and no skill CLI or deferred handler imports the module. An approval over the web carries the digest of the text the page showed, and a row that has moved since is refused. An approval also binds the task: an occurrence whose `prompt`, `command`, `skill` or `skill_args` differ from its job row runs limited, so a task queued before an edit does not run on the edited row's approval.
 
@@ -71,7 +74,7 @@ The answer is on the occurrence. `_create_scheduled_job_task` writes `tasks.egre
 | --- | --- | --- |
 | WebFetch, native brain | `WebFetchPolicy.exact_hosts`, checked on every redirect hop before anything resolves | Public addresses |
 | WebFetch, CLI brains | The same policy, in the document `istota_web` reads | Public addresses |
-| Shell, git, pip, npm, cron `command:` jobs | `extra_hosts`, the Nextcloud host and each grant at 443. Registries and forges only if granted | The skill-keyed allowlist |
+| Shell, git, pip, npm, cron `command:` jobs | `extra_hosts`, the Nextcloud host, each plain grant at 443 and each endpoint grant the operator allows. Registries and forges only if granted | The skill-keyed allowlist |
 | WebSearch | Unchanged | Unchanged |
 | Browser | Withheld without `skill:browse`. With it, the isolated profile | The user's profile |
 | Devbox and other `external` skills | Withheld without a `skill:` grant. `developer` stays, and without `skill:devbox` it has no exec socket, so a shimmed `npm` or `node` exits 120 | Available |
@@ -133,7 +136,9 @@ Each of these is known and left open.
 - **Browser capacity.** All isolated tasks hold one of two Chrome slots. With two users holding live tabs the isolated profile gets a 503 until a tab passes its ten-minute lifetime, and a kept isolated tab holds a slot against a third user. At four tabs in all, a new owner's tab replaces the oldest anywhere. Tasks take turns on the display and do not run in parallel. Capacity was measured with Chrome stubbed, so there are no memory or latency figures.
 - **Other browser identities.** Shared blocks browse under `__system__`, a profile of its own. An own turn in an incognito room keeps the user's profile. `istota user ensure __isolated__` is not refused, though the row is inert.
 - **A flood of refusals.** A task can fill the log's 64 KiB cap with chosen names and the table keeps 20 rows per subject, so a real host can be pushed out. A request about the job survives eviction.
-- **Ports.** A CONNECT to a granted host on another port is refused and logged as that host. Adding it does not help, because a grant is port 443 only.
+- **Ports.** A CONNECT to a granted host on another port is refused and logged as that host, with no port, so the page's Add button offers the name at 443. An owner types `host:port` to grant the endpoint. A refused IP literal is not offered at all.
+- **Plain HTTP.** The proxy forwards plain HTTP only through the credential broker, so an endpoint served over HTTP also needs a credential bound to `http://<host>:<port>` with HTTP allowed on its grant. A grant from `[private_hosts]` alone reaches a TLS service.
+- **A grant the operator stopped allowing.** It stays on the job's page while the task is refused. The log counts these and names no host.
 - **An operator's skill override.** An override of a bundled skill with no `egress` loads as `external`. For a skill with `exclude_memory` that withholds it on a limited task and its exclusion no longer applies, so an override of `briefing` with no field loads dated memories into a limited briefing's prompt.
 - **No database.** `reach_for_task` with no database answers the empty set, even for an attended task.
 - **A renamed job starts from nothing.** The old name's rows go and the new name has no approvals.

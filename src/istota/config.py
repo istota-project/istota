@@ -390,6 +390,7 @@ PRIVATE_HOST_PATTERN = (
 # `docs/configuration/reference.md`.
 PRIVATE_HOST_CONSUMERS: tuple[str, ...] = (
     "browser", "wordpress", "mail_accounts", "sharing", "servarr", "feeds", "heartbeat",
+    "egress",
 )
 
 
@@ -2489,6 +2490,17 @@ class HeartbeatConfig:
 
 
 @dataclass
+class EgressConfig:
+    """A job's or assignment's network grants (``[private_hosts]`` only, no section).
+
+    ``private_hosts`` is set by the loader from ``[private_hosts]``: the names an
+    owner's grant may name at any port, and may reach on a private address. The
+    grant is still per job: this alone opens nothing to any task.
+    """
+    private_hosts: list[str] = field(default_factory=list)
+
+
+@dataclass
 class FeedsModuleConfig:
     """Module-level config for the feeds module (``[feeds]``).
 
@@ -2663,6 +2675,7 @@ class Config:
     health: HealthModuleConfig = field(default_factory=HealthModuleConfig)
     feeds: FeedsModuleConfig = field(default_factory=FeedsModuleConfig)
     heartbeat: HeartbeatConfig = field(default_factory=HeartbeatConfig)
+    egress: EgressConfig = field(default_factory=EgressConfig)
     money: MoneyModuleConfig = field(default_factory=MoneyModuleConfig)
     brain: BrainConfig = field(default_factory=BrainConfig)
     memory_search: MemorySearchConfig = field(default_factory=MemorySearchConfig)

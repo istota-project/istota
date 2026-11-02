@@ -90,6 +90,17 @@ class TestDeclaring:
         assert 'egress = ["news.example.com", "skill:browse"]' in render_jobs_block(doc.jobs)
         assert not doc.errors
 
+    def test_an_endpoint_is_kept_and_survives_a_rewrite(self, config):
+        config.egress.private_hosts = ["10.0.0.1", "fd00::1"]
+        doc = parse_cron_document(
+            _document('egress = ["10.0.0.1:8080", "[FD00::1]:8080", "tower.example.com:443"]'),
+            config, USER,
+        )
+        kept = ("10.0.0.1:8080", "[fd00::1]:8080", "tower.example.com")
+        assert doc.jobs[0].egress == kept
+        assert not doc.errors
+        assert 'egress = ["10.0.0.1:8080", "[fd00::1]:8080", "tower.example.com"]' in render_jobs_block(doc.jobs)
+
     @pytest.mark.parametrize("entry", ["open:" + "a" * 64, "public:" + "a" * 64, "10.0.0.1", "nodots"])
     def test_an_entry_no_request_may_hold_is_dropped_and_reported(self, config, entry):
         errors = cron_document_errors(_document(f'egress = ["{entry}"]'), config, USER)
