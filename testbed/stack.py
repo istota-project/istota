@@ -30,9 +30,11 @@ the like — and is merged over `os.environ`, never substituted for it.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import logging
 import os
+import random
 import re
 import secrets
 import shutil
@@ -77,6 +79,18 @@ CONTAINER_CONFIG = "/data/config/config.toml"
 COMPOSE_DIR = Path(__file__).resolve().parent / "compose"
 TESTBED_OVERLAY = COMPOSE_DIR / "testbed.yml"
 NEXTCLOUD_OVERLAY = COMPOSE_DIR / "nextcloud.yml"
+
+#: Where every stack's two networks get their subnets. A default Docker daemon's
+#: pools hold about thirty networks and hand out 172.17 upward and 192.168, so a
+#: whole-tier session took them all (ISSUE-919). 172.16 is below them, and at this
+#: size holds about 500 stacks.
+TESTBED_SUBNET_RANGE = ipaddress.ip_network("172.16.0.0/16")
+TESTBED_SUBNET_PREFIX = 26
+
+#: What Docker says when another stack took the subnet after `taken_subnets`
+#: read the list. `tests/smoke/test_stack_subnets.py` holds this to a real daemon.
+SUBNET_OVERLAP_ERROR = "Pool overlaps"
+SUBNET_ATTEMPTS = 5
 
 # The non-terminal task statuses, from AGENTS.md's "Task Status" ladder
 # (pending -> locked -> running -> completed / failed / pending_confirmation /
@@ -968,7 +982,59 @@ STACK_ENV_KEYS = (
     "BROWSER_API_PORT",
     "BROWSER_VNC_PORT",
     "ISTOTA_TEST_BROWSER_IMAGE",
+    "ISTOTA_TESTBED_DEFAULT_SUBNET",
+    "ISTOTA_TESTBED_BROWSER_SUBNET",
 )
+
+
+def taken_subnets() -> list[ipaddress.IPv4Network]:
+    """Every IPv4 subnet a network on this Docker daemon holds, whoever made it.
+
+    Empty when the daemon does not answer, since the `up` after this says why
+    better than this could. `inspect` exits 1 if another session removed a
+    network after `ls`, and still prints the rest, so its status is not read.
+    """
+    try:
+        listing = subprocess.run(
+            ["docker", "network", "ls", "-q"], capture_output=True, text=True, timeout=60,
+        )
+        ids = listing.stdout.split() if listing.returncode == 0 else []
+        if not ids:
+            return []
+        inspected = subprocess.run(
+            ["docker", "network", "inspect", *ids], capture_output=True, text=True, timeout=60,
+        )
+        networks = json.loads(inspected.stdout or "[]")
+    except (subprocess.SubprocessError, OSError, json.JSONDecodeError):
+        return []
+
+    taken = []
+    for network in networks:
+        for block in (network.get("IPAM") or {}).get("Config") or []:
+            subnet = ipaddress.ip_network(block["Subnet"], strict=False)
+            if subnet.version == 4:
+                taken.append(subnet)
+    return taken
+
+
+def network_env(taken: list[ipaddress.IPv4Network] | tuple = ()) -> dict[str, str]:
+    """Subnets for one stack's two networks, away from anything in `taken`.
+
+    Picked at random so that sessions booting at the same moment rarely choose
+    alike; `StackPool._up_on_free_subnets` handles the times they do.
+    """
+    free = [
+        subnet
+        for subnet in TESTBED_SUBNET_RANGE.subnets(new_prefix=TESTBED_SUBNET_PREFIX)
+        if not any(subnet.overlaps(other) for other in taken)
+    ]
+    if len(free) < 2:
+        raise StackError(f"no free subnets left in {TESTBED_SUBNET_RANGE} for a stack's networks")
+    default, browser = random.sample(free, 2)
+    return {
+        "ISTOTA_TESTBED_DEFAULT_SUBNET": str(default),
+        "ISTOTA_TESTBED_BROWSER_SUBNET": str(browser),
+    }
 
 
 def stack_env(
@@ -981,7 +1047,8 @@ def stack_env(
     browser_image: str = "",
 ) -> dict[str, str]:
     """What every stack's env-file carries: where its inputs are, which image
-    runs, and host ports that cannot collide with another stack's.
+    runs, host ports that cannot collide with another stack's, and subnets for
+    its networks (chosen blind here; a boot chooses again against what is taken).
 
     The shipped file publishes nginx on `127.0.0.1:8080` and the browser and
     signaling servers on fixed loopback ports by default, which a developer's
@@ -1001,6 +1068,7 @@ def stack_env(
         "BROWSER_API_PORT": "0",
         "BROWSER_VNC_PORT": "0",
         "ISTOTA_TEST_BROWSER_IMAGE": browser_image or "istota-test/browser:unbuilt",
+        **network_env(),
     }
 
 
@@ -2413,14 +2481,15 @@ class StackPool:
             write_secrets(secrets_dir, secret_values)
             self._refuse_conflicting_env(environment)
             args, env_file = self._compose_args(profile, scratch)
-            write_env_file(env_file, environment)
 
             build = not profile.image and not self._built
             if build:
                 images.record(image)
             skip = () if full or profile.web else ("web", "nginx")
             try:
-                up(args, platform=self.platform, build=build, skip=skip)
+                self._up_on_free_subnets(
+                    args, env_file, environment, shape=profile.shape, build=build, skip=skip,
+                )
             except ComposeError as exc:
                 # `up` waits on web's `depends_on: daemon: service_healthy`, so
                 # a daemon that refused to start fails `up` itself, and the
@@ -2461,6 +2530,33 @@ class StackPool:
 
         self.boot_times.append((profile.name, "total", time.monotonic() - started))
         return stack
+
+    def _up_on_free_subnets(
+        self,
+        args: list[str],
+        env_file: Path,
+        environment: dict[str, str],
+        *,
+        shape: str,
+        build: bool,
+        skip: tuple[str, ...],
+    ) -> None:
+        """`up`, on subnets no network holds, trying again if another session
+        takes them first. The first boot's image build sits between the choice
+        and the networks being created, so that window can be minutes long.
+        """
+        for attempt in range(1, SUBNET_ATTEMPTS + 1):
+            environment.update(network_env(taken_subnets()))
+            write_env_file(env_file, environment)
+            try:
+                up(args, platform=self.platform, build=build, skip=skip)
+                return
+            except ComposeError as exc:
+                if SUBNET_OVERLAP_ERROR not in str(exc) or attempt == SUBNET_ATTEMPTS:
+                    raise
+                # A network from this attempt would otherwise be adopted on its
+                # old subnet.
+                self._down(args, shape=shape)
 
     @staticmethod
     def _refuse_conflicting_env(environment: dict[str, str]) -> None:

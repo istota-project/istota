@@ -270,6 +270,7 @@ Fine-grained on the lean shape, exactly one on the full shape. Many profiles is 
 - `extra_hosts: host.docker.internal:host-gateway`, so a host-side stub is reachable by one name on Docker Desktop and Docker Engine alike.
 - The three credential-shaped brain variables as fixed literals rather than interpolations, on `istota` and on `web`. The process environment outranks an `--env-file`, so a developer's exported `ANTHROPIC_API_KEY` would otherwise reach a test container that POSTs to a listener on their own machine.
 - Longer timings on the `tasks` healthcheck the shipped `daemon` service carries, since the full shape waits up to 600 seconds on Nextcloud provisioning.
+- Both networks on small subnets from `172.16.0.0/16`, picked per stack, because a default Docker daemon's address pools run out at about fifteen stacks.
 
 The generated passwords, the module switches derived from the profile's service list, and the ephemeral `NC_PORT` with its matching `ISTOTA_WEB_CALLBACK_URL` are in the env-file the pool writes, because a file in the repository cannot hold a value invented at boot.
 
