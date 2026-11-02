@@ -2797,13 +2797,14 @@ async def cmd_cron(ctx: CommandContext):
     subcmd = parts[0].lower() if parts else ""
     job_name = parts[1].strip() if len(parts) > 1 else ""
 
-    # The "db_only" note names three causes because the user cannot tell them
-    # apart from here: no CRON.md at all, no such job in it, or a refused write
-    # on the rclone mount (ISSUE-369). Where there is a file, the next sync
-    # tick reads it unchanged and reverts the row.
+    # The "db_only" note names every cause because the user cannot tell them
+    # apart from here: no CRON.md at all, no such job in it, an entry that did not
+    # load (ISSUE-917), or a refused write on the rclone mount (ISSUE-369). Where
+    # there is a file, the next sync tick reads it unchanged and reverts the row.
     db_only_note = (
-        " Note: CRON.md was not updated (no file, no such job in it, or the write was "
-        "refused) — change is DB-only and may not persist."
+        " Note: CRON.md was not updated (no file, no such job in it, an entry in it "
+        "that did not load, or the write was refused) — change is DB-only and may "
+        "not persist. Fix or remove an entry that did not load, then try again."
     )
 
     if subcmd == "enable" and job_name:
