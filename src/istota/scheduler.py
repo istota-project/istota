@@ -10090,7 +10090,8 @@ def run_scheduled_job_now(
 
     Returns ``(task_id, "")`` or ``(None, refusal)``. Leaves ``last_run_at``
     alone, so the job's next scheduled slot is unchanged. A ``_module.*`` job is
-    refused: its module owns its schedule and its retry.
+    refused: its module owns its schedule and its retry. So is a ``once`` job
+    holding for its owner's approval, as the tick holds it.
     """
     from istota.notifications.resolvers.cron_job import is_module_job
 

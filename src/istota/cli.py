@@ -1107,8 +1107,8 @@ def cmd_job_run(args):
 
     The same path as `!retry` on a failed occurrence and the bell's Run-now
     action (ISSUE-632), with the same guards: nothing while an occurrence is in
-    flight, one manual run per cooldown, no `_module.*` job. The daemon runs the
-    queued task; this only creates it.
+    flight, one manual run per cooldown, no `_module.*` job, no `once` job waiting
+    for approval. The daemon runs the queued task; this only creates it.
     """
     from .scheduler import run_briefing_now, run_scheduled_job_now
 
