@@ -176,6 +176,10 @@ def _job_view(config, conn, user_id: str, row, file_job, *, readable: bool, ceil
         "state": state,
         "last_run_at": iso_utc(row.last_run_at) if row is not None else None,
         "last_success_at": iso_utc(row.last_success_at) if row is not None else None,
+        "next_run_at": (
+            cron_loader.next_fire(row.cron_expression, config.resolve_user_timezone(user_id))
+            if row is not None and state == egress.JOB_RUNNING else None
+        ),
         "consecutive_failures": row.consecutive_failures if row is not None else 0,
         "last_error": row.last_error if row is not None else None,
         "definition": _definition_from_file(file_job) if in_file else _definition_from_row(row),

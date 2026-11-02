@@ -6215,10 +6215,20 @@ export interface WalletSettings {
   policy: WalletPolicy;
   purchases: WalletPurchase[];
 }
+export interface DroppedApproval {
+  approved_at: string | null;
+  /** The upgrade seed gave this job its access, and nobody approved the text. */
+  carried_over: boolean;
+  text_changed_at: string | null;
+  /** Unified diff lines per changed field. Null when the text is too long to compare. */
+  changes: { field: string; lines: string[] }[] | null;
+}
 export interface NetworkRefusal {
   entry: string;
   hits: number;
   last_seen: string;
+  /** Set when an edit to the job's text dropped an approval, which is why this asks. */
+  dropped_approval?: DroppedApproval | null;
 }
 export interface NetworkJob {
   run_state: 'running' | 'disabled' | 'suspended';
@@ -6277,6 +6287,8 @@ export interface ScheduledJob {
   state: 'running' | 'disabled' | 'suspended';
   last_run_at: string | null;
   last_success_at: string | null;
+  /** Null for a job the scheduler is not firing. */
+  next_run_at: string | null;
   consecutive_failures: number;
   last_error: string | null;
   definition: ScheduledJobDefinition;

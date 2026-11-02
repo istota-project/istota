@@ -460,6 +460,12 @@ CREATE TABLE IF NOT EXISTS egress_refused (
     hits INTEGER NOT NULL DEFAULT 1,
     last_seen TEXT NOT NULL DEFAULT (datetime('now')),
     dismissed INTEGER NOT NULL DEFAULT 0,
+    -- For a request an edit caused by dropping an approval: the text that was approved,
+    -- as JSON over egress.DIGEST_COLUMNS, when and how, and when the text last moved.
+    approved_text TEXT,
+    approved_at TEXT,
+    approved_via TEXT,
+    text_changed_at TEXT,
     PRIMARY KEY (user_id, subject, entry)
 );
 

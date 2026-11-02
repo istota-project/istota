@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A job whose text changed now says why it is asking again.** When an edit drops a job's Public or Full approval, its page says what was approved and when, shows what changed since, and names the next run if it would run with less. One button approves the new text at the same level.
 - **Settings has a Scheduled jobs page in place of Network access.** You can create and edit a job there with everything CRON.md holds, see its schedule, state, last run and last error, run it now, disable, enable or delete it, and decide what it may reach on its own page. Old links land there. A task refused a host now names the right page, and a TASKS.md line is told plainly that nothing can be approved for it.
 - **The bell's network row opens what it is about.** It is now titled "A scheduled job or assignment needs network access" and opens that job's or assignment's page. An assignment's notices also link to its page, and say you can act there as well as in chat.
 - **Personal briefings and TASKS.md lines have no network access settings.** A TASKS.md line now always runs limited, with no approved hosts or skills, and fails with an ordinary refusal if it needs the web. Hosts and skills you approved for a briefing or for TASKS.md are removed on upgrade, and neither appears in Settings or in the bell.

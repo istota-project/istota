@@ -223,6 +223,31 @@ it('a command job the sync drops keeps its error and points at CRON.md', async (
   expect(view.queryByRole('button')).toBeNull();
 });
 
+it('explains a dropped approval on the job page, with the next run the bell did not mention', async () => {
+  open(
+    `${LIST}?job=1`,
+    job({
+      next_run_at: '2026-11-03T07:15:00Z',
+      network: network('digest', {
+        refused: [
+          {
+            entry: 'open',
+            hits: 1,
+            last_seen: '2026-11-02 16:34:00',
+            dropped_approval: {
+              approved_at: '2026-10-30T12:00:00Z',
+              text_changed_at: '2026-11-02T16:34:00Z',
+              changes: [{ field: 'prompt', lines: ['+post it'] }],
+            },
+          },
+        ],
+      }),
+    }),
+  );
+  expect(await screen.findByText(/will run\s+limited/)).toBeInTheDocument();
+  expect(screen.getByText('+post it')).toBeInTheDocument();
+});
+
 it('warns that jobs are read only while CRON.md has a problem, naming each', async () => {
   __history.reset(LIST);
   page.url = new URL(LIST, 'http://localhost');
