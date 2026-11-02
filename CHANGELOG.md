@@ -142,6 +142,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Your Scheduled jobs table scrolls sideways on a phone.** On a narrow screen it used to break into stacked cards with labels in front of each value. It now keeps every column and scrolls sideways, like the admin Scheduled jobs table.
 - **Settings pages open at the top.** A job or assignment opened from a scrolled list used to open scrolled down, with its top out of view, and switching settings sections kept the old position too. Each now starts at the top.
 - **Other pages open at the top too.** Moving between admin sections, health pages, money reports or portfolio pages, or choosing another group, briefing, folder, browser console, or transactions account, year or page, used to keep the scroll position of the page before. Chat, feeds and the log viewer keep their own scrolling.
 - **Editing a one-time job while it runs no longer loses the edit.** When the earlier run finished, it deleted the job along with your new text and any approval request the edit raised. The job now stays and runs the new prompt, command or skill, or waits for your approval if the edit needs it, whether or not Istota had read the edit yet. Any other change, such as the schedule, still counts as the same job, so it is removed when the run finishes. A one-time job past its time because of an outage now fires late instead of waiting a year.
