@@ -44,12 +44,16 @@ def place_reach(
         index, is_admin=config.is_admin(user_id),
         disabled_skills=effective_disabled_skills(config, user_id, index),
     )
-    contexts = ((frozenset(), groups), (frozenset(), groups), (all_scopes(index), []))
-    all_users_places = set()
+    automatic = set()
     for group_id in groups:
         group = db.get_group(conn, group_id)
         if group is not None and group["system_key"] == ALL_USERS:
-            all_users_places.add(f"group:{group_id}")
+            automatic.add(group_id)
+    all_users_places = {f"group:{group_id}" for group_id in automatic}
+    # Off a room, `task_group_ids` leaves the automatic group out; only a room
+    # linked to it binds its folder.
+    private_groups = [g for g in groups if g not in automatic]
+    contexts = ((frozenset(), private_groups), (frozenset(), groups), (all_scopes(index), []))
     # Cache by room token: a channel bind exists only on that room's tasks.
     plans: dict[str | None, list[list[Mount]]] = {}
     result = {}
@@ -92,14 +96,17 @@ def place_reach(
             # Writers by place id rather than `writable`: an admin may write
             # All users, but the other members cannot.
             if place.id in all_users_places:
-                who = "Only admins can change files here. "
+                note = (
+                    "Only admins can change files here. Tasks reach this folder only from a "
+                    "room linked to this group, and only when every reader belongs to it, "
+                    "with no guests or other bots."
+                )
             else:
-                who = "Every member can add, change and delete files here. "
-            note = who + (
-                "Group files are available in a shared room only when every reader belongs to "
-                "this group, with no guests or other bots. A room linked to a group can use "
-                "only that group."
-            )
+                note = (
+                    "Every member can add, change and delete files here. Group files are "
+                    "available in a shared room only when every reader belongs to this group, "
+                    "with no guests or other bots. A room linked to a group can use only that group."
+                )
         elif place.kind == "home":
             note = "Personal memory is not loaded into the prompt in shared rooms."
         result[place.id] = Reach(*modes, note=note)

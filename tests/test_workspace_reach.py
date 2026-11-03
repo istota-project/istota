@@ -329,3 +329,26 @@ def test_a_share_in_error_stays_a_place_and_needs_no_workspace(tmp_path):
         sources.set_state(conn, source_id, "alice", "error", reason="timeout")
         conn.commit()
         assert [p.id for p in list_places(c, conn, "alice")] == [f"share:{source_id}"]
+
+
+def test_all_users_folder_is_reached_only_from_a_linked_room(config, conn):
+    """ISSUE-928: a private task never binds the automatic group's folder."""
+    from istota.rooms.scopes import task_group_ids
+    from istota.workspace.places import list_places
+    from istota.workspace.reach import place_reach
+
+    db.create_group(conn, "team", kind="group", display_name="Team", created_by="alice")
+    db.add_group_member(conn, "team", "alice", added_by="alice")
+    db.create_group(conn, "everyone", kind="group", display_name="All users", created_by="alice")
+    conn.execute("UPDATE groups SET system_key = 'all_users' WHERE group_id = 'everyone'")
+    db.add_group_member(conn, "everyone", "alice", added_by="alice")
+    (config.workspace_path / "Groups" / "everyone").mkdir()
+    task = db.get_task(conn, db.create_task(conn, user_id="alice", prompt="Read", source_type="cli"))
+    assert task_group_ids(conn, task) == ["team"]
+
+    reach = place_reach(config, conn, "alice", list_places(config, conn, "alice"))
+    assert reach["group:team"].private == "rw"
+    assert reach["group:everyone"].private == "none"
+    assert reach["group:everyone"].shared_member == "conditional"
+    assert reach["group:everyone"].note.startswith("Only admins can change files here. ")
+    assert "only from a room linked to this group" in reach["group:everyone"].note
