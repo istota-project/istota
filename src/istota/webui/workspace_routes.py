@@ -270,15 +270,6 @@ class _CappedMultipartParser(MultiPartParser):
         super().on_part_data(data, start, end)
 
 
-def _home_root(config, username, place):
-    """My files' root, for the text editor, which no other place has yet."""
-    with db.get_db(config.db_path) as conn:
-        home = next((p for p in list_places(config, conn, username) if p.id == place == "home"), None)
-    if home is None or home.root is None:
-        raise ListingError(404, "Place not found.")
-    return home.root
-
-
 def _writable_place(config, username, place_id) -> Place:
     """The caller's place by id when it accepts writes, re-derived per request.
 
@@ -634,9 +625,9 @@ async def api_workspace_note_save(
     return JSONResponse({"error": message, "code": outcome.status}, status_code=status)
 
 
-def _edit_refusal(config, exc):
+def _edit_refusal(config, exc, place):
     if not isinstance(exc, editable.EditRefused):
-        return _filesystem_error(config, exc, "home", write=False)
+        return _filesystem_error(config, exc, _place_kind(place), write=False)
     payload = {"error": exc.message, "code": exc.code}
     if exc.code == "too_large":
         payload["max_bytes"] = editable.MAX_BYTES
@@ -647,20 +638,20 @@ def _edit_refusal(config, exc):
 async def api_workspace_text_file(
     request: Request, place: str, path: str, name: str, user: dict = Depends(require_auth),
 ):
-    """One text file in My files, for the Workspace editor (ISSUE-734)."""
+    """One text file in a writable place, for the Workspace editor (ISSUE-734)."""
     config = getattr(request.app.state, "istota_config", None)
     if config is None:
         return JSONResponse({"error": "config unavailable"}, status_code=503)
     parts = [part for part in path.split("/") if part]
 
     def query():
-        root = _home_root(config, user["username"], place)
-        return editable.read(config, user["username"], root, parts, name)
+        selected = _writable_place(config, user["username"], place)
+        return editable.read(config, user["username"], selected, parts, name)
 
     try:
         text = await asyncio.to_thread(query)
     except (ListingError, OSError) as exc:
-        return _edit_refusal(config, exc)
+        return _edit_refusal(config, exc, place)
     return JSONResponse(
         {"content": text, "revision": text_files.revision(text), "exists": bool(text.strip())},
         headers={"Cache-Control": "private, no-store"},
@@ -684,15 +675,15 @@ async def api_workspace_text_file_save(
     parts = [part for part in body["path"].split("/") if part]
 
     def write():
-        root = _home_root(config, user["username"], body["place"])
+        selected = _writable_place(config, user["username"], body["place"])
         return editable.save(
-            config, user["username"], root, parts, body["name"], body["content"], body["revision"],
+            config, user["username"], selected, parts, body["name"], body["content"], body["revision"],
         )
 
     try:
         outcome = await asyncio.to_thread(write)
     except (ListingError, OSError) as exc:
-        return _edit_refusal(config, exc)
+        return _edit_refusal(config, exc, body["place"])
     if outcome.status == "ok":
         return {"revision": outcome.revision}
     status, message = _SAVE_REFUSALS[outcome.status]

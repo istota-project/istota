@@ -1,18 +1,21 @@
-"""Text files in My files, as the Workspace page reads and saves them.
+"""Text files in a writable place, as the Workspace page reads and saves them.
 
 A file is editable when its bytes are text by the viewer's own rule
 (`preview.classify`): at most `MAX_BYTES`, valid UTF-8, no NUL, no media
 signature. Everything else stays view-only.
 
-The folder is walked from the home root with no link followed (`open_dir`),
+The folder is walked from the place's anchor with no link followed (`open_dir`),
 and the file is read and written through that one descriptor, so a link
 anywhere below the root refuses rather than redirects. Saves go through
 `text_files.save`, which re-reads the file inside the lock and compares the
 revision with what is on disk, so a change made in the host folder or by a
 task since the load is a conflict rather than an overwrite.
 
-The bot's config folder is refused: those files have their own editor, which
-checks them with the loaders' validators (`config_files`).
+What a place refuses to the editor is `protected.check_edit`'s: the bot's
+config folder in My files, the notebook at a group's root.
+
+A group file is locked under the notebook's shared anchor rather than the
+saving user's, so two members saving one file contend for one lock.
 """
 
 from __future__ import annotations
@@ -22,13 +25,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from istota import storage
+from istota.memory.curation.file_lock import group_memory_lock_dir
 from istota.sandbox.confined import open_dir, valid_part
 from istota.skills._loader import (
     OVERLAY_IS_A_SYMLINK, OVERLAY_NOT_A_REGULAR_FILE, OVERLAY_UNREADABLY_LARGE,
     read_overlay_bytes,
 )
-from istota.workspace import text_files
+from istota.workspace import protected, text_files
 from istota.workspace.listing import ListingError
+from istota.workspace.places import Place, place_anchor
 from istota.workspace.preview import PREVIEW_MAX_BYTES, classify
 
 if TYPE_CHECKING:
@@ -54,37 +59,9 @@ def _not_a_file() -> EditRefused:
     return EditRefused(422, "not_a_file", "Only regular files can be edited here.")
 
 
-def _config_file() -> EditRefused:
-    return EditRefused(
-        403, "config_file",
-        "Files in the bot's config folder are edited from Configuration or Skill instructions.",
-    )
-
-
-def _check_target(config: "Config", parts: list[str], name: str) -> None:
+def _check_name(name: str) -> None:
     if not valid_part(name):
         raise ListingError(404, "File not found.")
-    # Case-folded, since a host folder on a Mac matches names without case.
-    folded = [part.casefold() for part in parts[:2]]
-    if folded == [config.bot_dir_name.casefold(), "config"]:
-        raise _config_file()
-
-
-def _check_folder(config: "Config", user_id: str, dir_fd: int) -> None:
-    """Refuse the config folder by identity too: the daemon follows a
-    `config` link that stays inside the user's tree, which the name check
-    above cannot see."""
-    config_dir = storage.resolve_user_config_dir(config, user_id)
-    if config_dir is None:
-        return
-    folder = os.fstat(dir_fd)
-    for directory in (config_dir, config_dir / "skills"):
-        try:
-            info = os.stat(directory)
-        except OSError:
-            continue
-        if (info.st_dev, info.st_ino) == (folder.st_dev, folder.st_ino):
-            raise _config_file()
 
 
 def _decode(data: bytes) -> str | None:
@@ -121,40 +98,41 @@ def _read_raw(dir_fd: int, name: str) -> str:
     return text
 
 
-def _open_folder(root: Path, parts: list[str]) -> int:
-    fd = open_dir(root, *parts, raise_mount_errors=True)
+def _open_folder(place: Place, parts: list[str]) -> int:
+    anchor, walk = place_anchor(place)
+    fd = open_dir(anchor, *walk, *parts, raise_mount_errors=True)
     if fd is None:
         raise ListingError(404, "Folder not found.")
     return fd
 
 
-def read(config: "Config", user_id: str, root: Path, parts: list[str], name: str) -> str:
-    _check_target(config, parts, name)
-    dir_fd = _open_folder(root, parts)
+def read(config: "Config", user_id: str, place: Place, parts: list[str], name: str) -> str:
+    _check_name(name)
+    dir_fd = _open_folder(place, parts)
     try:
-        _check_folder(config, user_id, dir_fd)
+        protected.check_edit(config, user_id, place, parts, name, dir_fd)
         return _read_at(dir_fd, name)
     finally:
         os.close(dir_fd)
 
 
 def save(
-    config: "Config", user_id: str, root: Path, parts: list[str], name: str,
+    config: "Config", user_id: str, place: Place, parts: list[str], name: str,
     content: str, expected_revision: str,
 ) -> text_files.SaveOutcome:
     """Replace an existing text file; a refused read raises `EditRefused`.
 
     A file that used CRLF line endings keeps them."""
-    _check_target(config, parts, name)
+    _check_name(name)
     try:
         content.encode("utf-8")
     except UnicodeEncodeError:
         raise _not_text() from None
     if "\0" in content:
         raise _not_text()
-    dir_fd = _open_folder(root, parts)
+    dir_fd = _open_folder(place, parts)
     try:
-        _check_folder(config, user_id, dir_fd)
+        protected.check_edit(config, user_id, place, parts, name, dir_fd)
         crlf = False
 
         def read_current() -> str:
@@ -168,9 +146,11 @@ def save(
                 text = text.replace("\r\n", "\n").replace("\n", "\r\n")
             return storage.write_regular_file(Path(name), text, dir_fd=dir_fd, keep_mode=True)
 
+        anchor, walk = place_anchor(place)
+        lock_anchor = group_memory_lock_dir(config.db_path) if place.kind == "group" else None
         return text_files.save(
-            config, user_id, root.joinpath(*parts, name), content, expected_revision,
-            read=read_current, write=write, max_bytes=MAX_BYTES,
+            config, user_id, anchor.joinpath(*walk, *parts, name), content, expected_revision,
+            read=read_current, write=write, max_bytes=MAX_BYTES, lock_anchor=lock_anchor,
         )
     finally:
         os.close(dir_fd)

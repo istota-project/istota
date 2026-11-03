@@ -800,11 +800,75 @@ async def test_a_group_write_failure_logs_the_place_kind(client, config, monkeyp
     assert "place=group " in caplog.text and "family" not in caplog.text
 
 
-async def test_group_text_files_stay_home_only_until_edits_are_guarded(client, config):
-    """Stage 1 opens upload, folders and delete; the generic editor stays home-only."""
-    _group(config)
-    params = _text_params(place="group:family", path="", name="GROUP.md")
-    assert (await client.get("/workspace/files", params=params)).status_code == 404
+async def test_member_edits_a_group_text_file(client, config):
+    root = _group(config)
+    (root / "Plans").mkdir()
+    (root / "Plans/packing.md").write_text("socks\n")
+    params = _text_params(place="group:family", path="Plans", name="packing.md")
+    response = await client.get("/workspace/files", params=params)
+    assert response.status_code == 200
+    assert response.json()["content"] == "socks\n"
+    body = _text_body("socks\nboots\n", _rev("socks\n"), place="group:family", path="Plans", name="packing.md")
+    response = await client.put("/workspace/files", json=body)
+    assert response.status_code == 200 and response.json() == {"revision": _rev("socks\nboots\n")}
+    assert (root / "Plans/packing.md").read_text() == "socks\nboots\n"
+    assert not (_home(config) / "Plans").exists()
+
+
+async def test_a_stale_group_save_from_another_member_conflicts(client, app, config):
+    root = _group(config, members=("alice", "bob"))
+    (root / "list.md").write_text("one\n")
+    loaded = _rev("one\n")
+    body = _text_body("one\nalice\n", loaded, place="group:family", path="", name="list.md")
+    assert (await client.put("/workspace/files", json=body)).status_code == 200
+    app.dependency_overrides[require_auth] = lambda: {"username": "bob"}
+    body = _text_body("one\nbob\n", loaded, place="group:family", path="", name="list.md")
+    response = await client.put("/workspace/files", json=body)
+    assert response.status_code == 409 and response.json()["code"] == "conflict"
+    assert (root / "list.md").read_text() == "one\nalice\n"
+
+
+async def test_the_notebook_is_not_edited_from_files(client, config):
+    root = _group(config)
+    for name in ("GROUP.md", "group.MD"):
+        params = _text_params(place="group:family", path="", name=name)
+        response = await client.get("/workspace/files", params=params)
+        assert response.status_code == 403
+        assert response.json() == {"error": "The group notebook is edited on the Groups page.", "code": "group_memory"}
+        body = _text_body("planted", _rev("notebook"), place="group:family", path="", name=name)
+        response = await client.put("/workspace/files", json=body)
+        assert response.status_code == 403 and response.json()["code"] == "group_memory"
+    assert (root / "GROUP.md").read_text() == "notebook"
+
+
+async def test_a_notebook_name_in_a_subfolder_is_editable(client, config):
+    root = _group(config)
+    (root / "Plans").mkdir()
+    (root / "Plans/GROUP.md").write_text("copy")
+    body = _text_body("edited", _rev("copy"), place="group:family", path="Plans", name="GROUP.md")
+    response = await client.put("/workspace/files", json=body)
+    assert response.status_code == 200 and (root / "Plans/GROUP.md").read_text() == "edited"
+
+
+@pytest.mark.parametrize("state", ["non_member", "ended", "archived", "all_users_non_admin"])
+async def test_group_text_files_refused_without_a_live_membership(client, config, state):
+    group_id = "everyone" if state == "all_users_non_admin" else "family"
+    root = _group(config, group_id, members=() if state == "non_member" else ("alice",),
+                  system_key="all_users" if state == "all_users_non_admin" else None)
+    (root / "list.md").write_text("one")
+    with db.get_db(config.db_path) as conn:
+        if state == "ended":
+            db.end_group_membership(conn, group_id, "alice", ended_by="bob")
+        elif state == "archived":
+            db.archive_group(conn, group_id)
+        conn.commit()
+    params = _text_params(place=f"group:{group_id}", path="", name="list.md")
+    response = await client.get("/workspace/files", params=params)
+    assert response.status_code == 404 and response.json() == {"error": "Place not found."}
+    body = _text_body("x", _rev("one"), place=f"group:{group_id}", path="", name="list.md")
+    response = await client.put("/workspace/files", json=body)
+    assert response.status_code == 404 and response.json() == {"error": "Place not found."}
+    assert (root / "list.md").read_text() == "one"
 
 
 @pytest.fixture
@@ -1323,15 +1387,16 @@ async def test_text_file_names_are_parts_not_paths(client, config, path, name):
     assert (config.workspace_path / "Users/bob/plan.md").read_text() == "bob"
 
 
-async def test_text_file_only_in_my_files(client, config):
+async def test_text_file_only_in_writable_places(client, config):
     with db.get_db(config.db_path) as conn:
         room = db.create_web_chat_room(conn, "alice", "Shared")
     (config.workspace_path / "Channels" / room.token).mkdir(parents=True)
     (config.workspace_path / "Channels" / room.token / "notes.md").write_text("room")
-    params = _text_params(place=f"room:{room.token}", path="", name="notes.md")
-    assert (await client.get("/workspace/files", params=params)).status_code == 404
-    body = _text_body("x", _rev("room"), place=f"room:{room.token}", path="", name="notes.md")
-    assert (await client.put("/workspace/files", json=body)).status_code == 404
+    for place in (f"room:{room.token}", "talk", "linked:1", "unknown"):
+        params = _text_params(place=place, path="", name="notes.md")
+        assert (await client.get("/workspace/files", params=params)).status_code == 404
+        body = _text_body("x", _rev("room"), place=place, path="", name="notes.md")
+        assert (await client.put("/workspace/files", json=body)).status_code == 404
     assert (config.workspace_path / "Channels" / room.token / "notes.md").read_text() == "room"
 
 
