@@ -41,7 +41,7 @@ Membership history keeps departures and rejoins as separate periods. Role change
 
 The Briefings view lists the group’s definitions and retained editions. Current owners manage them through the same editor used in Briefings. Ownership succession needs no briefing transfer, and an admin outside an ordinary group gains no content access. Members can read history and manage their own delivery mutes. Excluded members retain history access, including editions published before they joined; a new member receives future deliveries only.
 
-All users is the built-in group of enabled installation accounts. Membership follows account lifecycle automatically and cannot be edited by hand. Installation admins author its briefings. Its notebook, files and retained editions are shared with current and future users; it cannot be archived. Every user can read its folder in Files, but only admins can change files there from the web, because admin-authored All users briefings can name files in it. Its existence does not enable a mailing or automatically add group memory to tasks. See [Briefings](briefings.md#group-briefings).
+All users is the built-in group of enabled installation accounts. Membership follows account lifecycle automatically and cannot be edited by hand. Installation admins author its briefings. Its notebook, files and retained editions are shared with current and future users; it cannot be archived. Every user can read its folder in Files, but only admins can change files there from the web, because admin-authored All users briefings can name files in it. Its existence does not enable a mailing or automatically add group memory or its folder to tasks: only a task in a room linked to All users carries them. See [Briefings](briefings.md#group-briefings).
 
 ## Group files
 
@@ -81,7 +81,7 @@ Each task works out once which groups it may carry, and that one answer decides 
 
 A group is in that set when the task's user is a current member and everyone who will read the answer is a member too:
 
-- **A conversation with the bot alone** loads all of the user's groups. That covers a private room, the user's own SMS or WhatsApp conversation, and a task with no conversation at all.
+- **A conversation with the bot alone** loads all of the user's groups except All users, which loads only in a room linked to it. That covers a private room, the user's own SMS or WhatsApp conversation, and a task with no conversation at all.
 - **A room shared with other people** loads only the groups whose current members include everyone in the room. A family room where all four members are in the `family` group loads it; the same room with a friend in it loads nothing.
 - **Nothing loads** on a guest's turn, on a turn whose audience included someone outside the room's members, while a guest or another bot is present, or in a room whose members are not recorded. Email threads without a registered room fall in the last case.
 - Personal briefings exclude ambient group memory. Group briefings can read an explicitly selected group notebook or file through their authorized source gather; public research receives neither.
