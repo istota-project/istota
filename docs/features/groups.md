@@ -27,11 +27,11 @@ Nothing writes to a group store on its own. The nightly sleep cycle extracts int
 
 Open **Groups** to see your current memberships. Select a group to open its Memory, Members, Rooms or Briefings view. Memory is the shared notebook, with an editor, a size warning above 32 KiB and recorded changes. Members shows the current roster. Rooms lists the group's own rooms, which every member is in, and the linked rooms you already belong to, each labelled; a link does not grant room access, and a linked room you are not in is not named. Owners create group rooms from this view (see [Group rooms](#group-rooms)). Files opens the group's folder in Files, where Group memory and Group members lead back to these views.
 
-`GROUP.md` is the curated notebook. Other files and the `memories/` directory are shared documents browsed through Files; they are not automatically recalled or turned into notebook facts. `group_kv` holds structured state. Linking a room leaves its `CHANNEL.md` in that room. Personal memory and knowledge graph facts stay personal.
+`GROUP.md` is the curated notebook. Other files and the `memories/` directory are shared documents that every member can add, change and delete from Files (see [Group files](#group-files)); they are not automatically recalled or turned into notebook facts. `group_kv` holds structured state. Linking a room leaves its `CHANNEL.md` in that room. Personal memory and knowledge graph facts stay personal.
 
 Owners can change the display name and kind, add existing enabled users, change roles and remove members. Every addition requires acknowledgement that the new member can read existing group memory and retained briefing editions. The form lists what access it grants, including the group's own rooms and their history. Ordinary linked rooms are not granted. A member may leave, but the last owner must appoint a replacement in the same operation if other members remain. `kind` is only a display label; `owner` grants group management authority.
 
-Admins use **Admin → Groups**, below Users, to create groups, appoint owners, inspect membership history, recover an ownerless group and archive a group. Creation requires at least one enabled owner; the acting admin need not join. Admins outside the group can inspect its metadata and membership but cannot read its notebook through member pages or the file viewer. Older groups without owners remain readable and editable by members and are marked “Needs owner” in administration. Migration does not appoint an owner.
+Admins use **Admin → Groups**, below Users, to create groups, appoint owners, inspect membership history, recover an ownerless group and archive a group. Creation requires at least one enabled owner; the acting admin need not join. Admins outside the group can inspect its metadata and membership but cannot read its notebook through member pages or the file viewer. The management events list shows members' file changes by type, actor and time, without the file names, since those are member content. It holds the newest 500 events and says so when it is full; `istota group show` keeps the full details. Older groups without owners remain readable and editable by members and are marked “Needs owner” in administration. Migration does not appoint an owner.
 
 Removing a member ends future access: the group views, Files place and file viewer check membership on the next request, and an already-open editor cannot save after removal. Already delivered messages and downloads remain with their recipients. A running task may already hold admitted content or a directory bind; removal does not recall that snapshot.
 
@@ -41,7 +41,23 @@ Membership history keeps departures and rejoins as separate periods. Role change
 
 The Briefings view lists the group’s definitions and retained editions. Current owners manage them through the same editor used in Briefings. Ownership succession needs no briefing transfer, and an admin outside an ordinary group gains no content access. Members can read history and manage their own delivery mutes. Excluded members retain history access, including editions published before they joined; a new member receives future deliveries only.
 
-All users is the built-in group of enabled installation accounts. Membership follows account lifecycle automatically and cannot be edited by hand. Installation admins author its briefings. Its notebook, files and retained editions are shared with current and future users; it cannot be archived. Its existence does not enable a mailing or automatically add group memory to tasks. See [Briefings](briefings.md#group-briefings).
+All users is the built-in group of enabled installation accounts. Membership follows account lifecycle automatically and cannot be edited by hand. Installation admins author its briefings. Its notebook, files and retained editions are shared with current and future users; it cannot be archived. Every user can read its folder in Files, but only admins can change files there from the web, because admin-authored All users briefings can name files in it. Its existence does not enable a mailing or automatically add group memory to tasks. See [Briefings](briefings.md#group-briefings).
+
+## Group files
+
+Every current member of a group can work in its folder from Files the way they do in My files: upload files (with the button or by dropping them), create folders, edit text files, and delete files and empty folders. The same limits apply: the upload size cap, no overwrite (a second file with a name already taken is saved with a number), no rename or move, and a folder must be empty before it can be deleted. The Shared files card on the group's page has an Upload button that puts files at the top of the folder. The All users folder is the exception: only admins can change it from the web.
+
+The server decides which places accept changes, re-checking membership on every request. A person who is not a current member, whose membership ended, or whose group was archived gets the same "Place not found." as for a group that does not exist. Room folders, linked folders and shares from other servers stay read-only in Files.
+
+`GROUP.md` and `memories` at the top of the folder are the group's layout. Files will not create, edit, delete or replace either of them there, whether or not they exist: the notebook is edited on the Groups page, where the `GROUP.md` row's Edit links. The same names inside a subfolder are ordinary files and folders.
+
+Two members editing the same text file share one lock and the revision check, so the second save reports a conflict rather than replacing the first. The check also catches a change a task made in the meantime.
+
+Each change made from Files is recorded as a group event with the member, the action and the path: uploaded, created folder, edited or deleted (a deleted folder is recorded as a delete). The Shared files card lists the newest six under Recent changes. Changes a task makes, and changes made directly on the server, do not pass through the web and are not listed. If recording fails, the change still stands. Nothing notifies other members when a file changes.
+
+A deletion is for every member. The confirmation in Files says so. A group briefing that reads a file from the folder fails its gather while that file is missing.
+
+A member who joins is told, in the acknowledgement an owner gives, that the group's files can be added, changed and deleted by every member. Members who joined before this was possible were not told.
 
 ## Operator CLI
 
@@ -108,7 +124,7 @@ Any member can write a group's store, and any member's task could have been stee
 
 ## Writes and their trail
 
-The notebook editor checks the revision it loaded. If another member changes the file, saving reports a conflict rather than merging or replacing their changes. Web saves and host-side `memory --group` operations use the same resolved notebook path and file lock under `{db_path.parent}/locks/group-memory`. This directory is shared by the daemon and web processes and is outside task sandbox mounts; neither a per-user deferred directory nor a service's private temporary directory is a suitable substitute.
+The notebook editor checks the revision it loaded. If another member changes the file, saving reports a conflict rather than merging or replacing their changes. Web saves and host-side `memory --group` operations use the same resolved notebook path and file lock under `{db_path.parent}/locks/group-memory`. Text edits to other group files from Files take their lock in the same directory, keyed by each file's own path. This directory is shared by the daemon and web processes and is outside task sandbox mounts; neither a per-user deferred directory nor a service's private temporary directory is a suitable substitute.
 
 A genuinely missing notebook under an available, validated group root can be created. An unavailable root, oversized file, invalid UTF-8, symlink, special file or read failure is refused rather than shown as an empty editable notebook. Save reads again under the lock, so a file that becomes unreadable after opening cannot be replaced. An oversized notebook returns 413, invalid encoding or unsafe files return 422, unavailable storage or read I/O returns 503, and lock timeout returns 423. Refused reads supply no content or replacement revision. Restore storage or repair the file before editing again.
 
@@ -125,7 +141,8 @@ Memory operations record applied and rejected outcomes in the group's reserved `
 
 ## Not in this version
 
-- Membership commands in chat, external invitations and general uploads or deletion in group folders.
+- Membership commands in chat and external invitations.
+- Renaming, moving or overwriting group files from Files, and notifying members when a file changes.
 - An approval queue, or any automatic extraction into a group store.
 - A per-fact audience. The charter is the audience.
 - Sharing `Groups/<id>/` with members' own Nextcloud accounts, so it would appear in their Files app.
