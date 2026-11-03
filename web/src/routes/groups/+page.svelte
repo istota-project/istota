@@ -214,7 +214,11 @@
                 groupId={detail.group_id}
                 canAuthor={!!detail.capabilities.author_briefings}
               />{/if}
-            {#if user.features.workspace}<GroupFiles groupId={detail.group_id} />{/if}
+            {#if user.features.workspace}<GroupFiles
+                groupId={detail.group_id}
+                activity={detail.file_activity ?? []}
+                onUploaded={() => changed()}
+              />{/if}
           </CardGrid>
         {/key}
       </div>

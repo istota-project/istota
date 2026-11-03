@@ -426,3 +426,69 @@ def test_explicit_read_refusal_never_calls_writer(config):
                              write=write, max_bytes=1024)
     assert result.status == "read_refused"
     assert result.reason == "overlay_not_utf8" and result.revision is None
+
+
+# ---------------------------------------------------------------------------
+# editable.save: which lock a save takes
+# ---------------------------------------------------------------------------
+
+def _save_lock_paths(config, monkeypatch, saves):
+    """The lock path each `editable.save` in `saves` took, as (user, place)."""
+    from contextlib import contextmanager
+
+    from istota.memory.curation.file_lock import lock_path_for
+    from istota.workspace import editable
+
+    taken = []
+
+    @contextmanager
+    def record(path, *, timeout_seconds, lock_dir):
+        taken.append(lock_path_for(path, lock_dir=lock_dir))
+        yield
+
+    monkeypatch.setattr(text_files._md_lock, "memory_md_lock", record)
+    for user_id, place in saves:
+        outcome = editable.save(config, user_id, place, [], "plan.md", "new\n", text_files.revision("plan\n"))
+        assert outcome.status == "ok"
+        (place_dir(place) / "plan.md").write_text("plan\n")
+    return taken
+
+
+def place_dir(place):
+    from istota.workspace.places import place_anchor
+    anchor, walk = place_anchor(place)
+    return anchor.joinpath(*walk)
+
+
+def _group_place(config):
+    from istota.workspace.places import Place
+    root = config.workspace_path / "Groups/family"
+    root.mkdir(parents=True)
+    (root / "plan.md").write_text("plan\n")
+    return Place("group:family", "group", "Family", root, True, None,
+                 anchor=config.workspace_path, walk=("Groups", "family"), writable=True)
+
+
+def _home_place(config, user_id):
+    from istota.workspace.places import Place
+    root = config.workspace_path / "Users" / user_id
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "plan.md").write_text("plan\n")
+    return Place("home", "home", "My files", root, True, f"/Users/{user_id}", writable=True)
+
+
+def test_group_file_saves_share_the_notebook_lock_anchor(config, monkeypatch):
+    from istota.memory.curation.file_lock import group_memory_lock_dir
+    group = _group_place(config)
+    alice, bob = _save_lock_paths(config, monkeypatch, [("alice", group), ("bob", group)])
+    assert alice == bob
+    assert alice.parent == group_memory_lock_dir(config.db_path)
+
+
+def test_home_saves_keep_their_own_lock_anchor(config, monkeypatch):
+    alice, bob = _save_lock_paths(config, monkeypatch, [
+        ("alice", _home_place(config, "alice")), ("bob", _home_place(config, "bob")),
+    ])
+    assert alice != bob
+    assert alice.parent == text_files.lock_dir(config, "alice")
+    assert bob.parent == text_files.lock_dir(config, "bob")

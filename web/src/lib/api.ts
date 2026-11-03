@@ -7182,6 +7182,8 @@ export interface WorkspacePlace {
   kind: 'home' | 'linked' | 'room' | 'group' | 'drive' | 'nextcloud' | 'share';
   label: string;
   browsable: boolean;
+  /** Whether the web user may upload, create folders, edit and delete here; the server decides. */
+  writable: boolean;
   view_root: string | null;
   /** A share's provider host, last recorded access, and file or folder once read; `share` places only. */
   remote?: { host: string; access: 'read' | 'write'; kind?: 'file' | 'folder' | null };
@@ -7250,27 +7252,36 @@ export function getWorkspaceDriveListing(
   );
 }
 
-export function deleteWorkspaceEntry(path: string, name: string): Promise<{ status: string }> {
-  return apiFetch(`/workspace/files?${new URLSearchParams({ place: 'home', path, name })}`, {
+export function deleteWorkspaceEntry(
+  place: string,
+  path: string,
+  name: string,
+): Promise<{ status: string; recorded?: boolean }> {
+  return apiFetch(`/workspace/files?${new URLSearchParams({ place, path, name })}`, {
     method: 'DELETE',
   });
 }
 
-export function createWorkspaceFolder(path: string, name: string): Promise<{ path: string }> {
+export function createWorkspaceFolder(
+  place: string,
+  path: string,
+  name: string,
+): Promise<{ path: string; recorded?: boolean }> {
   return apiFetch('/workspace/folders', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ place: 'home', path, name }),
+    body: JSON.stringify({ place, path, name }),
   });
 }
 
 export function uploadWorkspaceFile(
+  place: string,
   path: string,
   file: File,
   onProgress: (percent: number) => void,
-): Promise<{ name: string; path: string; size: number }> {
+): Promise<{ name: string; path: string; size: number; recorded?: boolean }> {
   const form = new FormData();
-  form.append('place', 'home');
+  form.append('place', place);
   form.append('path', path);
   form.append('file', file);
   // XHR exposes upload progress; fetch does not.
@@ -7402,21 +7413,24 @@ export function saveWorkspaceConfigFile(
 /** Files above this size open in the viewer only; the server holds the same cap. */
 export const WORKSPACE_TEXT_EDIT_MAX_BYTES = 1_048_576;
 
-/** A text file in My files. The server refuses anything that is not text by
- * its bytes (415), a link (422) and the bot's config folder (403). */
+/** A text file in a writable place. The server refuses anything that is not
+ * text by its bytes (415), a link (422), the bot's config folder and a group's
+ * notebook (403). */
 export function getWorkspaceTextFile(
+  place: string,
   path: string,
   name: string,
 ): Promise<WorkspaceConfigFileContent> {
-  return apiFetch(`/workspace/files?${new URLSearchParams({ place: 'home', path, name })}`);
+  return apiFetch(`/workspace/files?${new URLSearchParams({ place, path, name })}`);
 }
 export function saveWorkspaceTextFile(
+  place: string,
   path: string,
   name: string,
   content: string,
   revision: string,
-): Promise<{ revision: string }> {
-  return putTextFile('/workspace/files', { place: 'home', path, name, content, revision });
+): Promise<{ revision: string; recorded?: boolean }> {
+  return putTextFile('/workspace/files', { place, path, name, content, revision });
 }
 
 async function putTextFile<T extends { revision: string }>(
@@ -7541,6 +7555,19 @@ export interface GroupDisclosure {
   memory: string;
   rooms: string[];
   briefings: string[];
+  /** That every member can add, change and delete the group's files. */
+  files: string;
+}
+/** One web write to a group's folder; `path` is relative to the group root. */
+export interface GroupFileEvent {
+  id: number;
+  actor_id: string;
+  user_id: string;
+  display_name: string;
+  event_type: 'file_uploaded' | 'folder_created' | 'file_edited' | 'file_deleted';
+  path: string | null;
+  size: number | null;
+  created_at: string;
 }
 /** A room linked to a group that the caller can open. `group` rooms hold the
  * whole group; `room` rooms keep their own roster. `room_id` is the caller's
@@ -7556,6 +7583,8 @@ export interface GroupDetail extends GroupSummary {
   members: GroupMember[];
   rooms: GroupRoom[];
   disclosure: GroupDisclosure;
+  /** The newest web writes to the group's folder, newest first; members only. */
+  file_activity?: GroupFileEvent[];
 }
 export interface GroupRoomCreated {
   group_id: string;

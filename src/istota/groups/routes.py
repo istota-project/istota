@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 from istota import db, storage
 from istota.config import refresh_user_profiles_if_changed
-from istota.groups import memory, service
+from istota.groups import files, memory, service
 from istota.groups import rooms as group_rooms
 from istota.groups.policy import (
     GroupError, group_capabilities, is_group_admin, payload_problem, require_group_member,
@@ -21,6 +21,8 @@ from istota.webui.router_stubs import require_auth, verify_origin
 logger = logging.getLogger(__name__)
 router = APIRouter()
 BODY_LIMIT = 64 * 1024
+# Per-write file events grow the log and nothing prunes it.
+ADMIN_EVENT_LIMIT = 500
 
 
 def require_admin(request: Request, user: dict = Depends(require_auth)) -> dict:
@@ -100,6 +102,15 @@ def _list(conn, config, actor, *, admin=False):
     return {"groups": result}
 
 
+def _file_activity(conn, config, group_id):
+    try:
+        events = files.recent_file_events(conn, group_id)
+    except sqlite3.Error:
+        logger.warning("group_file_activity_failed group=%s", group_id)
+        return []
+    return [{**event, **_user(config, event["actor_id"])} for event in events]
+
+
 def _detail(conn, config, actor, group_id, *, admin=False):
     if not admin:
         require_group_member(conn, group_id, actor)
@@ -112,16 +123,21 @@ def _detail(conn, config, actor, group_id, *, admin=False):
                          for m in history if m["ended_at"] is None]
     if admin:
         result["history"] = [{**m, **_user(config, m["user_id"])} for m in history]
-        result["events"] = [
-            {**dict(row), "details": json.loads(row["details_json"])}
-            for row in conn.execute("SELECT id, actor_id, event_type, subject_user_id, details_json, created_at "
-                                    "FROM group_events WHERE group_id = ? ORDER BY id", (group_id,))]
-        for event in result["events"]:
+        rows = conn.execute("SELECT id, actor_id, event_type, subject_user_id, details_json, created_at "
+                            "FROM group_events WHERE group_id = ? ORDER BY id DESC LIMIT ?",
+                            (group_id, ADMIN_EVENT_LIMIT)).fetchall()
+        result["events"] = []
+        for row in reversed(rows):
+            event = dict(row)
             del event["details_json"]
+            # A file event's path is member content, which admins outside the group do not read.
+            event["details"] = {} if row["event_type"] in files.FILE_EVENTS else json.loads(row["details_json"])
+            result["events"].append(event)
         result["needs_owner"] = not group["archived_at"] and not group["system_key"] and not any(
             m["role"] == "owner" and m["ended_at"] is None for m in history)
     else:
         result["rooms"] = group_rooms.list_group_rooms(conn, group_id, actor)
+        result["file_activity"] = _file_activity(conn, config, group_id)
     result["disclosure"] = service.history_disclosure(group_id, conn)
     return result
 

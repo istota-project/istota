@@ -22,7 +22,7 @@ await fillApiDouble(api, {
     if (!entries) throw Object.assign(new Error('Folder not found.'), { status: 404 });
     return { place: 'home', path, entries, truncated: false, skipped_names: 0 };
   }),
-  createWorkspaceFolder: vi.fn(async (path: string, name: string) => {
+  createWorkspaceFolder: vi.fn(async (_place: string, path: string, name: string) => {
     const made = path ? `${path}/${name}` : name;
     tree[path].push(entry(name));
     tree[made] = [];
@@ -97,7 +97,9 @@ describe('FolderPicker', () => {
       target: { value: ' Ideas ' },
     });
     await fireEvent.click(screen.getByRole('button', { name: 'Create' }));
-    await waitFor(() => expect(api.createWorkspaceFolder).toHaveBeenCalledWith('Notes', 'Ideas'));
+    await waitFor(() =>
+      expect(api.createWorkspaceFolder).toHaveBeenCalledWith('home', 'Notes', 'Ideas'),
+    );
     const crumbs = within(screen.getByRole('navigation', { name: 'Folder path' }));
     await waitFor(() => expect(crumbs.getByText('Ideas')).toHaveAttribute('aria-current'));
 

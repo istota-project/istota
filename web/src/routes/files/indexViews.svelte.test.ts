@@ -18,6 +18,7 @@ const home: WorkspacePlace = {
   kind: 'home',
   label: 'My files',
   browsable: true,
+  writable: true,
   view_root: '/Users/alice',
   reach: { ...reach },
 };

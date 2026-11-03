@@ -369,3 +369,53 @@ it('keeps automatic groups ownerless without management controls', async () => {
     expect(screen.queryByRole('button', { name })).toBeNull();
   expect(screen.getByText(/current and future installation users/)).toBeTruthy();
 });
+
+it('labels file events without their paths and says when the event list is cut', async () => {
+  const fileEvents = ['file_uploaded', 'folder_created', 'file_edited', 'file_deleted'].map(
+    (event_type, index) => ({
+      id: 10 + index,
+      actor_id: 'alice',
+      event_type,
+      subject_user_id: null,
+      created_at: '2026-11-01',
+      details: {},
+    }),
+  );
+  api.getAdminGroup.mockResolvedValue({ ...group, events: fileEvents });
+  const first = render(Groups);
+  await screen.findByRole('heading', { name: 'Team' });
+  for (const title of ['File uploaded', 'Folder created', 'File edited', 'File deleted'])
+    expect(screen.getByText(title)).toBeTruthy();
+  expect(document.querySelectorAll('.event-details')).toHaveLength(0);
+  expect(screen.queryByText(/Showing the latest/)).toBeNull();
+  first.unmount();
+  const many = Array.from({ length: 500 }, (_, index) => ({ ...fileEvents[0], id: index + 1 }));
+  api.getAdminGroup.mockResolvedValue({ ...group, events: many });
+  render(Groups);
+  await screen.findByRole('heading', { name: 'Team' });
+  expect(screen.getByText('Showing the latest 500 events.')).toBeTruthy();
+});
+
+it("lists the files clause of a member's acknowledged disclosure", async () => {
+  const added = {
+    id: 20,
+    actor_id: 'alice',
+    event_type: 'member_added',
+    subject_user_id: 'bob',
+    created_at: '2026-11-01',
+    details: {
+      role: 'member',
+      acknowledge_history: true,
+      disclosure: {
+        memory: 'Groups/team/GROUP.md',
+        files: 'Groups/team/: every member can add, change and delete these files',
+        rooms: [],
+        briefings: [],
+      },
+    },
+  };
+  api.getAdminGroup.mockResolvedValue({ ...group, events: [added] });
+  render(Groups);
+  await screen.findByRole('heading', { name: 'Team' });
+  expect(screen.getByText(/every member can add, change and delete these files/)).toBeTruthy();
+});

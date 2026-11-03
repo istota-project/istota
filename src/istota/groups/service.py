@@ -84,7 +84,8 @@ def history_disclosure(group_id: str, conn=None) -> dict:
         rooms = [db.get_room(conn, token).name or token
                  for token in group_rooms.group_owned_room_tokens(conn, group_id)]
     return {"memory": f"Groups/{group_id}/GROUP.md", "rooms": rooms,
-            "briefings": ["All retained group briefing editions, including those published before joining"]}
+            "briefings": ["All retained group briefing editions, including those published before joining"],
+            "files": f"Groups/{group_id}/: every member can add, change and delete these files"}
 
 
 def reconcile_rooms(conn, group_id: str, config=None) -> list[int]:

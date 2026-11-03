@@ -28,10 +28,14 @@ class Listing:
 
 
 class ListingError(Exception):
-    def __init__(self, status: int, message: str):
+    """A refusal a route answers as given; `code` is the stable name a client
+    can act on, carried into the response body when set."""
+
+    def __init__(self, status: int, message: str, *, code: str | None = None):
         super().__init__(message)
         self.status = status
         self.message = message
+        self.code = code
 
 
 def list_dir(root: Path, parts: list[str], *, limit: int = LIST_MAX_ENTRIES) -> Listing:

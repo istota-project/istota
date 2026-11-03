@@ -79,6 +79,8 @@
     })),
   );
 
+  // The server sends the newest ADMIN_EVENT_LIMIT events (groups/routes.py).
+  const EVENT_LIMIT = 500;
   function eventTitle(type: string): string {
     const titles: Record<string, string> = {
       created: 'Group created',
@@ -87,6 +89,10 @@
       member_removed: 'Member removed',
       role_changed: 'Role changed',
       archived: 'Group archived',
+      file_uploaded: 'File uploaded',
+      folder_created: 'Folder created',
+      file_edited: 'File edited',
+      file_deleted: 'File deleted',
     };
     return titles[type] ?? 'Group change';
   }
@@ -99,8 +105,9 @@
       lines.push(`Role: ${details.role}`);
       if (details.acknowledge_history === true) lines.push('Existing history access acknowledged');
       const disclosure = details.disclosure as
-        { memory?: string; rooms?: string[]; briefings?: string[] } | undefined;
+        { memory?: string; files?: string; rooms?: string[]; briefings?: string[] } | undefined;
       if (disclosure?.memory) lines.push(disclosure.memory);
+      if (disclosure?.files) lines.push(disclosure.files);
       lines.push(...(disclosure?.rooms ?? []), ...(disclosure?.briefings ?? []));
     }
     if (event.event_type === 'member_removed') lines.push(`Previous role: ${details.old_role}`);
@@ -411,6 +418,9 @@
             title="Management events"
             description="Role changes keep the membership period intact. Each change is recorded here."
           >
+            {#if group.events.length >= EVENT_LIMIT}<p class="caption">
+                Showing the latest {EVENT_LIMIT} events.
+              </p>{/if}
             {#if !group.events.length}<EmptyState size="sm">No management events.</EmptyState
               >{:else}<ol class="list-reset">
                 {#each group.events as event (event.id)}

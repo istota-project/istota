@@ -129,6 +129,7 @@ async def test_history_acknowledgement_revision_and_rejoin(client, configured):
     assert response.json()["disclosure"] == {
         "memory": "Groups/family/GROUP.md", "rooms": [],
         "briefings": ["All retained group briefing editions, including those published before joining"],
+        "files": "Groups/family/: every member can add, change and delete these files",
     }
     with db.get_db(configured._config.db_path) as conn:
         assert not db.is_group_member(conn, "family", "carol")
@@ -267,3 +268,73 @@ async def test_system_group_capabilities_and_write_refusals(client, configured):
     response = await client.post(BASE + f"/admin/groups/{gid}/archive", json={"revision": revision, "confirm": True})
     assert response.status_code == 403 and response.json()["error"] == "system_group"
     assert (await client.patch(BASE + f"/admin/groups/{gid}", json={"revision": revision, "system_key": None})).status_code == 422
+
+
+# --- file activity -----------------------------------------------------------
+
+def _file_events(db_path):
+    from istota.groups.files import record_file_event
+    config = Config(db_path=db_path)
+    assert record_file_event(config, "family", "alice", "file_uploaded", "itinerary.pdf", size=3)
+    with db.get_db(db_path) as conn:
+        conn.execute("INSERT INTO group_events (group_id, actor_id, event_type, details_json) "
+                     "VALUES ('family', 'alice', 'renamed', ?)", (json.dumps({"display_name": "Fam"}),))
+        conn.commit()
+    assert record_file_event(config, "family", "alice", "folder_created", "Plans")
+    assert record_file_event(config, "family", "bob", "file_edited", "Plans/packing.md")
+    assert record_file_event(config, "private", "carol", "file_uploaded", "carol-only.txt", size=1)
+
+
+async def test_member_detail_lists_file_activity_newest_first(client, configured):
+    _file_events(configured._config.db_path)
+    with db.get_db(configured._config.db_path) as conn:
+        revision = db.get_group(conn, "family")["revision"]
+    detail = (await client.get(BASE + "/groups/family")).json()
+    activity = [(e["event_type"], e["path"], e["size"], e["actor_id"], e["display_name"])
+                for e in detail["file_activity"]]
+    assert activity == [
+        ("file_edited", "Plans/packing.md", None, "bob", "Bob"),
+        ("folder_created", "Plans", None, "alice", "Alice"),
+        ("file_uploaded", "itinerary.pdf", 3, "alice", "Alice"),
+    ]
+    assert all(e["created_at"] and e["id"] for e in detail["file_activity"])
+    assert "carol-only" not in json.dumps(detail) and "events" not in detail
+    assert detail["revision"] == revision
+    assert detail["disclosure"]["files"] == "Groups/family/: every member can add, change and delete these files"
+
+
+async def test_member_detail_survives_a_broken_activity_read(client, configured, monkeypatch, caplog):
+    import sqlite3
+    from istota.groups import files
+
+    def broken(*args, **kwargs):
+        raise sqlite3.OperationalError("no such table")
+
+    monkeypatch.setattr(files, "recent_file_events", broken)
+    response = await client.get(BASE + "/groups/family")
+    assert response.status_code == 200 and response.json()["file_activity"] == []
+    assert "group_file_activity_failed group=family" in caplog.text
+
+
+async def test_admin_detail_shows_file_events_without_names(client, configured):
+    _file_events(configured._config.db_path)
+    session(client, configured, "admin")
+    detail = (await client.get(BASE + "/admin/groups/family")).json()
+    events = [(e["event_type"], e["actor_id"], e["details"]) for e in detail["events"]]
+    assert events == [
+        ("file_uploaded", "alice", {}), ("renamed", "alice", {"display_name": "Fam"}),
+        ("folder_created", "alice", {}), ("file_edited", "bob", {}),
+    ]
+    assert "itinerary" not in json.dumps(detail) and "packing" not in json.dumps(detail)
+    assert "file_activity" not in detail
+
+
+async def test_admin_detail_events_are_the_newest_500(client, configured):
+    with db.get_db(configured._config.db_path) as conn:
+        conn.executemany("INSERT INTO group_events (group_id, actor_id, event_type, details_json) "
+                         "VALUES ('family', 'alice', 'renamed', ?)",
+                         [(json.dumps({"n": n}),) for n in range(505)])
+        conn.commit()
+    session(client, configured, "admin")
+    events = (await client.get(BASE + "/admin/groups/family")).json()["events"]
+    assert [e["details"]["n"] for e in events] == list(range(5, 505))

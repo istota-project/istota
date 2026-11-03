@@ -229,6 +229,26 @@ def test_shared_group_reach_depends_on_every_room_reader(config, conn):
     assert place_reach(config, conn, "alice", list_places(config, conn, "alice"))["group:team"].shared_member == "conditional"
 
 
+def test_group_note_says_who_can_change_its_files(config, conn):
+    from istota.workspace.places import list_places
+    from istota.workspace.reach import place_reach
+
+    db.create_group(conn, "team", kind="group", display_name="Team", created_by="alice")
+    db.add_group_member(conn, "team", "alice", added_by="alice")
+    db.create_group(conn, "everyone", kind="group", display_name="All users", created_by="alice")
+    conn.execute("UPDATE groups SET system_key = 'all_users' WHERE group_id = 'everyone'")
+    db.add_group_member(conn, "everyone", "alice", added_by="alice")
+    (config.workspace_path / "Groups" / "everyone").mkdir()
+    reach = place_reach(config, conn, "alice", list_places(config, conn, "alice"))
+    assert reach["group:team"].note.startswith("Every member can add, change and delete files here. ")
+    assert "every reader" in reach["group:team"].note
+    assert reach["group:everyone"].note.startswith("Only admins can change files here. ")
+    # An admin may write All users, but the other members still cannot.
+    config.admin_users = {"alice"}
+    reach = place_reach(config, conn, "alice", list_places(config, conn, "alice"))
+    assert reach["group:everyone"].note.startswith("Only admins can change files here. ")
+
+
 def test_personal_nextcloud_connection_is_not_task_reach(config, conn):
     from istota.workspace.places import list_places
     from istota.workspace.reach import place_reach

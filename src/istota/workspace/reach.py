@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 
 from istota import db, doctor
 from istota.config import Config
+from istota.groups.system import ALL_USERS
 from istota.rooms.scopes import all_scopes
 from istota.sandbox.plan import Mount, user_data_mounts
 from istota.skills._loader import advertised_cli_skills, effective_disabled_skills, load_skill_index
@@ -44,6 +45,11 @@ def place_reach(
         disabled_skills=effective_disabled_skills(config, user_id, index),
     )
     contexts = ((frozenset(), groups), (frozenset(), groups), (all_scopes(index), []))
+    all_users_places = set()
+    for group_id in groups:
+        group = db.get_group(conn, group_id)
+        if group is not None and group["system_key"] == ALL_USERS:
+            all_users_places.add(f"group:{group_id}")
     # Cache by room token: a channel bind exists only on that room's tasks.
     plans: dict[str | None, list[list[Mount]]] = {}
     result = {}
@@ -83,7 +89,13 @@ def place_reach(
         elif place.kind == "group":
             if modes[1] != "none":
                 modes[1] = "conditional"
-            note = (
+            # Writers by place id rather than `writable`: an admin may write
+            # All users, but the other members cannot.
+            if place.id in all_users_places:
+                who = "Only admins can change files here. "
+            else:
+                who = "Every member can add, change and delete files here. "
+            note = who + (
                 "Group files are available in a shared room only when every reader belongs to "
                 "this group, with no guests or other bots. A room linked to a group can use "
                 "only that group."
