@@ -682,7 +682,7 @@ async def test_member_writes_land_in_the_group_folder(client, config):
     response = await client.post("/workspace/upload", data={"place": "group:family", "path": "Plans"},
                                  files={"file": ("itinerary.pdf", b"pdf")})
     assert response.status_code == 200
-    assert response.json() == {"name": "itinerary.pdf", "path": "Plans/itinerary.pdf", "size": 3}
+    assert response.json() == {"name": "itinerary.pdf", "path": "Plans/itinerary.pdf", "size": 3, "recorded": True}
     assert (root / "Plans/itinerary.pdf").read_bytes() == b"pdf"
     assert not (_home(config) / "Plans").exists()
     response = await client.delete("/workspace/files", params={"place": "group:family", "path": "Plans", "name": "itinerary.pdf"})
@@ -810,7 +810,7 @@ async def test_member_edits_a_group_text_file(client, config):
     assert response.json()["content"] == "socks\n"
     body = _text_body("socks\nboots\n", _rev("socks\n"), place="group:family", path="Plans", name="packing.md")
     response = await client.put("/workspace/files", json=body)
-    assert response.status_code == 200 and response.json() == {"revision": _rev("socks\nboots\n")}
+    assert response.status_code == 200 and response.json() == {"revision": _rev("socks\nboots\n"), "recorded": True}
     assert (root / "Plans/packing.md").read_text() == "socks\nboots\n"
     assert not (_home(config) / "Plans").exists()
 
@@ -869,6 +869,104 @@ async def test_group_text_files_refused_without_a_live_membership(client, config
     response = await client.put("/workspace/files", json=body)
     assert response.status_code == 404 and response.json() == {"error": "Place not found."}
     assert (root / "list.md").read_text() == "one"
+
+
+# --- group writes are recorded as group events -------------------------------
+
+def _events(config, group_id="family"):
+    import json
+    with db.get_db(config.db_path) as conn:
+        rows = conn.execute("SELECT actor_id, event_type, subject_user_id, details_json FROM group_events "
+                            "WHERE group_id = ? ORDER BY id", (group_id,)).fetchall()
+    return [(row["actor_id"], row["event_type"], row["subject_user_id"], json.loads(row["details_json"]))
+            for row in rows]
+
+
+def _revision(config, group_id="family"):
+    with db.get_db(config.db_path) as conn:
+        return db.get_group(conn, group_id)["revision"]
+
+
+async def test_each_group_write_records_one_event(client, config):
+    root = _group(config)
+    before = _revision(config)
+    response = await client.post("/workspace/folders", json={"place": "group:family", "path": "", "name": "Plans"})
+    assert response.json() == {"path": "Plans", "recorded": True}
+    response = await client.post("/workspace/upload", data={"place": "group:family", "path": "Plans"},
+                                 files={"file": ("packing.md", b"socks\n")})
+    assert response.json() == {"name": "packing.md", "path": "Plans/packing.md", "size": 6, "recorded": True}
+    response = await client.post("/workspace/upload", data={"place": "group:family", "path": "Plans"},
+                                 files={"file": ("packing.md", b"again")})
+    assert response.json()["name"] == "packing (2).md" and response.json()["recorded"] is True
+    body = _text_body("socks\nboots\n", _rev("socks\n"), place="group:family", path="Plans", name="packing.md")
+    response = await client.put("/workspace/files", json=body)
+    assert response.json() == {"revision": _rev("socks\nboots\n"), "recorded": True}
+    response = await client.delete("/workspace/files",
+                                   params={"place": "group:family", "path": "Plans", "name": "packing (2).md"})
+    assert response.json() == {"status": "ok", "recorded": True}
+    assert _events(config) == [
+        ("alice", "folder_created", None, {"path": "Plans", "size": None}),
+        ("alice", "file_uploaded", None, {"path": "Plans/packing.md", "size": 6}),
+        ("alice", "file_uploaded", None, {"path": "Plans/packing (2).md", "size": 5}),
+        ("alice", "file_edited", None, {"path": "Plans/packing.md", "size": None}),
+        ("alice", "file_deleted", None, {"path": "Plans/packing (2).md", "size": None}),
+    ]
+    assert _revision(config) == before
+    assert (root / "Plans/packing.md").read_text() == "socks\nboots\n"
+
+
+async def test_refused_group_writes_record_nothing(client, config):
+    root = _group(config)
+    (root / "list.md").write_text("one")
+    response = await client.post("/workspace/upload", data={"place": "group:family", "path": ""},
+                                 files={"file": ("GROUP.md", b"planted")})
+    assert response.status_code == 403
+    body = _text_body("x", _rev("stale"), place="group:family", path="", name="list.md")
+    assert (await client.put("/workspace/files", json=body)).status_code == 409
+    response = await client.delete("/workspace/files", params={"place": "group:family", "path": "", "name": "gone.txt"})
+    assert response.status_code == 404
+    assert _events(config) == []
+
+
+async def test_a_failed_record_does_not_fail_the_group_write(client, config, caplog):
+    root = _group(config)
+    with db.get_db(config.db_path) as conn:
+        conn.execute("DROP TABLE group_events")
+        conn.commit()
+    response = await client.post("/workspace/upload", data={"place": "group:family", "path": ""},
+                                 files={"file": ("secret-name.txt", b"x")})
+    assert response.status_code == 200 and response.json()["recorded"] is False
+    assert (root / "secret-name.txt").read_bytes() == b"x"
+    body = _text_body("y", _rev("x"), place="group:family", path="", name="secret-name.txt")
+    response = await client.put("/workspace/files", json=body)
+    assert response.status_code == 200 and response.json()["recorded"] is False
+    response = await client.delete("/workspace/files",
+                                   params={"place": "group:family", "path": "", "name": "secret-name.txt"})
+    assert response.json() == {"status": "ok", "recorded": False}
+    assert "group_file_event_failed group=family event=file_uploaded" in caplog.text
+    assert "secret-name" not in caplog.text
+
+
+async def test_home_writes_record_no_event(client, config):
+    _group(config)
+    response = await client.post("/workspace/folders", json={"place": "home", "path": "", "name": "Drafts"})
+    assert response.json() == {"path": "Drafts"}
+    response = await client.post("/workspace/upload", data={"place": "home", "path": ""},
+                                 files={"file": ("note.txt", b"x")})
+    assert "recorded" not in response.json()
+    response = await client.put("/workspace/files", json=_text_body("edited", _rev("plan")))
+    assert response.json() == {"revision": _rev("edited")}
+    response = await client.delete("/workspace/files", params={"place": "home", "path": "", "name": "note.txt"})
+    assert response.json() == {"status": "ok"}
+    with db.get_db(config.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM group_events").fetchone()[0] == 0
+
+
+def test_a_long_event_path_is_cut(config):
+    from istota.groups.files import record_file_event
+    _group(config)
+    assert record_file_event(config, "family", "alice", "file_uploaded", "a/" * 400, size=1)
+    assert _events(config)[0][3] == {"path": ("a/" * 400)[:512], "size": 1}
 
 
 @pytest.fixture

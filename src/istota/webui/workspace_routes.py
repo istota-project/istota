@@ -22,6 +22,7 @@ from istota.credentials.google_tokens import access_token_for
 from istota.google import drive
 from istota.nextcloud import OcsError, shares
 from istota.webui.chat_files import servable_roots
+from istota.groups.files import record_file_event
 from istota.workspace.pins import validate_pin, workspace_pin_kind
 from istota.webui.request_guards import BodyError, read_bounded_body
 from istota.webui.router_stubs import require_auth, require_session_or_device, verify_origin
@@ -282,6 +283,15 @@ def _writable_place(config, username, place_id) -> Place:
     return place
 
 
+def _record(config, place, actor, event_type, path, *, size=None) -> dict:
+    """Record a group write after it landed: `{"recorded": bool}` for a group
+    response, nothing for home. A failed record never fails the write."""
+    if place.kind != "group":
+        return {}
+    group_id = place.id.partition(":")[2]
+    return {"recorded": record_file_event(config, group_id, actor, event_type, path, size=size)}
+
+
 def _place_kind(place_id):
     """A place id's kind for a log line: `home`, `group`, never the id itself."""
     return place_id.partition(":")[0] if isinstance(place_id, str) else "unknown"
@@ -338,7 +348,9 @@ async def api_workspace_upload(
             anchor, walk = place_anchor(selected)
             chunks = iter(lambda: file.file.read(1024 * 1024), b"")
             name = write_new_file(anchor, [*walk, *parts], filename, chunks, max_bytes=cap)
-            return {"name": name, "path": "/".join([*parts, name]), "size": file.size}
+            written = "/".join([*parts, name])
+            return {"name": name, "path": written, "size": file.size,
+                    **_record(config, selected, user["username"], "file_uploaded", written, size=file.size)}
 
         try:
             return await asyncio.to_thread(write)
@@ -368,7 +380,8 @@ async def api_workspace_folder(
         protected.check_create(selected, parts, safe_filename(body["name"], fallback="folder"))
         anchor, walk = place_anchor(selected)
         name = make_folder(anchor, [*walk, *parts], body["name"])
-        return {"path": "/".join([*parts, name])}
+        created = "/".join([*parts, name])
+        return {"path": created, **_record(config, selected, user["username"], "folder_created", created)}
 
     try:
         return await asyncio.to_thread(write)
@@ -676,16 +689,21 @@ async def api_workspace_text_file_save(
 
     def write():
         selected = _writable_place(config, user["username"], body["place"])
-        return editable.save(
+        outcome = editable.save(
             config, user["username"], selected, parts, body["name"], body["content"], body["revision"],
         )
+        recorded = {}
+        if outcome.status == "ok":
+            recorded = _record(config, selected, user["username"], "file_edited",
+                               "/".join([*parts, body["name"]]))
+        return outcome, recorded
 
     try:
-        outcome = await asyncio.to_thread(write)
+        outcome, recorded = await asyncio.to_thread(write)
     except (ListingError, OSError) as exc:
         return _edit_refusal(config, exc, body["place"])
     if outcome.status == "ok":
-        return {"revision": outcome.revision}
+        return {"revision": outcome.revision, **recorded}
     status, message = _SAVE_REFUSALS[outcome.status]
     payload = {"error": message, "code": outcome.status}
     if outcome.status == "too_large":
@@ -708,7 +726,8 @@ async def api_workspace_delete(
         protected.check_delete(selected, parts, name)
         anchor, walk = place_anchor(selected)
         delete_entry(anchor, [*walk, *parts], name)
-        return {"status": "ok"}
+        return {"status": "ok",
+                **_record(config, selected, user["username"], "file_deleted", "/".join([*parts, name]))}
 
     try:
         return await asyncio.to_thread(write)
