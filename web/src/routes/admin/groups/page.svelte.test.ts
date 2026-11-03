@@ -395,3 +395,27 @@ it('labels file events without their paths and says when the event list is cut',
   await screen.findByRole('heading', { name: 'Team' });
   expect(screen.getByText('Showing the latest 500 events.')).toBeTruthy();
 });
+
+it("lists the files clause of a member's acknowledged disclosure", async () => {
+  const added = {
+    id: 20,
+    actor_id: 'alice',
+    event_type: 'member_added',
+    subject_user_id: 'bob',
+    created_at: '2026-11-01',
+    details: {
+      role: 'member',
+      acknowledge_history: true,
+      disclosure: {
+        memory: 'Groups/team/GROUP.md',
+        files: 'Groups/team/: every member can add, change and delete these files',
+        rooms: [],
+        briefings: [],
+      },
+    },
+  };
+  api.getAdminGroup.mockResolvedValue({ ...group, events: [added] });
+  render(Groups);
+  await screen.findByRole('heading', { name: 'Team' });
+  expect(screen.getByText(/every member can add, change and delete these files/)).toBeTruthy();
+});

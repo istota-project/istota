@@ -105,8 +105,9 @@
       lines.push(`Role: ${details.role}`);
       if (details.acknowledge_history === true) lines.push('Existing history access acknowledged');
       const disclosure = details.disclosure as
-        { memory?: string; rooms?: string[]; briefings?: string[] } | undefined;
+        { memory?: string; files?: string; rooms?: string[]; briefings?: string[] } | undefined;
       if (disclosure?.memory) lines.push(disclosure.memory);
+      if (disclosure?.files) lines.push(disclosure.files);
       lines.push(...(disclosure?.rooms ?? []), ...(disclosure?.briefings ?? []));
     }
     if (event.event_type === 'member_removed') lines.push(`Previous role: ${details.old_role}`);

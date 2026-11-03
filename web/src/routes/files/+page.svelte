@@ -1075,7 +1075,7 @@
   {@const file = textEditing}
   <TextFileEditor
     bind:open={textEditorOpen}
-    fileKey={[file.path, file.name].filter(Boolean).join('/')}
+    fileKey={[file.place, file.path, file.name].filter(Boolean).join('/')}
     title={file.name}
     description={[file.label, file.path].filter(Boolean).join(' / ')}
     ariaLabel={file.name}
