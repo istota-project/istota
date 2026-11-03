@@ -10,6 +10,8 @@ from pathlib import Path
 from istota import db
 from istota.config import Config
 from istota.credentials.google_scopes import levels_from_scopes
+from istota.groups.policy import is_group_admin
+from istota.groups.system import ALL_USERS
 from istota.sandbox.host_paths import linked_resource_parts
 from istota.sandbox.user_scope import scoped_user_dir
 from istota.sharing import sources as shared_sources
@@ -33,6 +35,8 @@ class Place:
     remote_host: str | None = None
     remote_access: str | None = None
     remote_kind: str | None = None
+    # Whether the web user may upload, create folders and delete here.
+    writable: bool = False
 
 
 def place_anchor(place: Place) -> tuple[Path, tuple[str, ...]]:
@@ -70,7 +74,8 @@ def list_places(config: Config, conn: sqlite3.Connection, user_id: str) -> list[
     if config.has_workspace:
         workspace = config.workspace_path.resolve()
         if home is not None:
-            places.append(Place("home", "home", "My files", home, True, f"/Users/{user_id}"))
+            places.append(Place("home", "home", "My files", home, True, f"/Users/{user_id}",
+                                writable=True))
         for resource in user_resources_for(config, conn, user_id):
             if resource.resource_type not in {"folder", "shared_file"} or not resource.resource_path:
                 continue
@@ -96,8 +101,12 @@ def list_places(config: Config, conn: sqlite3.Connection, user_id: str) -> list[
             if root is not None and root.is_dir():
                 group = db.get_group(conn, group_id)
                 label = group["display_name"] or group_id
+                # Walked from the workspace root like a linked place, so a link
+                # at `Groups` or `Groups/<id>` refuses rather than redirects.
                 places.append(Place(f"group:{group_id}", "group", label[:120],
-                                    root, True, f"/Groups/{group_id}"))
+                                    root, True, f"/Groups/{group_id}",
+                                    anchor=workspace, walk=("Groups", group_id),
+                                    writable=_group_writable(config, user_id, group)))
     if config.google_workspace.enabled:
         scopes = db.get_google_scopes(conn, user_id)
         if scopes is not None and levels_from_scopes(scopes).get("drive") in {"readonly", "full"}:
@@ -114,6 +123,14 @@ def list_places(config: Config, conn: sqlite3.Connection, user_id: str) -> list[
                             remote_host=source.remote_host, remote_access=source.access,
                             remote_kind=kind if kind in ("file", "folder") else None))
     return places
+
+
+def _group_writable(config: Config, user_id: str, group: dict) -> bool:
+    """Every current member writes an ordinary group's folder; the All users
+    folder only an admin, since its briefings are installation-wide."""
+    if group["system_key"] == ALL_USERS:
+        return is_group_admin(config, user_id)
+    return True
 
 
 def share_label(source) -> str:

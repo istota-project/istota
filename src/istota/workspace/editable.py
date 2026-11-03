@@ -39,8 +39,7 @@ MAX_BYTES = PREVIEW_MAX_BYTES
 
 class EditRefused(ListingError):
     def __init__(self, status: int, code: str, message: str):
-        super().__init__(status, message)
-        self.code = code
+        super().__init__(status, message, code=code)
 
 
 def _not_text() -> EditRefused:

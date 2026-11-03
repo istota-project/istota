@@ -151,9 +151,22 @@ async def test_upload_stops_body_at_cap(client, config):
 
 
 @pytest.mark.parametrize("place", ["talk", "room:sample", "linked:1", "unknown"])
-async def test_writes_only_accept_home(client, place):
+async def test_writes_only_accept_writable_places(client, place):
     assert (await client.post("/workspace/folders", json={"place": place, "path": "", "name": "Drafts"})).status_code == 404
     assert (await client.post("/workspace/upload", data={"place": place, "path": ""}, files={"file": ("note.txt", b"x")})).status_code == 404
+    assert (await client.delete("/workspace/files", params={"place": place, "path": "", "name": "notes"})).status_code == 404
+
+
+async def test_a_listed_room_place_refuses_writes(client, config):
+    with db.get_db(config.db_path) as conn:
+        room = db.create_web_chat_room(conn, "alice", "Shared")
+    root = config.workspace_path / "Channels" / room.token
+    root.mkdir(parents=True)
+    (root / "keep.txt").write_text("keep")
+    for response in await _write_all(client, f"room:{room.token}"):
+        assert response.status_code == 404
+        assert response.json() == {"error": "Place not found."}
+    assert [p.name for p in root.iterdir()] == ["keep.txt"]
 
 
 async def test_writes_require_origin(client, app):
@@ -617,6 +630,181 @@ async def test_delete_requires_auth_and_origin(client, app, config):
     app.dependency_overrides.clear()
     assert (await client.delete("/workspace/files", params=params)).status_code == 401
     assert (config.workspace_path / "Users/alice/notes/plan.md").exists()
+
+
+# --- group places accept writes from current members -------------------------
+
+def _group(config, group_id="family", *, members=("alice",), display_name="Family", system_key=None):
+    with db.get_db(config.db_path) as conn:
+        db.create_group(conn, group_id, kind="group", display_name=display_name, created_by="bob")
+        if system_key is not None:
+            conn.execute("UPDATE groups SET system_key = ? WHERE group_id = ?", (system_key, group_id))
+        for member in members:
+            db.add_group_member(conn, group_id, member, added_by="bob")
+        conn.commit()
+    root = config.workspace_path / "Groups" / group_id
+    (root / "memories").mkdir(parents=True)
+    (root / "GROUP.md").write_text("notebook")
+    return root
+
+
+async def _write_all(client, place, path=""):
+    """One upload, one new folder and one delete, the three Stage 1 writes."""
+    upload = await client.post("/workspace/upload", data={"place": place, "path": path},
+                               files={"file": ("note.txt", b"x")})
+    folder = await client.post("/workspace/folders", json={"place": place, "path": path, "name": "Drafts"})
+    delete = await client.delete("/workspace/files", params={"place": place, "path": path, "name": "keep.txt"})
+    return upload, folder, delete
+
+
+async def test_places_say_which_accept_writes(client, config):
+    _group(config)
+    everyone = _group(config, "everyone", display_name="All users", system_key="all_users")
+    with db.get_db(config.db_path) as conn:
+        room = db.create_web_chat_room(conn, "alice", "Shared")
+    (config.workspace_path / "Channels" / room.token).mkdir(parents=True)
+    places = {p["id"]: p for p in (await client.get("/workspace/places")).json()["places"]}
+    assert places["home"]["writable"] is True
+    assert places["group:family"]["writable"] is True
+    assert places[f"room:{room.token}"]["writable"] is False
+    assert places["group:everyone"]["writable"] is False
+    assert everyone.is_dir()
+    config.admin_users = {"alice"}
+    places = {p["id"]: p for p in (await client.get("/workspace/places")).json()["places"]}
+    assert places["group:everyone"]["writable"] is True
+
+
+async def test_member_writes_land_in_the_group_folder(client, config):
+    root = _group(config)
+    response = await client.post("/workspace/folders", json={"place": "group:family", "path": "", "name": "Plans"})
+    assert response.status_code == 200 and response.json()["path"] == "Plans"
+    assert (root / "Plans").is_dir()
+    response = await client.post("/workspace/upload", data={"place": "group:family", "path": "Plans"},
+                                 files={"file": ("itinerary.pdf", b"pdf")})
+    assert response.status_code == 200
+    assert response.json() == {"name": "itinerary.pdf", "path": "Plans/itinerary.pdf", "size": 3}
+    assert (root / "Plans/itinerary.pdf").read_bytes() == b"pdf"
+    assert not (_home(config) / "Plans").exists()
+    response = await client.delete("/workspace/files", params={"place": "group:family", "path": "Plans", "name": "itinerary.pdf"})
+    assert response.status_code == 200
+    assert not (root / "Plans/itinerary.pdf").exists()
+    response = await client.delete("/workspace/files", params={"place": "group:family", "path": "", "name": "Plans"})
+    assert response.status_code == 200 and not (root / "Plans").exists()
+
+
+async def test_all_users_folder_is_writable_by_an_admin(client, config):
+    root = _group(config, "everyone", display_name="All users", system_key="all_users")
+    config.admin_users = {"alice"}
+    response = await client.post("/workspace/folders", json={"place": "group:everyone", "path": "", "name": "Shared"})
+    assert response.status_code == 200 and (root / "Shared").is_dir()
+
+
+@pytest.mark.parametrize("state", ["non_member", "ended", "archived", "all_users_non_admin"])
+async def test_group_writes_refused_without_a_live_membership(client, config, state):
+    group_id = "everyone" if state == "all_users_non_admin" else "family"
+    root = _group(config, group_id, members=() if state == "non_member" else ("alice",),
+                  system_key="all_users" if state == "all_users_non_admin" else None)
+    (root / "keep.txt").write_text("keep")
+    with db.get_db(config.db_path) as conn:
+        if state == "ended":
+            db.end_group_membership(conn, group_id, "alice", ended_by="bob")
+        elif state == "archived":
+            db.archive_group(conn, group_id)
+        conn.commit()
+    for response in await _write_all(client, f"group:{group_id}"):
+        assert response.status_code == 404
+        assert response.json() == {"error": "Place not found."}
+    assert sorted(p.name for p in root.iterdir()) == ["GROUP.md", "keep.txt", "memories"]
+
+
+@pytest.mark.parametrize("upload_name,code", [("GROUP.md", "group_memory"), ("group.MD", "group_memory"),
+                                              ("memories", "group_folder")])
+async def test_layout_names_cannot_be_created_at_the_group_root(client, config, upload_name, code):
+    root = _group(config)
+    (root / "GROUP.md").unlink()
+    (root / "memories").rmdir()
+    response = await client.post("/workspace/upload", data={"place": "group:family", "path": ""},
+                                 files={"file": (upload_name, b"planted")})
+    assert response.status_code == 403
+    assert response.json()["code"] == code
+    folder = await client.post("/workspace/folders", json={"place": "group:family", "path": "", "name": upload_name})
+    assert folder.status_code == 403 and folder.json()["code"] == code
+    assert list(root.iterdir()) == []
+
+
+async def test_an_upload_named_like_the_notebook_never_lands_beside_it(client, config):
+    root = _group(config)
+    response = await client.post("/workspace/upload", data={"place": "group:family", "path": ""},
+                                 files={"file": ("GROUP.md", b"planted")})
+    assert response.status_code == 403
+    assert response.json() == {"error": "The group notebook is edited on the Groups page.", "code": "group_memory"}
+    assert (root / "GROUP.md").read_text() == "notebook"
+    assert sorted(p.name for p in root.iterdir()) == ["GROUP.md", "memories"]
+
+
+async def test_layout_names_cannot_be_deleted_at_the_group_root(client, config):
+    root = _group(config)
+    response = await client.delete("/workspace/files", params={"place": "group:family", "path": "", "name": "GROUP.md"})
+    assert response.status_code == 403 and response.json()["code"] == "group_memory"
+    response = await client.delete("/workspace/files", params={"place": "group:family", "path": "", "name": "Memories"})
+    assert response.status_code == 403 and response.json()["code"] == "group_folder"
+    assert (root / "GROUP.md").read_text() == "notebook" and (root / "memories").is_dir()
+
+
+async def test_layout_names_are_ordinary_in_a_subfolder(client, config):
+    root = _group(config)
+    (root / "Plans").mkdir()
+    response = await client.post("/workspace/upload", data={"place": "group:family", "path": "Plans"},
+                                 files={"file": ("GROUP.md", b"copy")})
+    assert response.status_code == 200 and (root / "Plans/GROUP.md").read_bytes() == b"copy"
+    response = await client.post("/workspace/folders", json={"place": "group:family", "path": "Plans", "name": "memories"})
+    assert response.status_code == 200
+    for name in ("GROUP.md", "memories"):
+        response = await client.delete("/workspace/files", params={"place": "group:family", "path": "Plans", "name": name})
+        assert response.status_code == 200
+    assert list((root / "Plans").iterdir()) == []
+
+
+@pytest.mark.parametrize("linked", ["Groups/family", "Groups"])
+async def test_a_linked_group_folder_is_not_followed(client, config, tmp_path, linked):
+    """A link at `Groups/<id>` or at `Groups` itself is refused by the walk from
+    the workspace root; `scoped_user_dir`'s resolved check sees only the first."""
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "family").mkdir(parents=True)
+    (elsewhere / "family/keep.txt").write_text("keep")
+    with db.get_db(config.db_path) as conn:
+        db.create_group(conn, "family", kind="group", display_name="Family", created_by="bob")
+        db.add_group_member(conn, "family", "alice", added_by="bob")
+        conn.commit()
+    if linked == "Groups":
+        (config.workspace_path / "Groups").symlink_to(elsewhere, target_is_directory=True)
+    else:
+        (config.workspace_path / "Groups").mkdir()
+        (config.workspace_path / "Groups/family").symlink_to(elsewhere / "family", target_is_directory=True)
+    listing = await client.get("/workspace/list", params={"place": "group:family", "path": ""})
+    assert listing.status_code == 404
+    for response in await _write_all(client, "group:family"):
+        assert response.status_code == 404
+    assert [p.name for p in (elsewhere / "family").iterdir()] == ["keep.txt"]
+
+
+async def test_a_group_write_failure_logs_the_place_kind(client, config, monkeypatch, caplog):
+    _group(config)
+
+    def full(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "sensitive-name")
+
+    monkeypatch.setattr(workspace_routes, "make_folder", full)
+    response = await client.post("/workspace/folders", json={"place": "group:family", "path": "", "name": "Drafts"})
+    assert response.status_code == 507
+    assert "place=group " in caplog.text and "family" not in caplog.text
+
+
+async def test_group_text_files_stay_home_only_until_edits_are_guarded(client, config):
+    """Stage 1 opens upload, folders and delete; the generic editor stays home-only."""
+    _group(config)
+    params = _text_params(place="group:family", path="", name="GROUP.md")
+    assert (await client.get("/workspace/files", params=params)).status_code == 404
 
 
 @pytest.fixture

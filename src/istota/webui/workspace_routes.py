@@ -26,9 +26,10 @@ from istota.workspace.pins import validate_pin, workspace_pin_kind
 from istota.webui.request_guards import BodyError, read_bounded_body
 from istota.webui.router_stubs import require_auth, require_session_or_device, verify_origin
 from istota.workspace.listing import ListingError, list_dir, list_file
-from istota.workspace.places import list_places, place_anchor, share_index_shown
+from istota.lib.filenames import safe_filename
+from istota.workspace.places import Place, list_places, place_anchor, share_index_shown
 from istota.workspace.reach import deployment_notes, place_reach
-from istota.workspace import config_files, editable, quick_notes, scripts, text_files
+from istota.workspace import config_files, editable, protected, quick_notes, scripts, text_files
 from istota.workspace.quick_notes import QuickNoteError
 from istota.workspace.writes import delete_entry, make_folder, write_new_file
 
@@ -51,7 +52,7 @@ async def api_workspace_places(request: Request, user: dict = Depends(require_au
                 entry = {
                     "id": place.id, "kind": place.kind, "label": place.label,
                     "browsable": place.browsable, "view_root": place.view_root,
-                    "reach": asdict(reach[place.id]),
+                    "writable": place.writable, "reach": asdict(reach[place.id]),
                 }
                 if place.kind == "share":
                     entry["remote"] = {"host": place.remote_host, "access": place.remote_access,
@@ -270,6 +271,7 @@ class _CappedMultipartParser(MultiPartParser):
 
 
 def _home_root(config, username, place):
+    """My files' root, for the text editor, which no other place has yet."""
     with db.get_db(config.db_path) as conn:
         home = next((p for p in list_places(config, conn, username) if p.id == place == "home"), None)
     if home is None or home.root is None:
@@ -277,9 +279,29 @@ def _home_root(config, username, place):
     return home.root
 
 
+def _writable_place(config, username, place_id) -> Place:
+    """The caller's place by id when it accepts writes, re-derived per request.
+
+    A room, a linked folder or an unknown id get the same 404, so a client
+    cannot tell a place it may only read from one it cannot see."""
+    with db.get_db(config.db_path) as conn:
+        place = next((p for p in list_places(config, conn, username) if p.id == place_id), None)
+    if place is None or not place.writable:
+        raise ListingError(404, "Place not found.")
+    return place
+
+
+def _place_kind(place_id):
+    """A place id's kind for a log line: `home`, `group`, never the id itself."""
+    return place_id.partition(":")[0] if isinstance(place_id, str) else "unknown"
+
+
 def _filesystem_error(config, exc, place, *, write):
     if isinstance(exc, ListingError):
-        return JSONResponse({"error": exc.message}, status_code=exc.status)
+        body = {"error": exc.message}
+        if exc.code is not None:
+            body["code"] = exc.code
+        return JSONResponse(body, status_code=exc.status)
     logger.warning("Workspace %s failed place=%s errno=%s", "write" if write else "listing", place, exc.errno)
     status = 500
     message = "Could not write to this folder." if write else "Could not read this folder."
@@ -319,15 +341,18 @@ async def api_workspace_upload(
         parts = [part for part in path.split("/") if part]
 
         def write():
-            root = _home_root(config, user["username"], place)
+            selected = _writable_place(config, user["username"], place)
+            filename = file.filename or "upload"
+            protected.check_create(selected, parts, safe_filename(filename, fallback="upload"))
+            anchor, walk = place_anchor(selected)
             chunks = iter(lambda: file.file.read(1024 * 1024), b"")
-            name = write_new_file(root, parts, file.filename or "upload", chunks, max_bytes=cap)
+            name = write_new_file(anchor, [*walk, *parts], filename, chunks, max_bytes=cap)
             return {"name": name, "path": "/".join([*parts, name]), "size": file.size}
 
         try:
             return await asyncio.to_thread(write)
         except (ListingError, OSError) as exc:
-            return _filesystem_error(config, exc, "home", write=True)
+            return _filesystem_error(config, exc, _place_kind(place), write=True)
     finally:
         await form.close()
 
@@ -348,14 +373,16 @@ async def api_workspace_folder(
     parts = [part for part in body["path"].split("/") if part]
 
     def write():
-        root = _home_root(config, user["username"], body["place"])
-        name = make_folder(root, parts, body["name"])
+        selected = _writable_place(config, user["username"], body["place"])
+        protected.check_create(selected, parts, safe_filename(body["name"], fallback="folder"))
+        anchor, walk = place_anchor(selected)
+        name = make_folder(anchor, [*walk, *parts], body["name"])
         return {"path": "/".join([*parts, name])}
 
     try:
         return await asyncio.to_thread(write)
     except (ListingError, OSError) as exc:
-        return _filesystem_error(config, exc, "home", write=True)
+        return _filesystem_error(config, exc, _place_kind(body["place"]), write=True)
 
 
 def _no_workspace(config):
@@ -686,14 +713,16 @@ async def api_workspace_delete(
     parts = [part for part in path.split("/") if part]
 
     def write():
-        root = _home_root(config, user["username"], place)
-        delete_entry(root, parts, name)
+        selected = _writable_place(config, user["username"], place)
+        protected.check_delete(selected, parts, name)
+        anchor, walk = place_anchor(selected)
+        delete_entry(anchor, [*walk, *parts], name)
         return {"status": "ok"}
 
     try:
         return await asyncio.to_thread(write)
     except (ListingError, OSError) as exc:
-        return _filesystem_error(config, exc, "home", write=True)
+        return _filesystem_error(config, exc, _place_kind(place), write=True)
 
 
 def _drive_token(config, username):
