@@ -46,11 +46,17 @@
     onTogglePin,
     onDelete,
     onEdit,
+    entryRule,
+    deleteFor,
     onRefresh,
   }: {
     onDelete?: (names: string[]) => Promise<{ deleted: string[]; errors: string[] }>;
     /** Offered on files that may be text; `path` is the folder, relative to the place. */
     onEdit?: (path: string, name: string) => void;
+    /** A name the place keeps: Edit opens `editHref` instead, and `keep` withholds Delete. */
+    entryRule?: (name: string) => { editHref?: string; keep?: boolean } | null;
+    /** Whose files a deletion removes, when it is more than the user's own. */
+    deleteFor?: string;
     onRefresh?: () => void;
     pins?: WorkspacePin[];
     pinsBusy?: boolean;
@@ -138,8 +144,11 @@
       );
     });
   });
+  // Selection only feeds Delete, so a kept name is not selectable.
   let selectable = $derived(
-    entries.filter((entry) => entry.kind === 'file' || entry.kind === 'dir'),
+    entries.filter(
+      (entry) => (entry.kind === 'file' || entry.kind === 'dir') && !entryRule?.(entry.name)?.keep,
+    ),
   );
   let selectedEntries = $derived(selectable.filter((entry) => selectedKeys.includes(entry.key)));
   let folderContext = $derived(`${place.id}:${listing?.path ?? drivePath}`);
@@ -176,7 +185,10 @@
   function menuItems(entry: (typeof entries)[number]): KebabItem[] {
     if (entry.kind !== 'file' && entry.kind !== 'dir') return [];
     const items: KebabItem[] = [];
-    if (
+    const rule = entryRule?.(entry.name);
+    if (onEdit && entry.kind === 'file' && rule?.editHref) {
+      items.push({ label: 'Edit', href: rule.editHref });
+    } else if (
       onEdit &&
       entry.kind === 'file' &&
       (entry.size ?? 0) <= WORKSPACE_TEXT_EDIT_MAX_BYTES &&
@@ -219,7 +231,7 @@
         target: '_blank',
       });
     }
-    if (onDelete)
+    if (onDelete && !rule?.keep)
       items.push({
         label: 'Delete',
         disabled: deleting,
@@ -298,7 +310,7 @@
   </div>{/if}
 <ConfirmDialog
   bind:open={deleteOpen}
-  title={`Delete ${pendingNames.length === 1 ? pendingNames[0] : `${pendingNames.length} items`}`}
+  title={`Delete ${pendingNames.length === 1 ? pendingNames[0] : `${pendingNames.length} items`}${deleteFor ? ` for everyone in ${deleteFor}` : ''}`}
   message="This permanently deletes the selected files and empty folders. Folders containing files cannot be deleted here. This cannot be undone."
   onConfirm={deleteSelected}
 />
@@ -337,7 +349,7 @@
           <td class="col-select"
             ><Checkbox
               ariaLabel={`Select ${entry.name}`}
-              disabled={deleting || (entry.kind !== 'file' && entry.kind !== 'dir')}
+              disabled={deleting || !selectable.some((item) => item.key === entry.key)}
               checked={selectedKeys.includes(entry.key)}
               onchange={() => toggle(entry.key)}
             /></td

@@ -7204,6 +7204,7 @@ const workspacePlaces: WorkspacePlace[] = [
     kind: 'home',
     label: 'My files',
     browsable: true,
+    writable: true,
     view_root: '/Users/carol',
     reach: {
       ...workspaceReach,
@@ -7215,6 +7216,7 @@ const workspacePlaces: WorkspacePlace[] = [
     kind: 'linked',
     label: 'Reference library',
     browsable: true,
+    writable: false,
     view_root: '/Reference',
     reach: { ...workspaceReach, private: 'ro', shared_member: 'ro' },
   },
@@ -7223,6 +7225,7 @@ const workspacePlaces: WorkspacePlace[] = [
     kind: 'room',
     label: 'Project room',
     browsable: true,
+    writable: false,
     view_root: '/Channels/project',
     reach: {
       ...workspaceReach,
@@ -7235,6 +7238,7 @@ const workspacePlaces: WorkspacePlace[] = [
     kind: 'room',
     label: 'Planning & notes',
     browsable: true,
+    writable: false,
     view_root: '/Channels/markup',
     reach: {
       ...workspaceReach,
@@ -7247,11 +7251,12 @@ const workspacePlaces: WorkspacePlace[] = [
     kind: 'group',
     label: 'Team',
     browsable: true,
+    writable: true,
     view_root: '/Groups/team',
     reach: {
       ...workspaceReach,
       shared_member: 'conditional',
-      note: 'Group files are available in a shared room only when every reader belongs to this group, with no guests or other bots. A room linked to a group can use only that group.',
+      note: 'Every member can add, change and delete files here. Group files are available in a shared room only when every reader belongs to this group, with no guests or other bots. A room linked to a group can use only that group.',
     },
   },
   {
@@ -7259,6 +7264,7 @@ const workspacePlaces: WorkspacePlace[] = [
     kind: 'drive',
     label: 'Google Drive',
     browsable: true,
+    writable: false,
     view_root: null,
     reach: { ...workspaceReach, private: 'skill', shared_member: 'skill' },
   },
@@ -7267,6 +7273,7 @@ const workspacePlaces: WorkspacePlace[] = [
     kind: 'nextcloud',
     label: 'Nextcloud',
     browsable: true,
+    writable: false,
     view_root: null,
     reach: {
       private: 'none',
@@ -7280,6 +7287,7 @@ const workspacePlaces: WorkspacePlace[] = [
     kind: 'share',
     label: 'Taxes 2026',
     browsable: true,
+    writable: false,
     view_root: null,
     remote: { host: 'cloud.example.org', access: 'write', kind: 'folder' },
     reach: {
@@ -7329,6 +7337,41 @@ const workspaceTree: Record<string, WorkspaceEntry[]> = {
   'Empty folder': [],
   Archive: [workspaceEntry('note.txt')],
 };
+// The Team group's folder, which members write to like My files (`Place.writable`).
+const groupTree: Record<string, WorkspaceEntry[]> = {
+  '': [
+    workspaceEntry('memories', 'dir'),
+    workspaceEntry('Trips', 'dir'),
+    workspaceEntry('GROUP.md'),
+    workspaceEntry('itinerary.pdf'),
+  ],
+  memories: [],
+  Trips: [workspaceEntry('packing.md')],
+};
+// The tree a write lands in: only a writable place has one.
+function writableTree(place: string): Record<string, WorkspaceEntry[]> | undefined {
+  if (place === 'home') return workspaceTree;
+  if (place === 'group:team') return groupTree;
+  return undefined;
+}
+// `workspace/protected.py`: a group root keeps its notebook and memories folder.
+function groupLayoutRefusal(place: string, folder: string, name: string) {
+  if (!place.startsWith('group:') || folder) return undefined;
+  const folded = name.toLowerCase();
+  if (folded === 'group.md')
+    return {
+      __status: 403,
+      error: 'The group notebook is edited on the Groups page.',
+      code: 'group_memory',
+    };
+  if (folded === 'memories')
+    return {
+      __status: 403,
+      error: "This name is part of the group's layout.",
+      code: 'group_folder',
+    };
+  return undefined;
+}
 let workspacePins: WorkspacePin[] = [
   {
     id: 3,
@@ -7456,6 +7499,7 @@ function mockAdminGroupDetail(id: string) {
       memory: `Groups/${id}/GROUP.md`,
       rooms: ['Project room'],
       briefings: [],
+      files: `Groups/${id}/: every member can add, change and delete these files`,
     },
     history: [
       {
@@ -7646,7 +7690,13 @@ function mockGroups(path: string, method: string) {
       ...mockReadingCircleGroup,
       members: mockReadingCircleMembers,
       rooms: mockGroupRoomList('reading-circle'),
-      disclosure: { memory: 'Members can read and edit the notebook.', rooms: [], briefings: [] },
+      disclosure: {
+        memory: 'Members can read and edit the notebook.',
+        rooms: [],
+        briefings: [],
+        files: 'Groups/reading-circle/: every member can add, change and delete these files',
+      },
+      file_activity: [],
     };
   if (path === '/istota/api/groups/reading-circle/memory')
     return {
@@ -7670,7 +7720,9 @@ function mockGroups(path: string, method: string) {
         memory: 'Everyone in this installation can read and edit the notebook.',
         rooms: [],
         briefings: ['Daily news'],
+        files: 'Groups/all-users/: every member can add, change and delete these files',
       },
+      file_activity: [],
     };
   if (path === '/istota/api/groups/all-users/memory')
     return {
@@ -7691,7 +7743,13 @@ function mockGroups(path: string, method: string) {
       members: mockTeamMembers,
       // Tokens of mocked chat rooms, so the overview's Rooms card has activity to sort by.
       rooms: mockGroupRoomList('team'),
-      disclosure: { memory: 'Members can read and edit the notebook.', rooms: [], briefings: [] },
+      disclosure: {
+        memory: 'Members can read and edit the notebook.',
+        rooms: [],
+        briefings: [],
+        files: 'Groups/team/: every member can add, change and delete these files',
+      },
+      file_activity: mockTeamFileActivity,
     };
   if (path === '/istota/api/groups/team/memory')
     return {
@@ -7731,6 +7789,39 @@ const mockAllUsersMembers = [
   { user_id: 'kasia', display_name: 'Kasia', role: 'member' },
   { user_id: 'liam', display_name: 'Liam', role: 'member' },
 ];
+// `groups/routes.py`'s `file_activity`: the newest web writes to Team's folder.
+const mockTeamFileActivity = [
+  {
+    id: 12,
+    actor_id: 'dave',
+    user_id: 'dave',
+    display_name: 'Dave',
+    event_type: 'file_edited',
+    path: 'Trips/packing.md',
+    size: null,
+    created_at: '2026-10-30 18:20:00',
+  },
+  {
+    id: 11,
+    actor_id: 'carol',
+    user_id: 'carol',
+    display_name: 'Carol',
+    event_type: 'folder_created',
+    path: 'Trips',
+    size: null,
+    created_at: '2026-10-30 18:05:00',
+  },
+  {
+    id: 10,
+    actor_id: 'carol',
+    user_id: 'carol',
+    display_name: 'Carol',
+    event_type: 'file_uploaded',
+    path: 'itinerary.pdf',
+    size: 2048,
+    created_at: '2026-10-30 18:00:00',
+  },
+];
 const mockTeamMembers = [
   { user_id: 'carol', display_name: 'Carol', role: 'owner' },
   { user_id: 'dave', display_name: 'Dave', role: 'member' },
@@ -7759,7 +7850,12 @@ const mockAllUsersAdminGroup = {
   archived_at: null,
   needs_owner: false,
   members: mockAllUsersMembers,
-  disclosure: { memory: 'Groups/all-users/GROUP.md', rooms: [], briefings: ['Daily news'] },
+  disclosure: {
+    memory: 'Groups/all-users/GROUP.md',
+    rooms: [],
+    briefings: ['Daily news'],
+    files: 'Groups/all-users/: every member can add, change and delete these files',
+  },
   history: [],
   events: [],
 };
@@ -8904,9 +9000,13 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
       raw.match(new RegExp(`name="${name}"\\r\\n\\r\\n([^\\r]*)`))?.[1] || '';
     const place = upload ? field('place') : body.place;
     const folder = upload ? field('path') : body.path;
-    const entries = workspaceTree[folder];
-    if (place !== 'home' || !entries) return { __status: 404, error: 'Folder not found.' };
+    const tree = writableTree(place);
+    if (!tree) return { __status: 404, error: 'Place not found.' };
+    const entries = tree[folder];
+    if (!entries) return { __status: 404, error: 'Folder not found.' };
     let name = upload ? raw.match(/filename="([^"]*)"/)?.[1] || 'upload' : body.name.trim();
+    const refused = groupLayoutRefusal(place, folder, name);
+    if (refused) return refused;
     const original = name;
     let n = 2;
     while (entries.some((entry) => entry.name === name)) {
@@ -8923,25 +9023,32 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
     entries.sort(
       (a, b) => Number(b.kind === 'dir') - Number(a.kind === 'dir') || a.name.localeCompare(b.name),
     );
-    if (!upload) workspaceTree[resultPath] = [];
-    return upload ? { name, path: resultPath, size: entry.size } : { path: resultPath };
+    if (!upload) tree[resultPath] = [];
+    const recorded = place === 'home' ? {} : { recorded: true };
+    return upload
+      ? { name, path: resultPath, size: entry.size, ...recorded }
+      : { path: resultPath, ...recorded };
   }
   if (method === 'DELETE' && path === '/istota/api/workspace/files') {
     const params = new URLSearchParams(query);
     const folder = params.get('path') || '';
     const name = params.get('name') || '';
-    const entries = workspaceTree[folder];
+    const place = params.get('place') || '';
+    const tree = writableTree(place);
+    if (!tree) return { __status: 404, error: 'Place not found.' };
+    const refused = groupLayoutRefusal(place, folder, name);
+    if (refused) return refused;
+    const entries = tree[folder];
     const entry = entries?.find((item) => item.name === name);
-    if (params.get('place') !== 'home' || !entry)
-      return { __status: 404, error: 'File or folder not found.' };
+    if (!entry) return { __status: 404, error: 'File or folder not found.' };
     if (entry.kind !== 'file' && entry.kind !== 'dir')
       return { __status: 422, error: 'Only regular files and empty folders can be deleted.' };
     const entryPath = [folder, name].filter(Boolean).join('/');
-    if (entry.kind === 'dir' && workspaceTree[entryPath]?.length)
+    if (entry.kind === 'dir' && tree[entryPath]?.length)
       return { __status: 409, error: 'Folder is not empty. Delete its contents first.' };
-    workspaceTree[folder] = entries.filter((item) => item !== entry);
-    if (entry.kind === 'dir') delete workspaceTree[entryPath];
-    return { status: 'ok' };
+    tree[folder] = entries.filter((item) => item !== entry);
+    if (entry.kind === 'dir') delete tree[entryPath];
+    return place === 'home' ? { status: 'ok' } : { status: 'ok', recorded: true };
   }
   if (method !== 'GET') return undefined;
   if (path === '/istota/api/workspace/scripts') return mockScriptsIndex;
@@ -8980,9 +9087,11 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
   const entries =
     place === 'home'
       ? (configEntries ?? workspaceTree[folder])
-      : folder
-        ? undefined
-        : [{ ...workspaceEntry('note.md'), ...(shared ? { share_path: 'note.md' } : {}) }];
+      : place === 'group:team'
+        ? groupTree[folder]
+        : folder
+          ? undefined
+          : [{ ...workspaceEntry('note.md'), ...(shared ? { share_path: 'note.md' } : {}) }];
   if (!entries) return { __status: 404, error: 'Folder not found.' };
   return {
     place,

@@ -367,9 +367,9 @@ describe('unified search', () => {
 
 it('deletes an encoded workspace filename through the authenticated API', async () => {
   fetchMock.mockResolvedValue(jsonResponse(200, { status: 'ok' }));
-  await api.deleteWorkspaceEntry('Notes & plans', 'a#b.txt');
+  await api.deleteWorkspaceEntry('group:family', 'Notes & plans', 'a#b.txt');
   expect(fetchMock).toHaveBeenCalledWith(
-    '/api/workspace/files?place=home&path=Notes+%26+plans&name=a%23b.txt',
+    '/api/workspace/files?place=group%3Afamily&path=Notes+%26+plans&name=a%23b.txt',
     expect.objectContaining({ method: 'DELETE', credentials: 'same-origin' }),
   );
 });

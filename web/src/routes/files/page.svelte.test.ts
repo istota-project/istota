@@ -22,6 +22,7 @@ const home: WorkspacePlace = {
   kind: 'home',
   label: 'My files',
   browsable: true,
+  writable: true,
   view_root: '/Users/alice',
   reach: {
     private: 'rw',
@@ -35,6 +36,7 @@ const room: WorkspacePlace = {
   id: 'room:sample',
   kind: 'room',
   label: 'Project room',
+  writable: false,
   view_root: '/Channels/sample',
 };
 const entry = (name: string, kind = 'file', hidden = false) => ({
@@ -124,7 +126,11 @@ it('reserves the folder button height while the listing loads', async () => {
 
 it('keeps the standard sidebar uncluttered and shows access beside the folder path', async () => {
   api.getWorkspacePlaces.mockResolvedValue({
-    places: [home, room, { ...home, id: 'linked:1', kind: 'linked', label: 'Shared folder' }],
+    places: [
+      home,
+      room,
+      { ...home, writable: false, id: 'linked:1', kind: 'linked', label: 'Shared folder' },
+    ],
     notes: ['Files are stored in a local folder.'],
   });
   const { container } = render(Workspace);
@@ -171,6 +177,7 @@ it('leaves the Nextcloud row unmarked', async () => {
     places: [
       {
         ...home,
+        writable: false,
         id: 'nextcloud',
         kind: 'nextcloud',
         label: 'Nextcloud',
@@ -318,6 +325,7 @@ it('shows connection reach without requesting a directory listing', async () => 
     places: [
       {
         ...home,
+        writable: false,
         id: 'drive',
         kind: 'drive',
         label: 'Google Drive',
@@ -337,6 +345,7 @@ it('shows connection reach without requesting a directory listing', async () => 
 describe('shares from other servers (#849)', () => {
   const share: WorkspacePlace = {
     ...home,
+    writable: false,
     id: 'share:7',
     kind: 'share',
     label: 'Taxes 2026',
@@ -502,7 +511,7 @@ it('creates a folder in the open home directory and refreshes it', async () => {
   });
   await fireEvent.click(screen.getByRole('button', { name: 'Create folder' }));
   await waitFor(() =>
-    expect(api.createWorkspaceFolder).toHaveBeenCalledWith('notes & drafts', 'New folder'),
+    expect(api.createWorkspaceFolder).toHaveBeenCalledWith('home', 'notes & drafts', 'New folder'),
   );
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   expect(api.getWorkspaceListing).toHaveBeenLastCalledWith('home', 'notes & drafts');
@@ -524,8 +533,9 @@ it('uploads sequentially to the captured folder and keeps server errors on each 
   await fireEvent.click(screen.getByRole('link', { name: 'notes & drafts' }));
   finish({ name: 'one.txt', path: 'one.txt', size: 3 });
   await screen.findByText('file exceeds 100 MB');
-  expect(api.uploadWorkspaceFile.mock.calls.map((args) => args[0])).toEqual(['', '']);
-  expect(api.uploadWorkspaceFile.mock.calls.map((args) => args[1])).toEqual(files);
+  expect(api.uploadWorkspaceFile.mock.calls.map((args) => args[0])).toEqual(['home', 'home']);
+  expect(api.uploadWorkspaceFile.mock.calls.map((args) => args[1])).toEqual(['', '']);
+  expect(api.uploadWorkspaceFile.mock.calls.map((args) => args[2])).toEqual(files);
 });
 
 it('shows folder conflicts in the dialog and hides writes for other places', async () => {
@@ -542,6 +552,159 @@ it('shows folder conflicts in the dialog and hides writes for other places', asy
   await fireEvent.click(screen.getByRole('link', { name: 'Project room' }));
   expect(screen.queryByRole('button', { name: 'Upload' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'New folder' })).toBeNull();
+});
+
+describe('a group place', () => {
+  const family: WorkspacePlace = {
+    ...home,
+    id: 'group:family',
+    kind: 'group',
+    label: 'Family',
+    view_root: '/Groups/family',
+  };
+  function showGroup(place: WorkspacePlace, entries = [entry('a.txt'), entry('Plans', 'dir')]) {
+    api.getWorkspacePlaces.mockResolvedValue({ places: [home, place], notes: [] });
+    api.getWorkspaceListing.mockImplementation(async (id, path) => ({
+      place: id,
+      path,
+      entries,
+      truncated: false,
+      skipped_names: 0,
+    }));
+    __history.reset(`/istota/files?place=${encodeURIComponent(place.id)}`);
+    return render(Workspace);
+  }
+
+  it('offers every write when the server says it is writable', async () => {
+    const { container } = showGroup(family);
+    await screen.findByRole('button', { name: 'New folder' });
+    expect(screen.getByRole('button', { name: 'Upload' })).toBeEnabled();
+    expect(container.querySelector('input[type="file"]')).not.toBeNull();
+    expect(screen.getByRole('button', { name: 'Delete selected' })).toBeInTheDocument();
+    await openActions('a.txt');
+    expect(await screen.findByRole('menuitem', { name: 'Edit' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument();
+  });
+
+  it('offers no write when the server says it is not', async () => {
+    showGroup({ ...family, writable: false });
+    await screen.findByRole('button', { name: 'a.txt' });
+    expect(screen.queryByRole('button', { name: 'New folder' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Upload' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Delete selected' })).toBeNull();
+    await openActions('a.txt');
+    await screen.findByRole('menuitem', { name: 'Download' });
+    expect(screen.queryByRole('menuitem', { name: 'Edit' })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: 'Delete' })).toBeNull();
+  });
+
+  it('uploads to the group and names it on the row and in the folder dialog', async () => {
+    api.uploadWorkspaceFile.mockResolvedValue({ name: 'one.txt', path: 'one.txt', size: 3 });
+    const { container } = showGroup(family);
+    await screen.findByRole('button', { name: 'Upload' });
+    const file = new File(['one'], 'one.txt');
+    await fireEvent.change(container.querySelector('input[type="file"]')!, {
+      target: { files: [file] },
+    });
+    await waitFor(() =>
+      expect(api.uploadWorkspaceFile).toHaveBeenCalledWith(
+        'group:family',
+        '',
+        file,
+        expect.any(Function),
+      ),
+    );
+    const uploads = screen.getByRole('region', { name: 'Uploads' });
+    expect(within(uploads).getByText('Family')).toBeInTheDocument();
+    expect(within(uploads).queryByText(/My files/)).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'New folder' }));
+    expect(within(screen.getByRole('dialog')).getByText('Create in Family')).toBeInTheDocument();
+    await fireEvent.input(screen.getByRole('textbox', { name: 'Folder name' }), {
+      target: { value: 'Trips' },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Create folder' }));
+    await waitFor(() =>
+      expect(api.createWorkspaceFolder).toHaveBeenCalledWith('group:family', '', 'Trips'),
+    );
+  });
+
+  it('keeps an upload on the place it was queued in', async () => {
+    let finish!: (value: unknown) => void;
+    api.uploadWorkspaceFile.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const { container } = showGroup(family);
+    await screen.findByRole('button', { name: 'Upload' });
+    await fireEvent.change(container.querySelector('input[type="file"]')!, {
+      target: { files: [new File(['one'], 'one.txt')] },
+    });
+    await waitFor(() => expect(api.uploadWorkspaceFile).toHaveBeenCalledTimes(1));
+    await fireEvent.click(screen.getByRole('link', { name: 'My files' }));
+    await waitFor(() => expect(api.getWorkspaceListing).toHaveBeenLastCalledWith('home', ''));
+    const loads = api.getWorkspaceListing.mock.calls.length;
+    finish({ name: 'one.txt', path: 'one.txt', size: 3 });
+    await screen.findByText('Uploaded');
+    expect(within(screen.getByRole('region', { name: 'Uploads' })).getByText('Family'));
+    // My files is on screen, so a finished group upload does not reload it.
+    expect(api.getWorkspaceListing.mock.calls.length).toBe(loads);
+  });
+
+  it('sends edits and deletions to the group, and says who loses a deleted file', async () => {
+    api.getWorkspaceTextFile.mockResolvedValue({ content: 'a\n', revision: 'rev-0', exists: true });
+    api.deleteWorkspaceEntry.mockResolvedValue({ status: 'ok' });
+    showGroup(family);
+    await openActions('a.txt');
+    await fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
+    await waitFor(() =>
+      expect(api.getWorkspaceTextFile).toHaveBeenCalledWith('group:family', '', 'a.txt'),
+    );
+    expect(screen.getByText('Plain text. Saved in Family.')).toBeInTheDocument();
+    await fireEvent.click(screen.getAllByRole('button', { name: 'Close' }).at(-1)!);
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await openActions('a.txt');
+    await fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }));
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText('Delete a.txt for everyone in Family')).toBeInTheDocument();
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
+    await waitFor(() =>
+      expect(api.deleteWorkspaceEntry).toHaveBeenCalledWith('group:family', '', 'a.txt'),
+    );
+  });
+
+  it("keeps the group's notebook and memories folder out of reach at its root", async () => {
+    showGroup(family, [entry('GROUP.md'), entry('memories', 'dir'), entry('a.txt')]);
+    await openActions('GROUP.md');
+    const edit = await screen.findByRole('menuitem', { name: 'Edit' });
+    expect(edit).toHaveAttribute('href', '/groups?group=family');
+    expect(screen.queryByRole('menuitem', { name: 'Delete' })).toBeNull();
+    await fireEvent.keyDown(edit, { key: 'Escape' });
+    await openActions('memories');
+    await screen.findByRole('menuitem', { name: 'Pin' });
+    expect(screen.queryByRole('menuitem', { name: 'Delete' })).toBeNull();
+    expect(screen.getByRole('checkbox', { name: 'Select GROUP.md' })).toBeDisabled();
+    expect(screen.getByRole('checkbox', { name: 'Select memories' })).toBeDisabled();
+    await fireEvent.click(screen.getByRole('checkbox', { name: 'Select all visible items' }));
+    expect(screen.getByText('1 selected')).toBeInTheDocument();
+  });
+
+  it('treats the same names in a subfolder as ordinary files', async () => {
+    api.getWorkspacePlaces.mockResolvedValue({ places: [home, family], notes: [] });
+    api.getWorkspaceListing.mockResolvedValue({
+      place: 'group:family',
+      path: 'Plans',
+      entries: [entry('group.md'), entry('memories', 'dir')],
+      truncated: false,
+      skipped_names: 0,
+    });
+    __history.reset('/istota/files?place=group%3Afamily&path=Plans');
+    render(Workspace);
+    await openActions('group.md');
+    expect(await screen.findByRole('menuitem', { name: 'Edit' })).not.toHaveAttribute('href');
+    expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Select memories' })).toBeEnabled();
+  });
 });
 
 it('shows share state and a separate Nextcloud action while preserving the viewer', async () => {
@@ -574,6 +737,7 @@ it('shows share state and a separate Nextcloud action while preserving the viewe
 
 const drivePlace: WorkspacePlace = {
   ...home,
+  writable: false,
   id: 'drive',
   kind: 'drive',
   label: 'Google Drive',
@@ -767,7 +931,16 @@ it('keeps unavailable pins removable and reports failed mutations', async () => 
 
 it('pins a Drive item with its provider metadata', async () => {
   api.getWorkspacePlaces.mockResolvedValue({
-    places: [{ ...home, id: 'drive', kind: 'drive', label: 'Google Drive', view_root: null }],
+    places: [
+      {
+        ...home,
+        writable: false,
+        id: 'drive',
+        kind: 'drive',
+        label: 'Google Drive',
+        view_root: null,
+      },
+    ],
     notes: [],
   });
   __history.reset('/istota/files?place=drive');
@@ -807,7 +980,7 @@ it('pins a Drive item with its provider metadata', async () => {
 it('opens and pins a linked single file using its exact server path', async () => {
   const ref = '/linked/report.txt';
   api.getWorkspacePlaces.mockResolvedValue({
-    places: [{ ...home, id: 'linked:1', kind: 'linked', view_root: ref }],
+    places: [{ ...home, writable: false, id: 'linked:1', kind: 'linked', view_root: ref }],
     notes: [],
   });
   api.getWorkspaceListing.mockResolvedValue({
@@ -1027,8 +1200,8 @@ it('selects only visible files and confirms deletion, retaining failed items', a
   expect(api.deleteWorkspaceEntry).not.toHaveBeenCalled();
   await fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete' }));
   await waitFor(() => expect(api.deleteWorkspaceEntry).toHaveBeenCalledTimes(2));
-  expect(api.deleteWorkspaceEntry).toHaveBeenNthCalledWith(1, '', 'a.txt');
-  expect(api.deleteWorkspaceEntry).toHaveBeenNthCalledWith(2, '', 'b.txt');
+  expect(api.deleteWorkspaceEntry).toHaveBeenNthCalledWith(1, 'home', '', 'a.txt');
+  expect(api.deleteWorkspaceEntry).toHaveBeenNthCalledWith(2, 'home', '', 'b.txt');
   await waitFor(() => expect(screen.queryByRole('button', { name: 'a.txt' })).toBeNull());
   expect(screen.getByRole('checkbox', { name: 'Select b.txt' })).toBeChecked();
   expect(screen.getByRole('alert')).toHaveTextContent('b.txt: Permission denied.');
@@ -1070,7 +1243,16 @@ it('cancels deletion without a request and clears selection on navigation', asyn
 
 it('browses Nextcloud folders and previews files in the workspace viewer', async () => {
   api.getWorkspacePlaces.mockResolvedValue({
-    places: [{ ...home, id: 'nextcloud', kind: 'nextcloud', label: 'Nextcloud', view_root: null }],
+    places: [
+      {
+        ...home,
+        writable: false,
+        id: 'nextcloud',
+        kind: 'nextcloud',
+        label: 'Nextcloud',
+        view_root: null,
+      },
+    ],
     notes: [],
   });
   api.getWorkspaceListing.mockImplementation(async (place, path) => ({
@@ -1101,7 +1283,16 @@ it('browses Nextcloud folders and previews files in the workspace viewer', async
 
 it('links to Connections when Nextcloud needs reconnecting', async () => {
   api.getWorkspacePlaces.mockResolvedValue({
-    places: [{ ...home, id: 'nextcloud', kind: 'nextcloud', label: 'Nextcloud', view_root: null }],
+    places: [
+      {
+        ...home,
+        writable: false,
+        id: 'nextcloud',
+        kind: 'nextcloud',
+        label: 'Nextcloud',
+        view_root: null,
+      },
+    ],
     notes: [],
   });
   api.getWorkspaceListing.mockRejectedValue(new Error('Reconnect in Settings.'));
@@ -1119,6 +1310,7 @@ it('says plainly, outside any disclosure, that only the user sees the Nextcloud 
     places: [
       {
         ...home,
+        writable: false,
         id: 'nextcloud',
         kind: 'nextcloud',
         label: 'Nextcloud',
@@ -1147,9 +1339,16 @@ it('puts the bot section immediately after Pinned and opens only it by default',
     places: [
       home,
       room,
-      { ...home, id: 'linked:1', kind: 'linked', label: 'Shared folder' },
+      { ...home, writable: false, id: 'linked:1', kind: 'linked', label: 'Shared folder' },
       { ...home, id: 'group:team', kind: 'group', label: 'Team folder' },
-      { ...home, id: 'nextcloud', kind: 'nextcloud', label: 'Nextcloud', view_root: null },
+      {
+        ...home,
+        writable: false,
+        id: 'nextcloud',
+        kind: 'nextcloud',
+        label: 'Nextcloud',
+        view_root: null,
+      },
     ],
     notes: [],
   });
@@ -1322,7 +1521,17 @@ it('remembers expanded and collapsed sidebar groups after returning to Files', a
 
 it('reveals a Drive pin using its current parent and keeps lookup errors visible', async () => {
   api.getWorkspacePlaces.mockResolvedValue({
-    places: [home, { ...home, id: 'drive', kind: 'drive', label: 'Google Drive', view_root: null }],
+    places: [
+      home,
+      {
+        ...home,
+        writable: false,
+        id: 'drive',
+        kind: 'drive',
+        label: 'Google Drive',
+        view_root: null,
+      },
+    ],
     notes: [],
   });
   api.getWorkspacePins.mockResolvedValue({
@@ -1478,11 +1687,12 @@ it('edits a text file in My files from its row and saves it', async () => {
   await openActions('plan #1.md');
   await fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
   await waitFor(() => expect(editorBox().value).toBe('plan\n'));
-  expect(api.getWorkspaceTextFile).toHaveBeenCalledWith('notes & drafts', 'plan #1.md');
+  expect(api.getWorkspaceTextFile).toHaveBeenCalledWith('home', 'notes & drafts', 'plan #1.md');
   await fireEvent.input(editorBox(), { target: { value: 'plan\nmore\n' } });
   await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
   await screen.findByText('Saved.');
   expect(api.saveWorkspaceTextFile).toHaveBeenCalledWith(
+    'home',
     'notes & drafts',
     'plan #1.md',
     'plan\nmore\n',

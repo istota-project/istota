@@ -20,6 +20,7 @@ function place(
     kind: 'linked',
     label: id,
     browsable: true,
+    writable: false,
     view_root,
     reach: { private: 'rw', shared_member: 'rw', restricted: 'none', note: null },
     ...overrides,

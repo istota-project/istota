@@ -114,7 +114,8 @@
     createBusy = true;
     createError = '';
     try {
-      const made = await createWorkspaceFolder(path, name);
+      // The picker chooses folders in My files only.
+      const made = await createWorkspaceFolder('home', path, name);
       await show(clean(made.path) || child(name));
     } catch (e) {
       createError = (e as Error).message || 'Could not make the folder.';

@@ -201,14 +201,17 @@
     // Sizes and "not created yet" change with a save.
     void loadConfigFiles();
   }
-  let textEditing = $state<{ path: string; name: string } | null>(null);
+  let textEditing = $state<{ place: string; label: string; path: string; name: string } | null>(
+    null,
+  );
   let textEditorOpen = $state(false);
   function editTextFile(path: string, name: string) {
+    if (!place) return;
     // A config file keeps its own editor, which checks it the way the daemon will.
-    const ref = [place?.view_root, path, name].filter(Boolean).join('/');
+    const ref = [place.view_root, path, name].filter(Boolean).join('/');
     const configFile = configFiles.find((file) => file.view_path === ref);
     if (configFile) return editConfigFile(configFile);
-    textEditing = { path, name };
+    textEditing = { place: place.id, label: place.label, path, name };
     textEditorOpen = true;
   }
   function closeTextEditor() {
@@ -356,8 +359,12 @@
   let folderOpen = $state(false);
   let folderName = $state('');
   let folderPath = $state('');
+  let folderPlace = $state<{ id: string; label: string }>({ id: 'home', label: 'My files' });
+  // Each row keeps the place it was queued in, whatever the page shows by the time it runs.
   type Upload = {
     file: File;
+    place: string;
+    placeLabel: string;
     path: string;
     progress: number;
     state: 'waiting' | 'uploading' | 'done' | 'error';
@@ -367,24 +374,30 @@
   let uploading = false;
 
   function openFolderDialog() {
+    if (!place) return;
+    folderPlace = { id: place.id, label: place.label };
     folderPath = selected?.path || '';
     folderName = '';
     folderOpen = true;
   }
-  async function refreshIfCurrent(path: string) {
-    if (active && selected?.place === 'home' && selected.path === path) await refreshFolder();
+  async function refreshIfCurrent(placeId: string, path: string) {
+    if (active && selected?.place === placeId && selected.path === path) await refreshFolder();
   }
   async function createFolder() {
-    await createWorkspaceFolder(folderPath, folderName.trim());
+    await createWorkspaceFolder(folderPlace.id, folderPath, folderName.trim());
     folderOpen = false;
-    await refreshIfCurrent(folderPath);
+    await refreshIfCurrent(folderPlace.id, folderPath);
   }
   function enqueue(files: File[]) {
-    if (selected?.place !== 'home') return;
+    if (!place?.writable || !selected) return;
+    const target = place;
+    const path = selected.path;
     uploads.push(
       ...files.map((file): Upload => ({
         file,
-        path: selected!.path,
+        place: target.id,
+        placeLabel: target.label,
+        path,
         progress: 0,
         state: 'waiting',
         message: '',
@@ -401,13 +414,14 @@
         row.state = 'uploading';
         try {
           const result = await uploadWorkspaceFile(
+            row.place,
             row.path,
             row.file,
             (percent) => (row.progress = percent),
           );
           row.state = 'done';
           row.message = result.name === row.file.name ? 'Uploaded' : `Saved as ${result.name}`;
-          await refreshIfCurrent(row.path);
+          await refreshIfCurrent(row.place, row.path);
         } catch (e) {
           row.state = 'error';
           row.message = e instanceof Error ? e.message : 'Could not upload this file.';
@@ -418,13 +432,14 @@
     }
   }
   async function deleteEntries(names: string[]) {
+    const placeId = selected?.place || '';
     const path = selected?.path || '';
     const current = folderLoads.peek();
     const deleted: string[] = [];
     const errors: string[] = [];
     for (const name of names) {
       try {
-        await deleteWorkspaceEntry(path, name);
+        await deleteWorkspaceEntry(placeId, path, name);
         deleted.push(name);
       } catch (e) {
         errors.push(`${name}: ${e instanceof Error ? e.message : 'Could not delete this item.'}`);
@@ -439,6 +454,21 @@
     if (active && deleted.length) void loadPins();
     return { deleted, errors };
   }
+  function groupHref(placeId: string) {
+    return `${base}/groups?${new URLSearchParams({ group: placeId.slice('group:'.length) })}`;
+  }
+  // A group's root keeps its layout: the notebook is edited on the Groups page,
+  // and neither it nor `memories` is deleted here. The server refuses both anyway.
+  let groupRootRule = $derived.by(() => {
+    if (place?.kind !== 'group' || selected?.path !== '') return undefined;
+    const notebook = groupHref(place.id);
+    return (name: string) => {
+      const folded = name.toLowerCase();
+      if (folded === 'group.md') return { editHref: notebook, keep: true };
+      if (folded === 'memories') return { keep: true };
+      return null;
+    };
+  });
   const folderLoads = latest();
   let active = true;
   const selection = createUrlSelection<Selection>({
@@ -855,7 +885,7 @@
               items={[
                 {
                   label: 'Group overview',
-                  href: `${base}/groups?${new URLSearchParams({ group: place.id.slice('group:'.length) })}`,
+                  href: groupHref(place.id),
                 },
               ]}
             />
@@ -873,7 +903,7 @@
               ]}
             />
           {/if}
-          {#if place.id === 'home' && listing && !listingLoading && !listingError}
+          {#if place.writable && listing && !listingLoading && !listingError}
             <Button variant="secondary" size="sm" onclick={openFolderDialog}>New folder</Button>
             <Button size="sm" onclick={() => fileInput?.click()}>Upload</Button>
             <input
@@ -922,7 +952,7 @@
               <li class="upload-row">
                 <span class="upload-name"
                   >{row.file.name}<span class="caption"
-                    >My files{row.path ? ` / ${row.path}` : ''}</span
+                    >{row.placeLabel}{row.path ? ` / ${row.path}` : ''}</span
                   ></span
                 >
                 <span
@@ -950,7 +980,7 @@
       {/if}
       <FileDropZone
         overlay
-        disabled={place.id !== 'home' || !listing || listingLoading || !!listingError}
+        disabled={!place.writable || !listing || listingLoading || !!listingError}
         onFiles={enqueue}
       >
         {#if !place.browsable}
@@ -1003,8 +1033,10 @@
         {:else if listing}
           <FileTable
             {listing}
-            onDelete={place.id === 'home' ? deleteEntries : undefined}
-            onEdit={place.id === 'home' ? editTextFile : undefined}
+            onDelete={place.writable ? deleteEntries : undefined}
+            onEdit={place.writable ? editTextFile : undefined}
+            entryRule={groupRootRule}
+            deleteFor={place.kind === 'group' ? place.label : undefined}
             onRefresh={() => loadFolder(selected!)}
             {place}
             {showHidden}
@@ -1045,18 +1077,18 @@
     bind:open={textEditorOpen}
     fileKey={[file.path, file.name].filter(Boolean).join('/')}
     title={file.name}
-    description={['My files', file.path].filter(Boolean).join(' / ')}
+    description={[file.label, file.path].filter(Boolean).join(' / ')}
     ariaLabel={file.name}
     placeholder="This file is empty."
     loadFailed="Couldn't load this file."
-    load={() => getWorkspaceTextFile(file.path, file.name)}
+    load={() => getWorkspaceTextFile(file.place, file.path, file.name)}
     save={(_key, content, revision) =>
-      saveWorkspaceTextFile(file.path, file.name, content, revision)}
+      saveWorkspaceTextFile(file.place, file.path, file.name, content, revision)}
     describeError={describeTextFileError}
     onClose={closeTextEditor}
   >
     {#snippet caption()}
-      Plain text. Saved in My files.
+      Plain text. Saved in {file.label}.
     {/snippet}
   </TextFileEditor>
 {/if}
@@ -1068,7 +1100,7 @@
     event.preventDefault();
     document.getElementById('workspace-folder-name')?.focus();
   }}
-  description={`Create in My files${folderPath ? ` / ${folderPath}` : ''}`}
+  description={`Create in ${folderPlace.label}${folderPath ? ` / ${folderPath}` : ''}`}
   width="420px"
   submitLabel="Create folder"
   busyLabel="Creating…"
