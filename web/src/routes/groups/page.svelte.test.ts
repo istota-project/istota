@@ -7,8 +7,14 @@ import Groups from './+page.svelte';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
 const identity = vi.hoisted(() => ({
-  user: { username: 'alice', is_admin: false, features: { workspace: true } },
+  user: { username: 'alice', bot_name: 'Istota', is_admin: false, features: { workspace: true } },
   reload: vi.fn(),
+}));
+const notices = vi.hoisted(() => ({ notifyError: vi.fn(), notifyWarning: vi.fn() }));
+vi.mock('@minot/ui/stores/notices', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@minot/ui/stores/notices')>()),
+  notifyError: notices.notifyError,
+  notifyWarning: notices.notifyWarning,
 }));
 vi.mock('$lib/api', () => api);
 vi.mock('$lib/userContext', () => ({ getCurrentUser: () => identity }));
@@ -32,7 +38,12 @@ const group = {
     { user_id: 'bob', display_name: 'Bob', role: 'owner' },
   ],
   rooms: [{ token: 'room1', name: 'Planning', origin: 'web' }],
-  disclosure: { memory: 'Groups/team/GROUP.md', rooms: [], briefings: [] },
+  disclosure: {
+    memory: 'Groups/team/GROUP.md',
+    rooms: [],
+    briefings: [],
+    files: 'Groups/team/: every member can add, change and delete these files',
+  },
 };
 const notebook = {
   group_id: 'team',
@@ -275,6 +286,9 @@ it('requires history acknowledgement before an owner adds a member', async () =>
   await fireEvent.click(await screen.findByRole('button', { name: 'Add member' }));
   const dialog = await screen.findByRole('dialog', { name: 'Add member' });
   expect(within(dialog).getByText('Groups/team/GROUP.md')).toBeTruthy();
+  expect(
+    within(dialog).getByText('Groups/team/: every member can add, change and delete these files'),
+  ).toBeTruthy();
   const submit = within(dialog).getByRole('button', { name: 'Add member' });
   expect(submit).toBeDisabled();
   await fireEvent.click(within(dialog).getByRole('checkbox'));
@@ -601,4 +615,120 @@ it('starts another group at the top of the pane', async () => {
   await fireEvent.click(screen.getByRole('link', { name: 'Ops' }));
   await waitFor(() => expect(api.getGroup).toHaveBeenLastCalledWith('ops'));
   expect(pane.scrollTop).toBe(0);
+});
+
+function fileEvent(id: number, event_type: string, path: string | null, name = 'Bob') {
+  return {
+    id,
+    actor_id: name.toLowerCase(),
+    user_id: name.toLowerCase(),
+    display_name: name,
+    event_type,
+    path,
+    size: null,
+    created_at: '2026-11-01T10:00:00Z',
+  };
+}
+const writablePlace = {
+  id: 'group:team',
+  kind: 'group',
+  label: 'Team',
+  browsable: true,
+  writable: true,
+  view_root: 'Groups/team',
+};
+async function filesCard() {
+  return (await screen.findByRole('heading', { name: 'Shared files' })).closest('section')!;
+}
+it('lists recent file changes from the group detail, newest six, with what they leave out', async () => {
+  api.getGroup.mockResolvedValue({
+    ...group,
+    file_activity: [
+      fileEvent(9, 'file_uploaded', 'itinerary.pdf', 'Alice'),
+      fileEvent(8, 'folder_created', 'Plans'),
+      fileEvent(7, 'file_edited', 'Plans/packing.md'),
+      fileEvent(6, 'file_deleted', 'old.txt'),
+      fileEvent(5, 'file_uploaded', 'a.txt'),
+      fileEvent(4, 'file_uploaded', 'b.txt'),
+      fileEvent(3, 'file_uploaded', 'c.txt'),
+    ],
+  });
+  render(Groups);
+  const card = await filesCard();
+  const list = await within(card).findByRole('list', { name: 'Recent changes' });
+  const lines = within(list)
+    .getAllByRole('listitem')
+    .map((item) => item.querySelector('.change')?.textContent?.replace(/\s+/g, ' ').trim());
+  expect(lines).toEqual([
+    'Alice uploaded itinerary.pdf',
+    'Bob created folder Plans',
+    'Bob edited Plans/packing.md',
+    'Bob deleted old.txt',
+    'Bob uploaded a.txt',
+    'Bob uploaded b.txt',
+  ]);
+  expect(
+    within(card).getByText('Changes made by Istota or directly on the server are not listed.'),
+  ).toBeTruthy();
+});
+it('shows no recent changes when the group detail has none', async () => {
+  render(Groups);
+  const card = await filesCard();
+  await within(card).findByText('The group folder is empty.');
+  expect(within(card).queryByRole('list', { name: 'Recent changes' })).toBeNull();
+  expect(within(card).queryByText(/are not listed/)).toBeNull();
+});
+it.each([
+  ['a read-only place', { ...writablePlace, writable: false }],
+  ['no place', null],
+])('offers no Upload for %s', async (_label, place) => {
+  api.getWorkspacePlaces.mockResolvedValue({ places: place ? [place] : [], notes: [] });
+  render(Groups);
+  const card = await filesCard();
+  await within(card).findByText('The group folder is empty.');
+  expect(within(card).queryByRole('button', { name: 'Upload' })).toBeNull();
+});
+it('uploads into the group root from the card and reloads the files and the activity', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({ places: [writablePlace], notes: [] });
+  api.uploadWorkspaceFile.mockResolvedValue({
+    name: 'notes.txt',
+    path: 'notes.txt',
+    size: 3,
+    recorded: true,
+  });
+  render(Groups);
+  const card = await filesCard();
+  await within(card).findByRole('button', { name: 'Upload' });
+  const input = within(card).getByLabelText('Upload files') as HTMLInputElement;
+  const file = new File(['abc'], 'notes.txt', { type: 'text/plain' });
+  const listings = api.getWorkspaceListing.mock.calls.length;
+  const details = api.getGroup.mock.calls.length;
+  await fireEvent.change(input, { target: { files: [file] } });
+  await waitFor(() =>
+    expect(api.uploadWorkspaceFile).toHaveBeenCalledWith(
+      'group:team',
+      '',
+      file,
+      expect.any(Function),
+    ),
+  );
+  await waitFor(() => expect(api.getWorkspaceListing.mock.calls.length).toBe(listings + 1));
+  await waitFor(() => expect(api.getGroup.mock.calls.length).toBe(details + 1));
+  expect(notices.notifyError).not.toHaveBeenCalled();
+});
+it('reports a refused upload through the notice drawer', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({ places: [writablePlace], notes: [] });
+  api.uploadWorkspaceFile.mockRejectedValue(
+    new Error('The group notebook is edited on the Groups page.'),
+  );
+  render(Groups);
+  const card = await filesCard();
+  await within(card).findByRole('button', { name: 'Upload' });
+  const input = within(card).getByLabelText('Upload files') as HTMLInputElement;
+  await fireEvent.change(input, { target: { files: [new File(['x'], 'GROUP.md')] } });
+  await waitFor(() =>
+    expect(notices.notifyError).toHaveBeenCalledWith(
+      'Could not upload GROUP.md: The group notebook is edited on the Groups page.',
+    ),
+  );
 });

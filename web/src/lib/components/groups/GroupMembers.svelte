@@ -265,6 +265,7 @@
         <p>This person will be able to read the existing shared material:</p>
         <ul>
           <li>{disclosure.memory}</li>
+          {#if disclosure.files}<li>{disclosure.files}</li>{/if}
           {#each disclosure.rooms as room}<li>{room}</li>{/each}
           {#each disclosure.briefings as briefing}<li>{briefing}</li>{/each}
         </ul>
