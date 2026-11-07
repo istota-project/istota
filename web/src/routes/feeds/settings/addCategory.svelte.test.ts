@@ -29,7 +29,7 @@ await fillApiDouble(api, {
 import { get } from 'svelte/store';
 
 import { getFeedsConfig, getModuleServices, putFeedsConfig } from '$lib/api';
-import { settingsSave } from '$lib/stores/settingsSave.svelte';
+import { headerSave } from '@minot/ui/stores/headerSave';
 import Page from './+page.svelte';
 
 afterEach(cleanup);
@@ -61,12 +61,12 @@ async function openAddCategory() {
  *
  * There is no Save button in this component to click: a settings page has
  * exactly one, it lives in the app bar, and the page contributes it through
- * `useSettingsSave` while `HeaderSave` renders it from the *module* layout
+ * `useHeaderSave` while `HeaderSave` renders it from the *module* layout
  * (web/AGENTS.md, "A settings page has exactly one Save"). So the store is the
  * seam, and driving it is what a click on that button would do.
  */
 async function saveViaHeader() {
-  const aggregate = get(settingsSave);
+  const aggregate = get(headerSave);
   if (!aggregate) throw new Error('the page registered no save contributor');
   await aggregate.save();
 }

@@ -10,7 +10,7 @@ import { get } from 'svelte/store';
 import { render, cleanup, screen, waitFor, within, fireEvent } from '@testing-library/svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import type { User, ServiceCard } from '$lib/api';
-import { settingsSave } from '$lib/stores/settingsSave.svelte';
+import { headerSave } from '@minot/ui/stores/headerSave';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
@@ -82,7 +82,7 @@ describe('Connections first load', () => {
     expect(container.querySelector('.center-msg.error')).toBeNull();
     expect(screen.getByRole('heading', { name: 'Nextcloud' })).toBeInTheDocument();
     expect(screen.queryByText(/No connected services/)).toBeNull();
-    expect(get(settingsSave)).toBeNull();
+    expect(get(headerSave)).toBeNull();
 
     const alert = message.closest('.banner') as HTMLElement;
     await fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
@@ -111,7 +111,7 @@ describe('Connections first load', () => {
     const input = await screen.findByDisplayValue('https://keep.example.org');
     vi.mocked(api.getSettingsServices).mockRejectedValueOnce(new Error('Refresh failed'));
     await fireEvent.input(input, { target: { value: 'https://keep2.example.org' } });
-    await get(settingsSave)!.save();
+    await get(headerSave)!.save();
 
     await waitFor(() => expect(notices.notifyError).toHaveBeenCalledWith('Refresh failed'));
     expect(container.querySelector('.banner')).toBeNull();

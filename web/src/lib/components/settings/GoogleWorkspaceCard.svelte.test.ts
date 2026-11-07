@@ -9,7 +9,7 @@ import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { render, cleanup, fireEvent, screen, waitFor } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 import type { GoogleStatus } from '$lib/api';
-import { settingsSave } from '$lib/stores/settingsSave.svelte';
+import { headerSave } from '@minot/ui/stores/headerSave';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
@@ -306,21 +306,21 @@ describe('GoogleWorkspaceCard', () => {
       await fireEvent.click(option);
     }
 
-    async function headerSave() {
-      const aggregate = get(settingsSave);
+    async function pressHeaderSave() {
+      const aggregate = get(headerSave);
       expect(aggregate).not.toBeNull();
       await aggregate!.save();
     }
 
     it('is not dirty until a level actually changes', async () => {
       await mount(status());
-      expect(get(settingsSave)?.dirty).toBe(false);
+      expect(get(headerSave)?.dirty).toBe(false);
     });
 
     it('goes dirty once a level changes', async () => {
       await mount(status());
       await pickLevel('Drive access level', 'Read-only');
-      await waitFor(() => expect(get(settingsSave)?.dirty).toBe(true));
+      await waitFor(() => expect(get(headerSave)?.dirty).toBe(true));
     });
 
     it('writes the pending selection and reports a needed reconnect', async () => {
@@ -332,7 +332,7 @@ describe('GoogleWorkspaceCard', () => {
         reconnect_required: true,
       });
       await pickLevel('Drive access level', 'Read-only');
-      await headerSave();
+      await pressHeaderSave();
       expect(api.saveGoogleScopes).toHaveBeenCalledWith({
         drive: 'readonly',
         gmail: 'readonly',
@@ -352,7 +352,7 @@ describe('GoogleWorkspaceCard', () => {
         reconnect_required: false,
       });
       await pickLevel('Drive access level', 'Read-only');
-      await headerSave();
+      await pressHeaderSave();
       expect(await screen.findByText('Saved.')).toBeInTheDocument();
     });
 
@@ -360,7 +360,7 @@ describe('GoogleWorkspaceCard', () => {
       await mount(status());
       api.saveGoogleScopes.mockRejectedValue(new Error('nope'));
       await pickLevel('Drive access level', 'Read-only');
-      await headerSave();
+      await pressHeaderSave();
       expect(await screen.findByText('nope')).toBeInTheDocument();
     });
   });

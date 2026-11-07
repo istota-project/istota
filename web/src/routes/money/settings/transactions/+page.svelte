@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { SettingsLayout } from '$lib/components/settings';
+  import { SettingsLayout } from '@minot/ui';
   import TransactionRulesCard from '$lib/components/money/TransactionRulesCard.svelte';
   import TransactionRuleTestCard from '$lib/components/money/TransactionRuleTestCard.svelte';
   import TransactionRuleCoverageCard from '$lib/components/money/TransactionRuleCoverageCard.svelte';

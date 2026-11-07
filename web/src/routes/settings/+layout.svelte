@@ -16,11 +16,11 @@
     Sidebar,
     SidebarNav,
     SidebarToggle,
+    HeaderSave,
   } from '@minot/ui';
-  import { HeaderSave } from '$lib/components/settings';
   import { getCurrentUser } from '$lib/userContext';
   import { notifyInfo, notifySuccess, notifyWarning, notifyError } from '@minot/ui/stores/notices';
-  import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
+  import { useHeaderSave } from '@minot/ui/stores/headerSave';
   import { USER_SETTINGS_SECTIONS } from '$lib/settings/sections';
   import { appConnectionAvailable, openAppSettings } from '$lib/platform/nativeConnection';
   import { AppWindow } from '@lucide/svelte';
@@ -172,7 +172,7 @@
 
   // One save in the app bar for the profile, aggregated with whatever the open
   // section registers (a `ServiceCard`'s pending credential edits).
-  useSettingsSave(() => ({
+  useHeaderSave(() => ({
     dirty: profileDraft.dirty,
     saving: profileSaving,
     save: saveProfile,

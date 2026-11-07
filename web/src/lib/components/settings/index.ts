@@ -4,8 +4,6 @@ export { default as ServiceCard } from './ServiceCard.svelte';
 export { default as GarminCard } from './GarminCard.svelte';
 export { default as GoogleWorkspaceCard } from './GoogleWorkspaceCard.svelte';
 export { default as NextcloudCard } from './NextcloudCard.svelte';
-export { default as HeaderSave } from './HeaderSave.svelte';
-export { default as SettingsLayout } from './SettingsLayout.svelte';
 export { default as SecurityCard } from './SecurityCard.svelte';
 export { default as CredentialsCard } from './CredentialsCard.svelte';
 export { default as CredentialAccessFields } from './CredentialAccessFields.svelte';

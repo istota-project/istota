@@ -23,6 +23,7 @@
     Checkbox,
     LoadMore,
     Meter,
+    ShellScrollReset,
   } from '@minot/ui';
   import {
     AuthError,
@@ -75,7 +76,6 @@
   } from '$lib/components/workspace/indexViews';
   import { getCurrentUser } from '$lib/userContext';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
-  import ShellScrollReset from '$lib/components/ShellScrollReset.svelte';
   import { loadSetting, saveSetting } from '@minot/ui/ui/persisted';
   import { latest } from '@minot/ui/ui/latest';
   import PlaceList from '$lib/components/workspace/PlaceList.svelte';

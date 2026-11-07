@@ -26,7 +26,6 @@
   } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { notifyError } from '@minot/ui/stores/notices';
-  import { SettingsLayout } from '$lib/components/settings';
   import {
     Button,
     ConfirmDialog,
@@ -36,6 +35,7 @@
     LoadState,
     type KebabItem,
     Card,
+    SettingsLayout,
   } from '@minot/ui';
   import ClientForm from '$lib/components/money/ClientForm.svelte';
   import EntityForm from '$lib/components/money/EntityForm.svelte';

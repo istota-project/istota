@@ -1,9 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getHealthSettings, putHealthSettings, type HealthSettings } from '$lib/api';
-  import { Select, Card, Field, Input } from '@minot/ui';
-  import { SettingsLayout } from '$lib/components/settings';
-  import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
+  import { Select, Card, Field, Input, SettingsLayout } from '@minot/ui';
+  import { useHeaderSave } from '@minot/ui/stores/headerSave';
   import { cmToFtIn, ftInToCm } from '$lib/health/units';
   import { trackChanges } from '@minot/ui/ui/draft.svelte';
 
@@ -160,7 +159,7 @@
 
   onMount(load);
 
-  useSettingsSave(() => ({ dirty: changes.dirty, saving, save }));
+  useHeaderSave(() => ({ dirty: changes.dirty, saving, save }));
 </script>
 
 <SettingsLayout

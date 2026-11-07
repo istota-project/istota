@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { SettingsLayout, PushCard } from '$lib/components/settings';
+  import { SettingsLayout } from '@minot/ui';
+  import { PushCard } from '$lib/components/settings';
   import { getUserSettings } from '$lib/settings/userSettingsContext';
 
   const settings = getUserSettings();

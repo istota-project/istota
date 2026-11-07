@@ -35,8 +35,8 @@
     Select,
     ConfirmDialog,
     CountPill,
+    HeaderSave,
   } from '@minot/ui';
-  import { HeaderSave } from '$lib/components/settings';
   import { LayoutGrid, List, Cog, CheckCheck } from '@lucide/svelte';
   import ViewFilters from '$lib/components/ViewFilters.svelte';
   import { notifyError } from '@minot/ui/stores/notices';

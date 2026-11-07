@@ -17,7 +17,7 @@ import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { render, cleanup, screen } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 import type { ServiceCard as ServiceCardData } from '$lib/api';
-import { settingsSave } from '$lib/stores/settingsSave.svelte';
+import { headerSave } from '@minot/ui/stores/headerSave';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
@@ -71,7 +71,7 @@ describe('the retired vault-managed state', () => {
 
   it('still claims the app bar Save button', () => {
     render(ServiceCard, { service: asManaged() });
-    expect(get(settingsSave)).not.toBeNull();
+    expect(get(headerSave)).not.toBeNull();
   });
 });
 
@@ -94,7 +94,7 @@ describe('an ordinary service card', () => {
 
   it('still claims the app bar Save button', () => {
     render(ServiceCard, { service: card() });
-    expect(get(settingsSave)).not.toBeNull();
+    expect(get(headerSave)).not.toBeNull();
   });
 
   it('shows a plain field prefilled and keeps a credential write-only', () => {
@@ -116,7 +116,7 @@ describe('an ordinary service card', () => {
     expect(inputs[0].value).toBe('alerts');
     expect(inputs[1].value).toBe('');
     // A prefilled value is not an edit, so nothing is waiting to save.
-    expect(get(settingsSave)?.dirty).toBe(false);
+    expect(get(headerSave)?.dirty).toBe(false);
     expect(screen.getAllByTitle('Clear stored value').length).toBe(2);
   });
 
@@ -125,6 +125,6 @@ describe('an ordinary service card', () => {
     // service with no fields of its own. Without this the assertions above pass
     // against a component that registers unconditionally.
     render(ServiceCard, { service: card({ fields: [], configured_keys: [] }) });
-    expect(get(settingsSave)).toBeNull();
+    expect(get(headerSave)).toBeNull();
   });
 });

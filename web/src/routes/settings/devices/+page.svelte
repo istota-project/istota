@@ -2,7 +2,8 @@
   import { onDestroy, onMount } from 'svelte';
   import { base } from '$app/paths';
   import { AuthError, listDevices, type DevicesResponse } from '$lib/api';
-  import { DeviceTokensCard, SettingsLayout } from '$lib/components/settings';
+  import { SettingsLayout } from '@minot/ui';
+  import { DeviceTokensCard } from '$lib/components/settings';
   import { getCurrentUser } from '$lib/userContext';
   import { latest } from '@minot/ui/ui/latest';
   import { actionsStatus } from '$lib/platform/nativeActions';

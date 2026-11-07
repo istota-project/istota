@@ -21,7 +21,7 @@
   } from '@minot/ui';
   import { createDraft } from '@minot/ui/ui/draft.svelte';
   import { notifyError } from '@minot/ui/stores/notices';
-  import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
+  import { useHeaderSave } from '@minot/ui/stores/headerSave';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
   import BlockBuilder from '../BlockBuilder.svelte';
   import { channelLabel, derivedTitle } from './briefingSettings';
@@ -128,7 +128,7 @@
     }
   }
 
-  useSettingsSave(() => ({ dirty: form.dirty, saving, save }));
+  useHeaderSave(() => ({ dirty: form.dirty, saving, save }));
 </script>
 
 <Card title="Schedule and delivery">

@@ -36,7 +36,7 @@ import {
   putFeedsConfig,
   type FeedsConfigSettings,
 } from '$lib/api';
-import { settingsSave } from '$lib/stores/settingsSave.svelte';
+import { headerSave } from '@minot/ui/stores/headerSave';
 import Page from './+page.svelte';
 
 afterEach(cleanup);
@@ -105,7 +105,7 @@ function fieldInput(label: string): HTMLInputElement {
 
 /** Drive the page's save the way the app-bar button does. */
 async function saveViaHeader() {
-  const aggregate = get(settingsSave);
+  const aggregate = get(headerSave);
   if (!aggregate) throw new Error('the page registered no save contributor');
   await aggregate.save();
 }

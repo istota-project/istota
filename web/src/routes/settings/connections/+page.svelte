@@ -11,7 +11,7 @@
     type ServiceCard as ServiceCardData,
     type NextcloudTokenStatus,
   } from '$lib/api';
-  import { EmptyState, LoadState } from '@minot/ui';
+  import { EmptyState, LoadState, SettingsLayout } from '@minot/ui';
   import { notifyError } from '@minot/ui/stores/notices';
   import { getCurrentUser } from '$lib/userContext';
   import {
@@ -20,7 +20,6 @@
     GoogleWorkspaceCard,
     MailAccountsCard,
     NextcloudCard,
-    SettingsLayout,
     SharingCard,
   } from '$lib/components/settings';
 

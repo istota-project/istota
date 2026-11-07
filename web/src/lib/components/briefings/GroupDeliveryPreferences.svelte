@@ -12,7 +12,7 @@
     type GroupBriefingDefinition,
   } from '$lib/api';
   import { EmptyState, Card, Checkbox } from '@minot/ui';
-  import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
+  import { useHeaderSave } from '@minot/ui/stores/headerSave';
   import { notifyError } from '@minot/ui/stores/notices';
   import { trackChanges } from '@minot/ui/ui/draft.svelte';
   import { channelLabel } from './settings/briefingSettings';
@@ -89,7 +89,7 @@
     }
   }
 
-  useSettingsSave(() => (loaded && !failed ? { dirty: changes.dirty, saving, save } : null));
+  useHeaderSave(() => (loaded && !failed ? { dirty: changes.dirty, saving, save } : null));
 </script>
 
 <Card
