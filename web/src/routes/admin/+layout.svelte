@@ -3,10 +3,16 @@
   import { page } from '$app/state';
   import { onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
-  import { AppShell, ShellHeader, Sidebar, SidebarNav, SidebarToggle } from '@minot/ui';
+  import {
+    AppShell,
+    ShellHeader,
+    Sidebar,
+    SidebarNav,
+    SidebarToggle,
+    ShellScrollReset,
+    HeaderSave,
+  } from '@minot/ui';
   import { createDrawerClose } from '@minot/ui/ui/drawerClose';
-  import { HeaderSave } from '$lib/components/settings';
-  import ShellScrollReset from '$lib/components/ShellScrollReset.svelte';
   import {
     Activity,
     CalendarClock,

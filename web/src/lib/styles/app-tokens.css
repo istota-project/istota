@@ -6,11 +6,6 @@
    tie. The parity rules tokens.test.ts holds apply to both sheets together. */
 
 :root {
-  /* Money direction: income and expense are the design system's signed pair
-	   under this app's names. Aliases only; the values are --signed-*'s. */
-  --money-income: var(--signed-pos);
-  --money-expense: var(--signed-neg);
-
   /* The location map's current-position dot: live tracker green, and orange for
 	   a browser-geolocation fallback. Darker in light, where the bright green
 	   washes out on light tiles. */
@@ -34,7 +29,7 @@
 
   /* Room colours — a categorical palette the user picks from to tint a chat
 	   sidebar row. The hue encodes a *kind* (which room this is), never a
-	   severity, so these stay off the status scale the way the money pair does.
+	   severity, so these stay off the status scale the way the signed pair does.
 	   Eight hues round the wheel, skipping the amber band: `.room-origin.talk`
 	   already spends --accent-amber in this same row to mean "mirrored to
 	   Nextcloud Talk", and a tint there would read as a surface binding rather
@@ -43,7 +38,7 @@
 	   One token per colour, not a tint/dot pair: the value is used solid for the
 	   dot and mixed at 14-30% for the row wash, so a hue that reads on the
 	   theme's own --surface-raised reads in both roles. Light values are darker
-	   and more saturated for the same reason the money pair's are — the dot has
+	   and more saturated for the same reason the signed pair's are — the dot has
 	   to hold against #e8e8ea and the wash has to darken rather than lighten
 	   (ISSUE-433). */
   --room-color-rose: #e88bb0;
@@ -121,11 +116,6 @@
 }
 
 :root[data-theme='light'] {
-  /* Restated beside the light block's other colours, as tokens.css does for
-	   its aliases, so theme parity sees the pair. */
-  --money-income: var(--signed-pos);
-  --money-expense: var(--signed-neg);
-
   --map-marker-live: #16a34a;
   --map-marker-browser: #ea580c;
   --map-icon-filter: none;

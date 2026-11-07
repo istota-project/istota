@@ -34,12 +34,13 @@
     Input,
     Badge,
     Timestamp,
+    SettingsLayout,
   } from '@minot/ui';
-  import { ServiceCard, SettingsLayout } from '$lib/components/settings';
+  import { ServiceCard } from '$lib/components/settings';
   import FeedSubscriptionModal, {
     type FeedDraft,
   } from '$lib/components/FeedSubscriptionModal.svelte';
-  import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
+  import { useHeaderSave } from '@minot/ui/stores/headerSave';
   import { createDraft } from '@minot/ui/ui/draft.svelte';
   import { parseOptionalInt } from '@minot/ui/ui/parse';
 
@@ -133,7 +134,7 @@
     }
   }
 
-  useSettingsSave(() => (moduleEnabled ? { dirty: draft.dirty, saving, save } : null));
+  useHeaderSave(() => (moduleEnabled ? { dirty: draft.dirty, saving, save } : null));
 
   function detectSourceType(url: string | undefined | null): string {
     if (!url) return '?';

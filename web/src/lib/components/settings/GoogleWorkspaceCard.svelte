@@ -19,7 +19,7 @@
     Card,
     Field,
   } from '@minot/ui';
-  import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
+  import { useHeaderSave } from '@minot/ui/stores/headerSave';
   import { offSiteRoutesOpenInBrowser } from '$lib/platform/nativeConnection';
 
   interface Props {
@@ -130,7 +130,7 @@
   // The card contributes to the page's single app-bar Save like every other
   // settings card. It withdraws when the instance has Google switched off —
   // there is nothing to write then.
-  useSettingsSave(() => (status?.enabled ? { dirty, saving, save } : null));
+  useHeaderSave(() => (status?.enabled ? { dirty, saving, save } : null));
 
   // In the iOS app the connect route opens in the browser instead, and this page stays
   // as it is (`offSiteRoutesOpenInBrowser`).

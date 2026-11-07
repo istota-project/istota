@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
-import { settingsSave } from '$lib/stores/settingsSave.svelte';
+import { headerSave } from '@minot/ui/stores/headerSave';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
@@ -10,6 +10,7 @@ await fillApiDouble(api);
 vi.mock('$app/paths', () => ({ base: '/istota' }));
 vi.mock('@minot/ui/stores/notices', () => ({ notifyError: vi.fn(), notifySuccess: vi.fn() }));
 import Page from './+page.svelte';
+import { notifyError } from '@minot/ui/stores/notices';
 
 const PROBLEM = 'Add at least one pattern, with no blank rows.';
 
@@ -80,8 +81,8 @@ it('loads, adds and removes patterns and saves both lists through one PUT', asyn
   expect(screen.queryByRole('option', { name: 'Assets:Bank' })).toBeNull();
   await fireEvent.input(input, { target: { value: 'Income:Other' } });
   await fireEvent.click(screen.getByRole('button', { name: 'Remove SE income pattern 1' }));
-  await waitFor(() => expect(get(settingsSave)?.dirty).toBe(true));
-  await get(settingsSave)!.save();
+  await waitFor(() => expect(get(headerSave)?.dirty).toBe(true));
+  await get(headerSave)!.save();
   const writes = fetcher.mock.calls.filter(([, init]) => init?.method === 'PUT');
   expect(writes).toHaveLength(1);
   expect(writes[0][0]).toBe('/istota/api/money/config/tax/patterns');
@@ -89,7 +90,7 @@ it('loads, adds and removes patterns and saves both lists through one PUT', asyn
     se_income: ['Income:Other'],
     se_expense: ['Expenses:Business'],
   });
-  await waitFor(() => expect(get(settingsSave)?.dirty).toBe(false));
+  await waitFor(() => expect(get(headerSave)?.dirty).toBe(false));
 });
 
 it.each(['income', 'expense'])(
@@ -98,8 +99,8 @@ it.each(['income', 'expense'])(
     render(Page);
     await screen.findByDisplayValue('Income:Consulting');
     await fireEvent.click(screen.getByRole('button', { name: `Remove SE ${kind} pattern 1` }));
-    await waitFor(() => expect(get(settingsSave)?.disabled).toBe(true));
-    expect(get(settingsSave)?.dirty).toBe(true);
+    await waitFor(() => expect(get(headerSave)?.disabled).toBe(true));
+    expect(get(headerSave)?.dirty).toBe(true);
     expect(screen.getByText(PROBLEM)).toBeTruthy();
   },
 );
@@ -108,11 +109,11 @@ it('saves other tax settings when no patterns are stored', async () => {
   patterns = { se_income: [], se_expense: [] };
   render(Page);
   await screen.findByRole('button', { name: 'Add SE income pattern' });
-  await waitFor(() => expect(get(settingsSave)?.disabled).toBe(false));
+  await waitFor(() => expect(get(headerSave)?.disabled).toBe(false));
   expect(screen.getAllByText('None set, so the estimate counts none.')).toHaveLength(2);
   expect(screen.queryByText(PROBLEM)).toBeNull();
   await fireEvent.click(screen.getByRole('button', { name: 'Add SE income pattern' }));
-  await waitFor(() => expect(get(settingsSave)?.disabled).toBe(true));
+  await waitFor(() => expect(get(headerSave)?.disabled).toBe(true));
   expect(screen.getAllByText(PROBLEM)).toHaveLength(2);
 });
 
@@ -120,7 +121,7 @@ it('sends patterns trimmed', async () => {
   render(Page);
   const input = await screen.findByDisplayValue('Income:Consulting');
   await fireEvent.input(input, { target: { value: ' Income:Other ' } });
-  await get(settingsSave)!.save();
+  await get(headerSave)!.save();
   expect(patterns.se_income).toEqual(['Income:Other']);
 });
 
@@ -128,7 +129,7 @@ it('marks an invalid regular expression beside its field and blocks Save', async
   render(Page);
   const input = await screen.findByDisplayValue('Income:Consulting');
   await fireEvent.input(input, { target: { value: 'Income:[' } });
-  await waitFor(() => expect(get(settingsSave)?.disabled).toBe(true));
+  await waitFor(() => expect(get(headerSave)?.disabled).toBe(true));
   expect(screen.getByText('Not a valid regular expression.')).toBeTruthy();
 });
 
@@ -136,7 +137,7 @@ it('marks a pattern that matches every account', async () => {
   render(Page);
   const input = await screen.findByDisplayValue('Income:Consulting');
   await fireEvent.input(input, { target: { value: 'Income:Consulting|' } });
-  await waitFor(() => expect(get(settingsSave)?.disabled).toBe(true));
+  await waitFor(() => expect(get(headerSave)?.disabled).toBe(true));
   expect(screen.getByText('This matches every account.')).toBeTruthy();
 });
 
@@ -188,13 +189,13 @@ it('can still save after a reload fails', async () => {
   const input = await screen.findByDisplayValue('Income:Consulting');
   await fireEvent.input(input, { target: { value: 'Income:Other' } });
   failReload = true;
-  await get(settingsSave)!.save();
+  await get(headerSave)!.save();
   failReload = false;
   await fireEvent.input(screen.getByDisplayValue('Income:Other'), {
     target: { value: 'Income:Third' },
   });
-  await waitFor(() => expect(get(settingsSave)?.disabled).toBe(false));
-  await get(settingsSave)!.save();
+  await waitFor(() => expect(get(headerSave)?.disabled).toBe(false));
+  await get(headerSave)!.save();
   expect(patterns.se_income).toEqual(['Income:Third']);
 });
 
@@ -203,10 +204,13 @@ it('keeps edits after a failed save so they can be retried', async () => {
   const input = await screen.findByDisplayValue('Income:Consulting');
   await fireEvent.input(input, { target: { value: 'Income:Other' } });
   failSave = true;
-  await expect(get(settingsSave)!.save()).rejects.toThrow('Could not save');
-  expect(get(settingsSave)?.dirty).toBe(true);
+  vi.mocked(notifyError).mockClear();
+  await get(headerSave)!.save();
+  // The page reports its own failure; the header save must not add a second notice.
+  expect(vi.mocked(notifyError).mock.calls).toEqual([['Could not save']]);
+  expect(get(headerSave)?.dirty).toBe(true);
   expect(screen.getByDisplayValue('Income:Other')).toBeTruthy();
   failSave = false;
-  await get(settingsSave)!.save();
-  await waitFor(() => expect(get(settingsSave)?.dirty).toBe(false));
+  await get(headerSave)!.save();
+  await waitFor(() => expect(get(headerSave)?.dirty).toBe(false));
 });

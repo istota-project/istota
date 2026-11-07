@@ -9,7 +9,7 @@ import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { render, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 import type { NextcloudSharing, NextcloudTokenStatus } from '$lib/api';
-import { settingsSave } from '$lib/stores/settingsSave.svelte';
+import { headerSave } from '@minot/ui/stores/headerSave';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
@@ -83,8 +83,8 @@ async function pickLevel(label: string, optionLabel: string) {
   await fireEvent.click(option);
 }
 
-async function headerSave() {
-  const aggregate = get(settingsSave);
+async function pressHeaderSave() {
+  const aggregate = get(headerSave);
   expect(aggregate).not.toBeNull();
   await aggregate!.save();
 }
@@ -202,7 +202,7 @@ describe('NextcloudCard', () => {
     it('is not dirty until a level changes', async () => {
       await mount(sharing());
       await screen.findByLabelText('Personal access level');
-      expect(get(settingsSave)?.dirty).toBe(false);
+      expect(get(headerSave)?.dirty).toBe(false);
     });
 
     it('sends only the rows whose level changed', async () => {
@@ -219,14 +219,14 @@ describe('NextcloudCard', () => {
       });
       await pickLevel('Personal access level', 'Read and write');
       await pickLevel('Contacts access level', 'Read-only');
-      await waitFor(() => expect(get(settingsSave)?.dirty).toBe(true));
-      await headerSave();
+      await waitFor(() => expect(get(headerSave)?.dirty).toBe(true));
+      await pressHeaderSave();
       expect(api.saveNextcloudSharing).toHaveBeenCalledWith({
         'cal-personal': 'full',
         'book-contacts': 'readonly',
       });
       expect(await screen.findByText('Saved.')).toBeInTheDocument();
-      expect(get(settingsSave)?.dirty).toBe(false);
+      expect(get(headerSave)?.dirty).toBe(false);
     });
 
     it('shows a partial failure under its own row', async () => {
@@ -243,7 +243,7 @@ describe('NextcloudCard', () => {
       });
       await pickLevel('Personal access level', 'Read and write');
       await pickLevel('Work access level', 'Read-only');
-      await headerSave();
+      await pressHeaderSave();
       expect(await screen.findByText('Nextcloud did not apply this change')).toBeInTheDocument();
       expect(screen.getByText('Some changes were not applied.')).toBeInTheDocument();
       expect(screen.getByLabelText('Work access level')).toHaveTextContent('No access');
@@ -255,7 +255,7 @@ describe('NextcloudCard', () => {
         new Error('Nextcloud is not reachable right now.'),
       );
       await pickLevel('Personal access level', 'Read-only');
-      await headerSave();
+      await pressHeaderSave();
       expect(await screen.findByText('Nextcloud is not reachable right now.')).toBeInTheDocument();
     });
   });

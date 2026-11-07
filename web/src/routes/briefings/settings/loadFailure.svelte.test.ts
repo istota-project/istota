@@ -10,7 +10,7 @@ import { get } from 'svelte/store';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { render, cleanup, screen, waitFor, within, fireEvent } from '@testing-library/svelte';
 import type { User } from '$lib/api';
-import { settingsSave } from '$lib/stores/settingsSave.svelte';
+import { headerSave } from '@minot/ui/stores/headerSave';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
@@ -99,7 +99,7 @@ describe('briefings settings first load', () => {
     expect(failure.textContent).toContain('Schedules unavailable');
     expect(container.querySelector('.banner')).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Schedule and delivery' })).toBeNull();
-    expect(get(settingsSave)).toBeNull();
+    expect(get(headerSave)).toBeNull();
 
     await fireEvent.click(within(failure).getByRole('button', { name: 'Retry' }));
     await screen.findByRole('heading', { name: 'Schedule and delivery' });
@@ -194,7 +194,7 @@ describe('briefings settings first load', () => {
 
     const message = await screen.findByText('Profile unavailable');
     expect(screen.queryByRole('checkbox', { name: /Send as HTML/ })).toBeNull();
-    expect(get(settingsSave)).toBeNull();
+    expect(get(headerSave)).toBeNull();
 
     const alert = message.closest('.banner') as HTMLElement;
     await fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));

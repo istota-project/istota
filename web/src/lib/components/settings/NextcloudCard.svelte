@@ -22,7 +22,7 @@
     Card,
     Field,
   } from '@minot/ui';
-  import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
+  import { useHeaderSave } from '@minot/ui/stores/headerSave';
   import { offSiteRoutesOpenInBrowser } from '$lib/platform/nativeConnection';
 
   interface Props {
@@ -168,7 +168,7 @@
     }
   }
 
-  useSettingsSave(() => (token.connected && sharing ? { dirty, saving, save } : null));
+  useHeaderSave(() => (token.connected && sharing ? { dirty, saving, save } : null));
 
   // A full page navigation: `/reconnect` is a server auth route that answers
   // with a redirect to Nextcloud, so the client router has nothing to resolve.

@@ -14,7 +14,7 @@
   } from 'chart.js';
   import { Card, EmptyState, StatTile, LoadState, Disclosure } from '@minot/ui';
   import { getCashFlow, type CashFlowRow } from '$lib/money/api';
-  import { directionColor, INCOME_COLOR, EXPENSE_COLOR } from '$lib/money/direction';
+  import { signedColor, signedDirection } from '@minot/ui/ui/signed';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { selectedYear, transactionsUrl } from '$lib/money/stores/transactions';
   import { parseAmount, formatAmount } from '$lib/money/utils/accounts';
@@ -328,10 +328,10 @@
       </div>
 
       <div class="summary-cards">
-        <StatTile label="Income" surface align="center" valueColor={INCOME_COLOR}>
+        <StatTile label="Income" surface align="center" valueColor={signedColor('positive')}>
           {formatAmount(activeMonth.income, activeMonth.currency)}
         </StatTile>
-        <StatTile label="Expenses" surface align="center" valueColor={EXPENSE_COLOR}>
+        <StatTile label="Expenses" surface align="center" valueColor={signedColor('negative')}>
           {formatAmount(activeMonth.expenses, activeMonth.currency)}
         </StatTile>
         <!-- `>= 0` rather than `> 0`: a net of exactly zero reads as the
@@ -340,11 +340,18 @@
           label="Net income"
           surface
           align="center"
-          valueColor={activeMonth.net >= 0 ? INCOME_COLOR : EXPENSE_COLOR}
+          valueColor={signedColor(
+            signedDirection(activeMonth.net) === 'negative' ? 'negative' : 'positive',
+          )}
         >
           {formatAmount(activeMonth.net, activeMonth.currency)}
         </StatTile>
-        <StatTile label="Margin" surface align="center" valueColor={directionColor(savingsRate)}>
+        <StatTile
+          label="Margin"
+          surface
+          align="center"
+          valueColor={signedColor(signedDirection(savingsRate))}
+        >
           {savingsRate}%
         </StatTile>
       </div>
@@ -361,7 +368,11 @@
                 >
                   {shortAccountName(account)}
                 </button>
-                <span class="breakdown-amount num income">
+                <span
+                  class="breakdown-amount num"
+                  data-direction="positive"
+                  style:color={signedColor('positive')}
+                >
                   {formatAmount(amount, activeMonth.currency)} ({pctOfTotal(
                     amount,
                     activeMonth.income,
@@ -383,7 +394,11 @@
                 >
                   {shortAccountName(account)}
                 </button>
-                <span class="breakdown-amount num expense">
+                <span
+                  class="breakdown-amount num"
+                  data-direction="negative"
+                  style:color={signedColor('negative')}
+                >
                   {formatAmount(amount, activeMonth.currency)} ({pctOfTotal(
                     amount,
                     activeMonth.expenses,
@@ -424,16 +439,6 @@
     gap: var(--space-3);
     padding-block: var(--space-2);
     margin-bottom: var(--space-3);
-  }
-
-  /* The summary tiles are `StatTile`; the breakdown rows below still carry
-     their own direction colours, since they are table cells rather than
-     tiles. Both read the same mapping — see lib/money/direction.ts. */
-  .breakdown-amount.income {
-    color: var(--money-income);
-  }
-  .breakdown-amount.expense {
-    color: var(--money-expense);
   }
 
   /* `.breakdowns` is a bare grouping element: its section headers carry their

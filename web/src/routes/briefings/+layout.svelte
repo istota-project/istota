@@ -49,8 +49,9 @@
     PageLoading,
     LoadMore,
     Timestamp,
+    ShellScrollReset,
+    HeaderSave,
   } from '@minot/ui';
-  import { HeaderSave } from '$lib/components/settings';
   import {
     CheckCheck,
     CirclePause,
@@ -65,7 +66,6 @@
   import { notifyError } from '@minot/ui/stores/notices';
   import { formatDateTime } from '@minot/ui/dateFormat';
   import { createUrlSelection, type Params } from '$lib/navigation/urlSelection.svelte';
-  import ShellScrollReset from '$lib/components/ShellScrollReset.svelte';
 
   let { children } = $props();
 

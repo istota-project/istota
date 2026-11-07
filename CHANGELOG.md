@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Files no longer says your tasks can read and change the All users folder from your private chat. Tasks reach it only from a room linked to All users, and its note in Files now says so.
+- The P&L and P&L % columns of the Money overview's holdings are green and red again. An amount under a cent now shows no sign or colour, and a zero P&L % no longer shows a "+".
 
 ## [0.48.0] - 2026-11-02
 

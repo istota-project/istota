@@ -10,8 +10,7 @@
     webRoomOptions,
     withSurface,
   } from '$lib/deliveryDescriptor';
-  import { Select, type SelectOption, Card, Field } from '@minot/ui';
-  import { SettingsLayout } from '$lib/components/settings';
+  import { Select, type SelectOption, Card, Field, SettingsLayout } from '@minot/ui';
   import { getUserSettings } from '$lib/settings/userSettingsContext';
   import { isManaged, managedBadge } from '$lib/settings/managed';
 

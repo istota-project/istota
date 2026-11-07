@@ -25,8 +25,8 @@
     SidebarNav,
     SidebarToggle,
     LoadState,
+    HeaderSave,
   } from '@minot/ui';
-  import { HeaderSave } from '$lib/components/settings';
   import { MONEY_SETTINGS_SECTIONS } from '$lib/money/settingsSections';
   import { Cog } from '@lucide/svelte';
 

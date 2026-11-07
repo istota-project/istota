@@ -2,9 +2,15 @@
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
-  import { Icon, AppShell, ShellHeader, HeaderNav, Chip } from '@minot/ui';
-  import { HeaderSave } from '$lib/components/settings';
-  import ShellScrollReset from '$lib/components/ShellScrollReset.svelte';
+  import {
+    Icon,
+    AppShell,
+    ShellHeader,
+    HeaderNav,
+    Chip,
+    ShellScrollReset,
+    HeaderSave,
+  } from '@minot/ui';
   import { Cog } from '@lucide/svelte';
 
   let { children } = $props();

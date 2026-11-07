@@ -10,12 +10,7 @@
     type ScheduledJob,
     type ScheduledJobs,
   } from '$lib/api';
-  import {
-    JobForm,
-    NetworkAccessCard,
-    SettingsLayout,
-    type JobSaved,
-  } from '$lib/components/settings';
+  import { JobForm, NetworkAccessCard, type JobSaved } from '$lib/components/settings';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import { accessBadge, STATE_LABEL, STATE_VARIANT } from '$lib/settings/jobState';
   import { getCurrentUser } from '$lib/userContext';
@@ -31,6 +26,7 @@
     PageHeader,
     Timestamp,
     type KebabItem,
+    SettingsLayout,
   } from '@minot/ui';
   import { notifyError, notifySuccess, notifyWarning } from '@minot/ui/stores/notices';
   import { createConfirm } from '@minot/ui/ui/confirm.svelte';

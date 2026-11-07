@@ -9,7 +9,6 @@
     type AssignmentListRow,
   } from '$lib/api';
   import AssignmentDetail from '$lib/components/assignments/AssignmentDetail.svelte';
-  import { SettingsLayout } from '$lib/components/settings';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import {
     ASSIGNMENT_STATE_LABEL,
@@ -20,7 +19,16 @@
     reasonText,
   } from '$lib/settings/assignmentState';
   import { getCurrentUser } from '$lib/userContext';
-  import { Badge, Card, Disclosure, EmptyState, Meter, PageHeader, Timestamp } from '@minot/ui';
+  import {
+    Badge,
+    Card,
+    Disclosure,
+    EmptyState,
+    Meter,
+    PageHeader,
+    Timestamp,
+    SettingsLayout,
+  } from '@minot/ui';
   import { notifyError, notifyWarning } from '@minot/ui/stores/notices';
   import { latest } from '@minot/ui/ui/latest';
   import { onDocumentVisible } from '@minot/ui/ui/visibility';

@@ -11,7 +11,7 @@ import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { render, cleanup, fireEvent, screen, waitFor } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 import type { RelayDelivery, RelayDeliveryOption, User, UserProfile } from '$lib/api';
-import { settingsSave } from '$lib/stores/settingsSave.svelte';
+import { headerSave } from '@minot/ui/stores/headerSave';
 
 function profile(
   relayDelivery: RelayDelivery = '',
@@ -162,8 +162,8 @@ describe('questions from other users', () => {
     currentProfile.value = profile('', { room: true, sms: true });
     await mount();
     await pick('SMS');
-    await waitFor(() => expect(get(settingsSave)?.dirty).toBe(true));
-    await get(settingsSave)!.save();
+    await waitFor(() => expect(get(headerSave)?.dirty).toBe(true));
+    await get(headerSave)!.save();
     await waitFor(() => expect(api.updateProfile).toHaveBeenCalledOnce());
     expect(api.updateProfile).toHaveBeenCalledWith({ relay_delivery: 'sms' });
   });

@@ -10,8 +10,8 @@
     Input,
     MultiSelect,
     ToggleGroup,
+    SettingsLayout,
   } from '@minot/ui';
-  import { SettingsLayout } from '$lib/components/settings';
   import FolderPicker from '$lib/components/FolderPicker.svelte';
   import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
   import { deviceModel, shellAtLeast, shellRunsServiceWorker } from '$lib/platform/native';

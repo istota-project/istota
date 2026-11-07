@@ -19,7 +19,7 @@ vi.mock('$lib/api', () => api);
 await fillApiDouble(api);
 
 import { getHealthSettings, putHealthSettings } from '$lib/api';
-import { settingsSave } from '$lib/stores/settingsSave.svelte';
+import { headerSave } from '@minot/ui/stores/headerSave';
 import Page from './+page.svelte';
 
 const SETTINGS: HealthSettings = {
@@ -39,7 +39,7 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-const dirty = () => get(settingsSave)?.dirty;
+const dirty = () => get(headerSave)?.dirty;
 
 async function mountPage() {
   render(Page);
@@ -68,7 +68,7 @@ describe('health settings unsaved changes', () => {
     await fireEvent.input(heightCm(), { target: { value: '180' } });
     await waitFor(() => expect(dirty()).toBe(true));
 
-    await get(settingsSave)!.save();
+    await get(headerSave)!.save();
     expect(vi.mocked(putHealthSettings).mock.calls[0][0].height_cm).toBe(180);
     await waitFor(() => expect(dirty()).toBe(false));
   });

@@ -13,7 +13,7 @@
     type BadgeVariant,
   } from '@minot/ui';
   import { setSecret, deleteSecret, type ServiceCard as ServiceCardData } from '$lib/api';
-  import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
+  import { useHeaderSave } from '@minot/ui/stores/headerSave';
 
   interface Props {
     service: ServiceCardData;
@@ -117,7 +117,7 @@
   // writable fields withdraws and leaves the button to the rest of the page.
   // Clearing a stored secret stays an immediate, separately confirmed action:
   // it is a deletion, not an edit awaiting a save.
-  useSettingsSave(() => (service.fields.length > 0 ? { dirty, saving, save: saveAll } : null));
+  useHeaderSave(() => (service.fields.length > 0 ? { dirty, saving, save: saveAll } : null));
 </script>
 
 <Card title={service.label} description={service.hint || undefined} data-status={service.status}>
@@ -130,7 +130,7 @@
     {#if service.last_updated}
       <span class="caption">Updated {service.last_updated}</span>
     {/if}
-    <!-- No Save button: the app bar owns it (see useSettingsSave above). The
+    <!-- No Save button: the app bar owns it (see useHeaderSave above). The
 		     flash stays, because with one shared button it is the only thing that
 		     says *this* card is what got written. -->
     {#if savedFlash}

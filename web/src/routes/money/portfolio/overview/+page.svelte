@@ -10,8 +10,8 @@
   import { seriesColors } from '$lib/money/portfolioPalette';
   import { chartChrome } from '$lib/chartTheme';
   import { theme } from '$lib/stores/theme';
-  import { Card, EmptyState, Alert, StatTile, LoadState } from '@minot/ui';
-  import { directionColor } from '$lib/money/direction';
+  import { Card, EmptyState, Alert, StatTile, LoadState, SignedValue } from '@minot/ui';
+  import { signedColor, signedDirection } from '@minot/ui/ui/signed';
   import { portfolioGroup, portfolioKnownGroups } from '$lib/money/stores/portfolio';
 
   Chart.register(DoughnutController, ArcElement, Tooltip, Legend);
@@ -65,11 +65,6 @@
         maximumFractionDigits: fractionDigits,
       })
     );
-  }
-
-  function pct(value: number | null): string {
-    if (value == null) return '—';
-    return `${value >= 0 ? '+' : ''}${(value * 100).toFixed(1)}%`;
   }
 
   function qty(value: number | null): string {
@@ -189,7 +184,7 @@
           label="Unrealized P&amp;L"
           surface
           align="center"
-          valueColor={directionColor(totalGain ?? 0)}
+          valueColor={signedColor(signedDirection(totalGain))}
         >
           {usd(totalGain)}
         </StatTile>
@@ -244,19 +239,21 @@
             </span>
             <span class="num col-qty">{qty(holding.quantity)}</span>
             <span class="num col-value">{usd(holding.value, 2)}</span>
-            <span
-              class="num col-gain"
-              class:positive={(holding.gain ?? 0) > 0}
-              class:negative={(holding.gain ?? 0) < 0}
-            >
-              {usd(holding.gain, 2)}
+            <!-- P&L carries no `+`, as Value beside it does not; its direction still tints it. -->
+            <span class="num col-gain">
+              <SignedValue
+                value={holding.gain}
+                prefix="$"
+                signed={false}
+                direction={signedDirection(holding.gain)}
+              />
             </span>
-            <span
-              class="num col-gainpct"
-              class:positive={(holding.gain_pct ?? 0) > 0}
-              class:negative={(holding.gain_pct ?? 0) < 0}
-            >
-              {pct(holding.gain_pct)}
+            <span class="num col-gainpct">
+              <SignedValue
+                value={holding.gain_pct == null ? null : holding.gain_pct * 100}
+                digits={1}
+                suffix="%"
+              />
             </span>
           </div>
         {/each}

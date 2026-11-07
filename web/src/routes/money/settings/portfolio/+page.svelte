@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { SettingsLayout } from '$lib/components/settings';
+  import { SettingsLayout } from '@minot/ui';
   import PortfolioAccountsCard from '$lib/components/money/PortfolioAccountsCard.svelte';
   import PortfolioClassificationsCard from '$lib/components/money/PortfolioClassificationsCard.svelte';
 

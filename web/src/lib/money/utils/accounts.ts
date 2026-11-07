@@ -1,3 +1,4 @@
+import type { SignedDirection } from '@minot/ui';
 import type { AccountRow } from '$lib/money/api';
 
 export interface AccountNode {
@@ -40,6 +41,16 @@ export function buildTree(rows: AccountRow[], defaultExpanded?: Set<string>): Ac
   }
 
   return root;
+}
+
+/**
+ * The direction of an `Income:` or `Expenses:` amount, which is income or
+ * expense by kind whatever its sign; none for any other account.
+ */
+export function accountDirection(account: string): SignedDirection | undefined {
+  if (account.startsWith('Income:')) return 'positive';
+  if (account.startsWith('Expenses:')) return 'negative';
+  return undefined;
 }
 
 export function shouldInvert(account: string): boolean {

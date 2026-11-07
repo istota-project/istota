@@ -3,7 +3,7 @@
   import { AuthError, saveWalletPolicy, type WalletPolicy, type WalletSettings } from '$lib/api';
   import { Alert, Field, FormStack, Input, Select, Card, Checkbox } from '@minot/ui';
   import { createDraft } from '@minot/ui/ui/draft.svelte';
-  import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
+  import { useHeaderSave } from '@minot/ui/stores/headerSave';
   let {
     policy,
     precision,
@@ -69,7 +69,7 @@
       saving = false;
     }
   }
-  useSettingsSave(() => (writable ? { dirty: form.dirty, saving, save } : null));
+  useHeaderSave(() => (writable ? { dirty: form.dirty, saving, save } : null));
 </script>
 
 <Card

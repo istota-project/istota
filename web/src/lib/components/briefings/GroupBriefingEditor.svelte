@@ -49,7 +49,7 @@
     TextArea,
   } from '@minot/ui';
   import { trackChanges } from '@minot/ui/ui/draft.svelte';
-  import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
+  import { useHeaderSave } from '@minot/ui/stores/headerSave';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
   import { notifyError, notifySuccess } from '@minot/ui/stores/notices';
   import { getCurrentUser } from '$lib/userContext';
@@ -326,7 +326,7 @@
     }
   }
 
-  useSettingsSave(() => (author ? { dirty, saving: busy, save } : null));
+  useHeaderSave(() => (author ? { dirty, saving: busy, save } : null));
 
   // A refusal stays in the approval dialog; losing access closes it, since the
   // editor behind it is replaced by the access-lost notice.

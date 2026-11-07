@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { LoadState, Disclosure } from '@minot/ui';
+  import { LoadState, Disclosure, SignedValue } from '@minot/ui';
+  import { signedDirection } from '@minot/ui/ui/signed';
   import { goto } from '$app/navigation';
   import { getReport, type AccountRow } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
@@ -99,12 +100,14 @@
   <div class="report-content">
     <div class="net-worth-banner">
       <span class="nw-label">Net worth</span>
-      <span
-        class="nw-amount"
-        class:positive={totals.netWorth >= 0}
-        class:negative={totals.netWorth < 0}
-      >
-        {formatAmount(totals.netWorth, totals.currency)}
+      <!-- A net worth of zero is on the positive side. -->
+      <span class="nw-amount">
+        <SignedValue
+          value={totals.netWorth}
+          signed={false}
+          suffix=" {totals.currency}"
+          direction={signedDirection(totals.netWorth) === 'negative' ? 'negative' : 'positive'}
+        />
       </span>
     </div>
 
@@ -179,13 +182,6 @@
     font-weight: var(--weight-semibold);
     font-size: var(--text-lg);
     font-variant-numeric: tabular-nums;
-  }
-
-  .nw-amount.positive {
-    color: var(--money-income);
-  }
-  .nw-amount.negative {
-    color: var(--money-expense);
   }
 
   .section-total {

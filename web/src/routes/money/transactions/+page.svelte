@@ -14,7 +14,8 @@
     getTransactionNavigation,
   } from '$lib/money/stores/transactions';
   import { selectedLedger } from '$lib/money/stores/ledger';
-  import { displayBalance } from '$lib/money/utils/accounts';
+  import { accountDirection, displayBalance } from '$lib/money/utils/accounts';
+  import { signedColor } from '@minot/ui/ui/signed';
   import { EmptyState, KebabMenu, LoadState, Pagination, Timestamp } from '@minot/ui';
   import TransactionForm from '$lib/components/money/TransactionForm.svelte';
 
@@ -240,6 +241,7 @@
         {#each group.rows as txn, i (group.date + '-' + i)}
           {@const key = txnKey(txn)}
           {@const isExpanded = expandedKeys.has(key)}
+          {@const direction = accountDirection(txn.account)}
           <div
             class="record-row"
             class:is-expanded={isExpanded}
@@ -272,8 +274,8 @@
             >
             <span
               class="txn-amount num"
-              class:income={txn.account.startsWith('Income:')}
-              class:expense={txn.account.startsWith('Expenses:')}
+              data-direction={direction}
+              style:color={direction && signedColor(direction)}
               >{displayBalance(txn.position, txn.account)}</span
             >
             <KebabMenu items={[{ label: 'Edit transaction', onSelect: () => openEdit(txn) }]} />
@@ -371,13 +373,6 @@
 
   .txn-amount {
     min-width: 6rem;
-  }
-
-  .txn-amount.income {
-    color: var(--money-income);
-  }
-  .txn-amount.expense {
-    color: var(--money-expense);
   }
 
   .postings {

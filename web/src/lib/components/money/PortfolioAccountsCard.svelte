@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { EmptyState, Field, Input, Card, Checkbox, LoadState } from '@minot/ui';
-  import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
+  import { useHeaderSave } from '@minot/ui/stores/headerSave';
   import { notifyError, notifySuccess } from '@minot/ui/stores/notices';
   import {
     getPortfolioAccounts,
@@ -14,7 +14,7 @@
   // filtering by — an owner, a purpose, a household. Excluded accounts stay
   // imported but drop out of every summary, chart and total — reversibly.
   // The whole card is page state, so it saves from the app bar with the rest
-  // of the page (useSettingsSave) — no per-row buttons, and each row is a
+  // of the page (useHeaderSave) — no per-row buttons, and each row is a
   // stacked block rather than a table so it stays readable on a phone.
 
   interface EditRow {
@@ -103,7 +103,7 @@
     }
   }
 
-  useSettingsSave(() =>
+  useHeaderSave(() =>
     rows.length > 0 ? { dirty: rows.some(isDirty), saving, save: saveAll } : null,
   );
 </script>

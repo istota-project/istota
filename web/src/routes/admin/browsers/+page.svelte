@@ -3,8 +3,7 @@
   import { getAdminBrowsers, type AdminBrowsers } from '$lib/api';
   import BrowserConsole from '$lib/admin/browsers/BrowserConsole.svelte';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
-  import ShellScrollReset from '$lib/components/ShellScrollReset.svelte';
-  import { Button, Card, Disclosure, LoadState, Timestamp } from '@minot/ui';
+  import { Button, Card, Disclosure, LoadState, Timestamp, ShellScrollReset } from '@minot/ui';
 
   let report = $state<AdminBrowsers | null>(null);
   let loading = $state(true);

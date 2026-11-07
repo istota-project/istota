@@ -22,10 +22,15 @@
     LoadState,
     CopyButton,
     LoadMore,
+    LogPane,
   } from '@minot/ui';
   import { mergeRecords, trimBuffer } from '$lib/admin/logRecords';
   import { notifyError } from '@minot/ui/stores/notices';
   import { latest } from '@minot/ui/ui/latest';
+  import {
+    holdScrollPosition,
+    scrollToBottom as scrollPaneToBottom,
+  } from '@minot/ui/ui/tailFollow';
 
   const PAGE = 200;
 
@@ -84,7 +89,7 @@
   let stream: EventSource | null = null;
   let streamRetries = 0;
   let streamRetryTimer: ReturnType<typeof setTimeout> | null = null;
-  let logEl = $state<HTMLDivElement | null>(null);
+  let logEl = $state<HTMLElement>();
   let atBottom = $state(true);
 
   const MAX_STREAM_RETRIES = 5;
@@ -186,11 +191,9 @@
     // is in flight to be superseded by it, and any `load` after it supersedes it.
     const current = loads.next();
     loadingOlder = true;
-    // Capture the scroll offset, not just the height: the assignment below must
-    // *overwrite* whatever the browser's own scroll anchoring did, not add to
-    // it. Same shape as the chat transcript's history prepend.
-    const prevTop = logEl?.scrollTop ?? 0;
-    const prevHeight = logEl?.scrollHeight ?? 0;
+    // Prepending shifts everything down by the height of what was added, and a
+    // reader walking backwards through the log must not lose their place.
+    const restore = logEl ? holdScrollPosition(logEl) : null;
     try {
       const page = await getAdminLogPage(sourceId, {
         ...applied,
@@ -204,10 +207,7 @@
       nextBefore = page.next_before;
       truncated = page.truncated;
       await tick();
-      // Hold the reading position: prepending shifts everything down by the
-      // height of what was added, and losing your place is the one thing a log
-      // reader must not do while you are walking backwards through it.
-      if (logEl) logEl.scrollTop = logEl.scrollHeight - prevHeight + prevTop;
+      restore?.();
     } catch (e) {
       if (current()) notifyError(describeError(e), { key: 'admin-logs:older' });
     } finally {
@@ -246,9 +246,6 @@
         // top of the buffer — paging older would leave an invisible hole.
         nextBefore = null;
       }
-      void tick().then(() => {
-        if (atBottom) scrollToBottom();
-      });
     });
 
     es.addEventListener('reset', () => {
@@ -306,12 +303,7 @@
   }
 
   function scrollToBottom() {
-    if (logEl) logEl.scrollTop = logEl.scrollHeight;
-  }
-
-  function onScroll() {
-    if (!logEl) return;
-    atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
+    if (logEl) scrollPaneToBottom(logEl);
   }
 
   function pickSource(id: string) {
@@ -453,7 +445,7 @@
     <Alert appearance="inline" variant="info">{activeSource.detail}</Alert>
   {/if}
 
-  <div class="log-pane" bind:this={logEl} onscroll={onScroll}>
+  <LogPane label="Log entries" height="auto" bind:atBottom bind:ref={logEl}>
     <!-- A failed load is the alert above, beside the filters that caused it. -->
     <LoadState loading={loading && records.length === 0} empty={records.length === 0 && !error}>
       {#snippet emptyState()}
@@ -496,7 +488,7 @@
         </div>
       {/each}
     </LoadState>
-  </div>
+  </LogPane>
 
   <div class="log-footer">
     <span class="log-count caption num">{records.length} shown</span>
@@ -566,21 +558,13 @@
     margin-top: var(--space-1);
   }
 
-  /* The reader itself: a fixed-height scroll pane rather than a growing page,
-     so the toolbar and footer stay reachable with thousands of lines loaded. */
-  .log-pane {
+  /* Placement only: a bounded pane that fills the page's column rather than a
+     growing page, so the toolbar and footer stay reachable with thousands of
+     lines loaded. */
+  .logs-page :global(.ui-log-pane) {
     flex: 1;
     min-height: 20rem;
     max-height: 70vh;
-    overflow-y: auto;
-    overflow-x: hidden;
-    background: var(--surface-card);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-md);
-    padding: var(--space-2);
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    line-height: var(--leading-normal);
   }
 
   .log-row {

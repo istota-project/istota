@@ -1,8 +1,8 @@
 <script lang="ts">
   import { monarchLogin } from '$lib/api';
   import { getMoneyServices } from '$lib/money/settingsContext';
-  import { ServiceCard, SettingsLayout } from '$lib/components/settings';
-  import { Button, HintPopover, Input, Card, Field, Disclosure } from '@minot/ui';
+  import { ServiceCard } from '$lib/components/settings';
+  import { Button, HintPopover, Input, Card, Field, Disclosure, SettingsLayout } from '@minot/ui';
 
   const moneyServices = getMoneyServices();
 

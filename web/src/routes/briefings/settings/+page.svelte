@@ -38,9 +38,9 @@
     Field,
     Checkbox,
     LoadState,
+    SettingsLayout,
   } from '@minot/ui';
-  import { SettingsLayout } from '$lib/components/settings';
-  import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
+  import { useHeaderSave } from '@minot/ui/stores/headerSave';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
   import { notifyError } from '@minot/ui/stores/notices';
   import { getCurrentUser } from '$lib/userContext';
@@ -117,7 +117,7 @@
     }
   }
 
-  useSettingsSave(() =>
+  useHeaderSave(() =>
     moduleEnabled && view === 'delivery' && profileLoaded
       ? { dirty: emailHtml !== emailHtmlSaved, saving: emailHtmlSaving, save: saveEmailHtml }
       : null,

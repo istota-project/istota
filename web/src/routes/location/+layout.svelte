@@ -38,8 +38,8 @@
     Chip,
     EmptyState,
     Timestamp,
+    HeaderSave,
   } from '@minot/ui';
-  import { HeaderSave } from '$lib/components/settings';
   import { Cog, Pencil, X } from '@lucide/svelte';
   import { formatMinutes } from '@minot/ui/dateFormat';
 

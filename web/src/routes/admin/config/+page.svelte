@@ -19,7 +19,7 @@
   import { Button, Card, EmptyState, Input, Alert, Disclosure, LoadState } from '@minot/ui';
   import { getCurrentUser } from '$lib/userContext';
   import { notifyWarning } from '@minot/ui/stores/notices';
-  import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
+  import { useHeaderSave } from '@minot/ui/stores/headerSave';
   import AdminsEditor from '$lib/admin/config/AdminsEditor.svelte';
   import FieldRow from '$lib/admin/config/FieldRow.svelte';
   import FieldControl from '$lib/admin/config/FieldControl.svelte';
@@ -140,7 +140,7 @@
   /** Form changes the raw editor cannot be combined with: ops, and moves. */
   let opCount = $derived(Object.keys(combined.ops).length + combined.move_to_file.length);
 
-  useSettingsSave(() =>
+  useHeaderSave(() =>
     editable
       ? {
           dirty: count > 0,

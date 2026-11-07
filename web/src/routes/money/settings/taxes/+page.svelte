@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { SettingsLayout } from '$lib/components/settings';
   import { X } from '@lucide/svelte';
   import {
     Input,
@@ -11,10 +10,11 @@
     IconButton,
     AutocompleteInput,
     FormStack,
+    SettingsLayout,
   } from '@minot/ui';
   import { createDraft } from '@minot/ui/ui/draft.svelte';
   import { selectedLedger } from '$lib/money/stores/ledger';
-  import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
+  import { useHeaderSave } from '@minot/ui/stores/headerSave';
   import { notifyError, notifySuccess } from '@minot/ui/stores/notices';
   import TaxDisclaimer from '$lib/components/money/TaxDisclaimer.svelte';
   import TaxRatesCard from '$lib/components/money/TaxRatesCard.svelte';
@@ -259,13 +259,12 @@
       notifySuccess('Tax settings saved');
     } catch (e) {
       notifyError(e instanceof Error ? e.message : 'Failed to save tax settings');
-      throw e;
     } finally {
       saving = false;
     }
   }
 
-  useSettingsSave(() => ({
+  useHeaderSave(() => ({
     dirty,
     saving,
     save,

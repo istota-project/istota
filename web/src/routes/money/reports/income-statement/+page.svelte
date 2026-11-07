@@ -1,15 +1,16 @@
 <script lang="ts">
-  import { LoadState, Disclosure } from '@minot/ui';
+  import { LoadState, Disclosure, SignedValue } from '@minot/ui';
+  import { signedColor, signedDirection } from '@minot/ui/ui/signed';
   import { goto } from '$app/navigation';
   import { getReport, type AccountRow } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { selectedYear, transactionsUrl } from '$lib/money/stores/transactions';
   import {
+    accountDirection,
     buildTree,
     displayBalance,
     parseAmount,
     shouldInvert,
-    formatAmount,
     type AccountNode,
   } from '$lib/money/utils/accounts';
 
@@ -79,8 +80,13 @@
 <LoadState {loading} {error}>
   <div class="report-content">
     <Disclosure variant="section" summary="Income" bind:open={incomeOpen}>
-      {#snippet trailing()}<span class="section-total income"
-          >{formatAmount(totals.income, totals.currency)}</span
+      {#snippet trailing()}<span class="section-total"
+          ><SignedValue
+            value={totals.income}
+            signed={false}
+            suffix=" {totals.currency}"
+            direction="positive"
+          /></span
         >{/snippet}
       <div class="tree-section">
         {#each incomeTree as node (node.fullName)}
@@ -90,8 +96,13 @@
     </Disclosure>
 
     <Disclosure variant="section" summary="Expenses" bind:open={expenseOpen}>
-      {#snippet trailing()}<span class="section-total expense"
-          >{formatAmount(totals.expenses, totals.currency)}</span
+      {#snippet trailing()}<span class="section-total"
+          ><SignedValue
+            value={totals.expenses}
+            signed={false}
+            suffix=" {totals.currency}"
+            direction="negative"
+          /></span
         >{/snippet}
       <div class="tree-section">
         {#each expenseTree as node (node.fullName)}
@@ -102,8 +113,14 @@
 
     <div class="net-row">
       <span class="net-label">Net income</span>
-      <span class="net-amount" class:positive={totals.net >= 0} class:negative={totals.net < 0}>
-        {formatAmount(totals.net, totals.currency)}
+      <!-- A net of zero is break-even, on the income side. -->
+      <span class="net-amount">
+        <SignedValue
+          value={totals.net}
+          signed={false}
+          suffix=" {totals.currency}"
+          direction={signedDirection(totals.net) === 'negative' ? 'negative' : 'positive'}
+        />
       </span>
     </div>
   </div>
@@ -117,10 +134,11 @@
       onclick={() => navigateToAccount(node.fullName)}>{node.name}</button
     >
     {#if node.balance}
+      {@const direction = accountDirection(node.fullName)}
       <span
         class="tree-balance num"
-        class:income={node.fullName.startsWith('Income:')}
-        class:expense={node.fullName.startsWith('Expenses:')}
+        data-direction={direction}
+        style:color={direction && signedColor(direction)}
       >
         {displayBalance(node.balance, node.fullName)}
       </span>
@@ -139,26 +157,12 @@
     font-size: var(--text-base);
   }
 
-  .section-total.income {
-    color: var(--money-income);
-  }
-  .section-total.expense {
-    color: var(--money-expense);
-  }
-
   .tree-section {
     padding: var(--space-1) 0 var(--space-2);
   }
 
   .tree-balance {
     margin-left: auto;
-  }
-
-  .tree-balance.income {
-    color: var(--money-income);
-  }
-  .tree-balance.expense {
-    color: var(--money-expense);
   }
 
   .net-row {
@@ -179,12 +183,5 @@
     font-weight: var(--weight-semibold);
     font-size: var(--text-base);
     font-variant-numeric: tabular-nums;
-  }
-
-  .net-amount.positive {
-    color: var(--money-income);
-  }
-  .net-amount.negative {
-    color: var(--money-expense);
   }
 </style>

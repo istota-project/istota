@@ -9,7 +9,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { get } from 'svelte/store';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import type { User, UserProfile } from '$lib/api';
-import { settingsSave } from '$lib/stores/settingsSave.svelte';
+import { headerSave } from '@minot/ui/stores/headerSave';
 
 function profile(folder: string | null, managed: string[] = []): UserProfile {
   return {
@@ -122,8 +122,8 @@ describe('the Quick notes card', () => {
 
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(folderInput()).toHaveValue('Notes/Inbox');
-    await waitFor(() => expect(get(settingsSave)?.dirty).toBe(true));
-    await get(settingsSave)!.save();
+    await waitFor(() => expect(get(headerSave)?.dirty).toBe(true));
+    await get(headerSave)!.save();
     await waitFor(() => expect(api.updateProfile).toHaveBeenCalledOnce());
     expect(api.updateProfile).toHaveBeenCalledWith({ quick_notes_folder: 'Notes/Inbox' });
   });
@@ -142,7 +142,7 @@ describe('the Quick notes card', () => {
 
     await fireEvent.click(screen.getByRole('button', { name: 'Clear the quick notes folder' }));
     expect(folderInput()).toHaveValue('');
-    await get(settingsSave)!.save();
+    await get(headerSave)!.save();
     await waitFor(() => expect(api.updateProfile).toHaveBeenCalledOnce());
     expect(api.updateProfile).toHaveBeenCalledWith({ quick_notes_folder: null });
   });
@@ -160,8 +160,8 @@ describe('the Quick notes card', () => {
     await fireEvent.click(await dialog.findByRole('button', { name: 'Notes' }));
     await dialog.findByRole('button', { name: 'Inbox' });
     await fireEvent.click(dialog.getByRole('button', { name: 'Choose this folder' }));
-    await waitFor(() => expect(get(settingsSave)?.dirty).toBe(true));
-    await get(settingsSave)!.save();
+    await waitFor(() => expect(get(headerSave)?.dirty).toBe(true));
+    await get(headerSave)!.save();
     expect(await screen.findByText('That path is not a folder in My files.')).toBeInTheDocument();
     expect(folderInput()).toHaveValue('Notes');
   });

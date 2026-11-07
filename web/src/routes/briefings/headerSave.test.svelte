@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
+  import { useHeaderSave } from '@minot/ui/stores/headerSave';
 
-  useSettingsSave(() => ({ dirty: true, saving: false, save: async () => {} }));
+  useHeaderSave(() => ({ dirty: true, saving: false, save: async () => {} }));
 </script>

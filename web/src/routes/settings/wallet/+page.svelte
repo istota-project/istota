@@ -2,13 +2,8 @@
   import { onMount } from 'svelte';
   import { AuthError, getWallet, type WalletSettings } from '$lib/api';
   import { getCurrentUser } from '$lib/userContext';
-  import {
-    SettingsLayout,
-    WalletCardsCard,
-    WalletPolicyCard,
-    WalletPurchasesCard,
-  } from '$lib/components/settings';
-  import { Alert } from '@minot/ui';
+  import { WalletCardsCard, WalletPolicyCard, WalletPurchasesCard } from '$lib/components/settings';
+  import { Alert, SettingsLayout } from '@minot/ui';
   const identity = getCurrentUser();
   let data: WalletSettings | null = $state(null);
   let error = $state('');
