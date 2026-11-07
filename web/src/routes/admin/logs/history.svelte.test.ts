@@ -6,7 +6,12 @@ import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
 await fillApiDouble(api);
-import { getAdminLogSources, getAdminLogPage, type AdminLogSource } from '$lib/api';
+import {
+  getAdminLogSources,
+  getAdminLogPage,
+  type AdminLogRecord,
+  type AdminLogSource,
+} from '$lib/api';
 import Page from './+page.svelte';
 
 const sources: AdminLogSource[] = ['app', 'tasks'].map((id) => ({
@@ -117,5 +122,53 @@ describe('a load that outlives the page', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe('the log pane', () => {
+  const record = (n: number): AdminLogRecord => ({
+    cursor: `app.log:${n}`,
+    timestamp: null,
+    level: 'INFO',
+    logger: 'istota',
+    message: `line ${n}`,
+    task_id: null,
+    user_id: null,
+    source_type: null,
+  });
+
+  it('offers Jump to latest once scrolled up, and holds the place on Load older', async () => {
+    vi.mocked(getAdminLogPage).mockResolvedValueOnce({
+      records: [record(2), record(3)],
+      next_before: 'app.log:2',
+      tail_cursor: 'app.log:3',
+      truncated: false,
+    });
+    render(Page);
+    const pane = await screen.findByRole('log', { name: 'Log entries' });
+    await screen.findByText('line 3');
+    let height = 1000;
+    Object.defineProperty(pane, 'scrollHeight', { configurable: true, get: () => height });
+    Object.defineProperty(pane, 'clientHeight', { configurable: true, value: 100 });
+
+    pane.scrollTop = 300;
+    await fireEvent.scroll(pane);
+    const jump = await screen.findByRole('button', { name: 'Jump to latest' });
+
+    // Older records add 400px above the 300px offset the reader was at.
+    vi.mocked(getAdminLogPage).mockImplementationOnce(async () => {
+      height = 1400;
+      return { records: [record(1)], next_before: null, tail_cursor: null, truncated: false };
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Load older' }));
+    await screen.findByText('line 1');
+    await waitFor(() => expect(pane.scrollTop).toBe(700));
+
+    await fireEvent.click(jump);
+    expect(pane.scrollTop).toBe(1400);
+    await fireEvent.scroll(pane);
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Jump to latest' })).toBeNull(),
+    );
   });
 });
