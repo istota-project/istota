@@ -52,20 +52,6 @@ describe('the token split', () => {
     expect(REUSABLE).not.toMatch(product);
   });
 
-  it("aliases the app's money pair to the library's signed pair", () => {
-    // The values live once, in minot's tokens.css, in both themes; the app's
-    // names only point at them.
-    for (const selector of [':root', ":root[data-theme='light']"]) {
-      const product = declarations(PRODUCT, selector);
-      expect(product['--money-income'], selector).toBe('var(--signed-pos)');
-      expect(product['--money-expense'], selector).toBe('var(--signed-neg)');
-    }
-    expect(declarations(REUSABLE, ':root')).toHaveProperty('--signed-pos');
-    expect(declarations(REUSABLE, ':root')).toHaveProperty('--signed-neg');
-    expect(declarations(REUSABLE, ":root[data-theme='light']")).toHaveProperty('--signed-pos');
-    expect(declarations(REUSABLE, ":root[data-theme='light']")).toHaveProperty('--signed-neg');
-  });
-
   it('loads the app sheet straight after the whole library entry', () => {
     const order = layerPaths().map((path) => path.split('/').pop());
     expect(order.indexOf('app-tokens.css')).toBe(order.indexOf('primitives.css') + 1);

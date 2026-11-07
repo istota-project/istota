@@ -99,7 +99,7 @@ Still their own buttons, because they are per-record forms rather than the page'
 
 ## App tokens
 
-`lib/styles/app-tokens.css` holds the tokens that name this product: the chat row metrics (`--chat-*`), the room colours, the WhatsApp accent and the category chips, the location map's markers and icon filter, the sigil filter, the setup column (`--setup-max`), and the money aliases (`--money-income: var(--signed-pos)`, `--money-expense: var(--signed-neg)`, restated in the light block). A page writes the money names. It declares custom properties and nothing else, and a token goes in it or in minot's `tokens.css`, never both. `lib/styles/tokens.test.ts` reads the two sheets as one: no token in both, theme parity over the pair, the money aliases, the room palette.
+`lib/styles/app-tokens.css` holds the tokens that name this product: the chat row metrics (`--chat-*`), the room colours, the WhatsApp accent and the category chips, the location map's markers and icon filter, the sigil filter, and the setup column (`--setup-max`). Money amounts take their colour from minot's `SignedValue` or `signedColor`, never from a token of this app's. It declares custom properties and nothing else, and a token goes in it or in minot's `tokens.css`, never both. `lib/styles/tokens.test.ts` reads the two sheets as one: no token in both, theme parity over the pair, the room palette.
 
 ## Stylesheet layers
 
