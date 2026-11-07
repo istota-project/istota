@@ -25,6 +25,7 @@
     StatusDot,
     Meter,
   } from '@minot/ui';
+  import { thresholdTone, toneColor } from '@minot/ui/ui/threshold';
   import UserAvatar from '$lib/components/UserAvatar.svelte';
   import UserCell from '$lib/admin/UserCell.svelte';
   import { getCurrentUser } from '$lib/userContext';
@@ -130,16 +131,11 @@
     high: number | undefined,
   ): string {
     if (typeof warn !== 'number' || typeof high !== 'number') return '';
-    if (!Number.isFinite(percent)) return '';
-    if (percent >= high) return 'var(--status-danger-fg)';
-    // Ordered high-first, so an inverted pair arriving past the loader's
-    // correction collapses the amber band into danger at the lower of the two
-    // rather than tinting nothing. That is the same reading doctor reaches: it
-    // has one WARN branch at `min(warn, high)`, and every percentage it flags
-    // is one this tints. `Math.min` here would be dead code — the branch above
-    // has already returned for everything at or over `high`.
-    if (percent >= warn) return 'var(--status-warn-fg)';
-    return 'var(--status-success-fg)';
+    // Danger is checked first, so an inverted pair collapses the amber band into
+    // danger at the lower figure: the same reading doctor's `min(warn, high)` gives.
+    return toneColor(
+      thresholdTone(percent / 100, { warn: warn / 100, danger: high / 100 }, 'success'),
+    );
   }
 
   /**
