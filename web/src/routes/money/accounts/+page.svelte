@@ -6,7 +6,13 @@
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { selectedYear, transactionsUrl } from '$lib/money/stores/transactions';
   import { accountFilter } from '$lib/money/stores/accounts';
-  import { buildTree, displayBalance, type AccountNode } from '$lib/money/utils/accounts';
+  import { signedColor } from '@minot/ui/ui/signed';
+  import {
+    accountDirection,
+    buildTree,
+    displayBalance,
+    type AccountNode,
+  } from '$lib/money/utils/accounts';
 
   function navigateToAccount(fullName: string) {
     goto(transactionsUrl(fullName, $selectedYear));
@@ -105,10 +111,11 @@
           onclick={() => navigateToAccount(node.fullName)}>{node.name}</button
         >
         {#if node.balance}
+          {@const direction = accountDirection(node.fullName)}
           <span
             class="account-balance num"
-            class:income={node.fullName.startsWith('Income:')}
-            class:expense={node.fullName.startsWith('Expenses:')}
+            data-direction={direction}
+            style:color={direction && signedColor(direction)}
             >{displayBalance(node.balance, node.fullName)}</span
           >
         {/if}
@@ -138,12 +145,5 @@
 
   .account-balance {
     margin-left: auto;
-  }
-
-  .account-balance.income {
-    color: var(--money-income);
-  }
-  .account-balance.expense {
-    color: var(--money-expense);
   }
 </style>

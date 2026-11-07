@@ -38,6 +38,7 @@
     KebabMenu,
     Modal,
     LoadState,
+    SignedValue,
   } from '@minot/ui';
   import { notifyError, notifySuccess } from '@minot/ui/stores/notices';
   import { portfolioGroupBy, type PortfolioGroupBy } from '$lib/money/stores/portfolio';
@@ -485,12 +486,8 @@
                   <span class="diff-arrow">→</span>
                   {usd(entry.value_to, 2)}
                 </span>
-                <span
-                  class="num diff-col-change"
-                  class:positive={delta > 0}
-                  class:negative={delta < 0}
-                >
-                  {delta > 0 ? '+' : ''}{usd(delta, 2)}
+                <span class="num diff-col-change">
+                  <SignedValue value={delta} prefix="$" />
                 </span>
               </div>
             {/each}
@@ -635,14 +632,6 @@
   .diff-was,
   .diff-arrow {
     color: var(--text-dim);
-  }
-
-  .positive {
-    color: var(--money-income);
-  }
-
-  .negative {
-    color: var(--money-expense);
   }
 
   @media (max-width: 640px) {

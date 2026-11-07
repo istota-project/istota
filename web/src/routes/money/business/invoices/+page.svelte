@@ -26,6 +26,7 @@
     type KebabItem,
     SortHeader,
     LoadState,
+    SignedValue,
   } from '@minot/ui';
   import VoidInvoiceDialog from '$lib/components/money/VoidInvoiceDialog.svelte';
   import GenerateInvoicesDialog from '$lib/components/money/GenerateInvoicesDialog.svelte';
@@ -428,7 +429,9 @@
                     >{formatQty(item.quantity)} &times; ${formatAmount(item.rate)}</span
                   >
                   {#if item.discount > 0}
-                    <span class="detail-discount">-${formatAmount(item.discount)}</span>
+                    <span class="detail-discount"
+                      ><SignedValue value={-item.discount} prefix="$" /></span
+                    >
                   {/if}
                   <span class="detail-amount num">${formatAmount(item.amount)}</span>
                 </div>
@@ -571,7 +574,6 @@
   }
 
   .detail-discount {
-    color: var(--money-expense);
     white-space: nowrap;
     flex-shrink: 0;
   }
