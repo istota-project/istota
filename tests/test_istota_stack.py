@@ -4147,6 +4147,67 @@ class TestTheConfigApplyComposeFile:
         assert applier.DEFAULT_REQUESTS_DIR == "/data/requests"
 
 
+class TestTheRcloneRcComposeFile:
+    """#939. The mount's rc reaches the daemon only from
+    docker-compose.rclone-rc.yml, which istota-stack adds only for the Nextcloud
+    mount once provision.sh has made the socket directory and the password."""
+
+    PROBE = ('docker() { echo "rc=${ISTOTA_RCLONE_RC_DIR-unset},'
+             '${ISTOTA_RCLONE_RC_ENV-unset} $*"; }; compose ps')
+
+    def _ready(self, fx, storage="nextcloud"):
+        shutil.copy(REPO / "docker" / "docker-compose.rclone-rc.yml", fx.src / "docker")
+        (fx.stack / "host.env").write_text(f"STORAGE={storage}\nINGRESS=local\n")
+        (fx.stack / "rclone-rc").mkdir()
+        (fx.stack / "rclone-rc.env").write_text("RCLONE_RC_USER=istota\nRCLONE_RC_PASS=x\n")
+
+    def test_it_is_added_for_the_nextcloud_mount(self, fx):
+        self._ready(fx)
+        result = _source(fx, self.PROBE)
+        assert result.returncode == 0, result.stderr
+        assert f"-f {fx.src}/docker/docker-compose.rclone-rc.yml" in result.stdout
+        assert f"rc={fx.stack}/rclone-rc,{fx.stack}/rclone-rc.env" in result.stdout
+
+    @pytest.mark.parametrize("missing", ["storage", "dir", "env", "file"])
+    def test_it_is_left_out_when_anything_is_missing(self, fx, missing):
+        self._ready(fx, storage="local" if missing == "storage" else "nextcloud")
+        if missing == "dir":
+            (fx.stack / "rclone-rc").rmdir()
+        elif missing == "env":
+            (fx.stack / "rclone-rc.env").unlink()
+        elif missing == "file":
+            (fx.src / "docker" / "docker-compose.rclone-rc.yml").unlink()
+        result = _source(fx, self.PROBE)
+        assert result.returncode == 0, result.stderr
+        assert "rclone-rc.yml" not in result.stdout
+        assert "rc=unset,unset" in result.stdout
+
+    def test_the_file_binds_the_rc_into_the_daemon_alone_read_only(self):
+        import yaml
+
+        from istota.nextcloud import rclone_rc
+
+        doc = yaml.safe_load((REPO / "docker" / "docker-compose.rclone-rc.yml").read_text())
+        assert set(doc["services"]) == {"daemon"}
+        daemon = doc["services"]["daemon"]
+        assert daemon["environment"] == {rclone_rc.RC_ENV_VAR: "1"}
+        targets = {}
+        for volume in daemon["volumes"]:
+            source, target, mode = volume.rsplit(":", 2)
+            assert mode == "ro"
+            targets[target] = source
+        assert targets == {
+            str(rclone_rc.RC_SOCKET.parent): "${ISTOTA_RCLONE_RC_DIR:?istota-stack sets ISTOTA_RCLONE_RC_DIR}",
+            str(rclone_rc.RC_CREDENTIALS): "${ISTOTA_RCLONE_RC_ENV:?istota-stack sets ISTOTA_RCLONE_RC_ENV}",
+        }
+
+    def test_nothing_else_names_the_rc(self):
+        for name in ("docker-compose.yml", "docker-compose.config-apply.yml",
+                     "docker-compose.browser-network.yml"):
+            text = (REPO / "docker" / name).read_text()
+            assert "rclone-rc" not in text and "istota-rclone" not in text, name
+
+
 class TestNeedsClaudeCode:
     """`needs_claude_code` reads a config path, or a plan's `config` table, so
     config-apply decides on the new config rather than the one on disk."""

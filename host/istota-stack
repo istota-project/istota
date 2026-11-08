@@ -357,6 +357,14 @@ compose() {
         files+=(-f "${SRC}/docker/docker-compose.config-apply.yml")
         requests="${STACK}/requests"
     fi
+    # The rclone mount's rc, into the daemon alone, where provision.sh made
+    # it for the Nextcloud mount and the checkout has the file (#939).
+    local rclone_rc=""
+    if [ "$(env_get "$HOST_ENV" STORAGE)" = "nextcloud" ] && [ -d "${STACK}/rclone-rc" ] \
+            && [ -f "${STACK}/rclone-rc.env" ] && [ -f "${SRC}/docker/docker-compose.rclone-rc.yml" ]; then
+        files+=(-f "${SRC}/docker/docker-compose.rclone-rc.yml")
+        rclone_rc=1
+    fi
     # WITHOUT_DEVBOX=1: the release's own file alone, for the steps of an
     # update that run before compose.devbox.yml is rendered again.
     # Its running devbox containers then look like orphans to compose, which
@@ -419,6 +427,9 @@ compose() {
             unset ISTOTA_BUILD_REVISION ISTOTA_BUILD_TAG
         fi
         if [ -n "$requests" ]; then export ISTOTA_REQUESTS_DIR="$requests"; fi
+        if [ -n "$rclone_rc" ]; then
+            export ISTOTA_RCLONE_RC_DIR="${STACK}/rclone-rc" ISTOTA_RCLONE_RC_ENV="${STACK}/rclone-rc.env"
+        fi
         # A caller naming a tag means that tag's own image, for a build, the
         # devbox render or rollback's schema check: .env's ISTOTA_IMAGE is
         # the running tag's -cc layer, and a build would be tagged as it.

@@ -2005,6 +2005,84 @@ class TestWritableDirs:
             temp.chmod(0o700)
 
 
+class TestTheMountsRc:
+    """#939. `nextcloud.rclone_rc`: the mount's rc answers, takes the
+    password, and refuses a caller without it. The rc is replaced at
+    `rclone_rc.call`; `tests/test_rclone_rc.py` holds that against a socket."""
+
+    NAME = "nextcloud.rclone_rc"
+
+    @pytest.fixture
+    def mounted(self, make_config, monkeypatch):
+        from istota.config import NextcloudConfig
+        from istota.nextcloud import rclone_rc
+
+        for marker in doctor._NON_DAEMON_ENV_MARKERS:
+            monkeypatch.delenv(marker, raising=False)
+        monkeypatch.setenv(rclone_rc.RC_ENV_VAR, "1")
+        return make_config(nextcloud=NextcloudConfig(url="https://cloud.example"))
+
+    def _answers(self, monkeypatch, authenticated, anonymous):
+        from istota.nextcloud import rclone_rc
+
+        def call(command, params=None, *, authenticate=True, **kwargs):
+            assert command == "rc/noop"
+            return authenticated if authenticate else anonymous
+
+        monkeypatch.setattr(rclone_rc, "call", call)
+
+    def _result(self, config, probe=True):
+        return run_checks(config, only=(self.NAME,), probe=probe)[0]
+
+    def test_ok_when_it_takes_the_password_and_refuses_without(self, mounted, monkeypatch):
+        from istota.nextcloud.rclone_rc import RcResult
+
+        self._answers(monkeypatch, RcResult(True, body={}), RcResult(False, "unauthorized"))
+        assert self._result(mounted).status == OK
+
+    def test_an_rc_answering_without_a_password_fails(self, mounted, monkeypatch):
+        from istota.nextcloud.rclone_rc import RcResult
+
+        self._answers(monkeypatch, RcResult(True, body={}), RcResult(True, body={}))
+        r = self._result(mounted)
+        assert r.status == FAIL and "without a password" in r.detail
+
+    def test_a_refused_password_fails(self, mounted, monkeypatch):
+        from istota.nextcloud.rclone_rc import RcResult
+
+        self._answers(monkeypatch, RcResult(False, "unauthorized"), RcResult(False, "unauthorized"))
+        r = self._result(mounted)
+        assert r.status == FAIL and "restart" in r.remedy
+
+    def test_an_rc_that_does_not_answer_warns(self, mounted, monkeypatch):
+        from istota.nextcloud.rclone_rc import RcResult
+
+        self._answers(monkeypatch, RcResult(False, "unreachable"), RcResult(False, "unreachable"))
+        assert self._result(mounted).status == WARN
+
+    def test_not_bound_in_warns(self, mounted, monkeypatch):
+        from istota.nextcloud import rclone_rc
+
+        monkeypatch.delenv(rclone_rc.RC_ENV_VAR)
+        r = self._result(mounted)
+        assert r.status == WARN and "ten minutes" in r.detail
+
+    def test_skips_without_the_nextcloud_mount(self, make_config):
+        assert self._result(make_config()).status == SKIP
+
+    def test_skips_without_a_probe(self, mounted, monkeypatch):
+        def call(*args, **kwargs):
+            raise AssertionError("no probe means no socket")
+
+        from istota.nextcloud import rclone_rc
+        monkeypatch.setattr(rclone_rc, "call", call)
+        assert self._result(mounted, probe=False).status == SKIP
+
+    def test_skips_in_a_task(self, mounted, monkeypatch):
+        monkeypatch.setenv("ISTOTA_TASK_ID", "7")
+        assert self._result(mounted).status == SKIP
+
+
 class TestMountLiveness:
     @staticmethod
     def _nextcloud_backed(make_config, **overrides):

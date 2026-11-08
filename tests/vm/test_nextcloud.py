@@ -101,6 +101,40 @@ class TestTheWorkspaceIsTheMount:
             timeout=120, what=f"{name} to show in the container")
 
 
+class TestTheMountsRemoteControl:
+    """#939. The mount keeps listings for ten minutes and has an rc on a
+    socket, with a password, reached by the daemon alone."""
+
+    def test_the_mount_runs_with_the_long_cache_and_the_rc(self, stack):
+        pid = stack.out("systemctl show -p MainPID --value mount-nextcloud.service")
+        argv = stack.out(f"tr '\\0' ' ' < /proc/{pid}/cmdline").split()
+        assert argv[argv.index("--dir-cache-time") + 1] == "10m", argv
+        assert "--poll-interval" not in argv, argv
+        assert argv[argv.index("--rc-addr") + 1] == f"unix://{lima.STACK}/rclone-rc/rc.sock", argv
+
+    def test_the_socket_and_the_password_are_kept_from_everyone_else(self, stack):
+        assert stack.out(f"stat -c '%a %u' {lima.STACK}/rclone-rc") == "700 10001"
+        assert stack.out(f"stat -c '%a %U %g' {lima.STACK}/rclone-rc.env") == "640 root 10001"
+        assert stack.ok(f"test -S {lima.STACK}/rclone-rc/rc.sock")
+
+    def test_the_daemon_reaches_it_and_it_wants_the_password(self, stack):
+        result = lima.doctor(stack, "nextcloud.rclone_rc")
+        assert result["status"] == "ok", result
+
+    def test_the_web_container_has_no_rc(self, stack):
+        web = lima.container(stack, "web")
+        assert web, "no web container"
+        assert not stack.ok(f"docker exec {web} test -e /run/istota-rclone")
+
+    def test_a_forget_reaches_the_mount(self, stack):
+        """The daemon's own client, in the daemon container, on the real rc."""
+        out = lima.stack_exec(
+            stack, "python -c 'from istota.nextcloud import rclone_rc; "
+                   "r = rclone_rc.forget_dirs([\"Users\"]); print(r.ok, r.reason)'",
+        ).stdout.split()
+        assert out == ["True", ""] or out == ["True"], out
+
+
 @parity.witness(9)
 class TestNothingIsWrittenIntoAnUnmountedStore:
     def test_with_the_mount_stopped_the_daemon_does_not_start(self, stack, istota_image):

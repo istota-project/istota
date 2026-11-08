@@ -1462,6 +1462,107 @@ class TestTheSelfSignedCertificate:
 
 STACK_DIR = "/srv/app/istota"
 MOUNT_DIR = "/srv/mount/nextcloud/content"
+RC_DIR = f"{STACK_DIR}/rclone-rc"
+RC_ENV = f"{STACK_DIR}/rclone-rc.env"
+
+
+def _unit_lines(path: Path, key: str) -> list[str]:
+    """Every value of a key that may repeat, which configparser collapses."""
+    return [line.split("=", 1)[1] for line in path.read_text().splitlines()
+            if line.startswith(f"{key}=")]
+
+
+class TestTheMountsRemoteControl:
+    """#939: the mount's directory cache is long because the tree watcher tells
+    rclone what changed, over an rc on a Unix socket with a password."""
+
+    UNIT = HOST / "mount-nextcloud.service"
+    TEXT = PROVISION.read_text() if PROVISION.exists() else ""
+
+    def _exec_start(self) -> str:
+        return _unit(self.UNIT)["Service"]["ExecStart"]
+
+    def test_the_dir_cache_time_is_the_watchers(self):
+        from istota.nextcloud import tree_watch
+
+        flags = self._exec_start().split()
+        value = flags[flags.index("--dir-cache-time") + 1]
+        assert value == f"{tree_watch.DIR_CACHE_SECONDS // 60}m"
+
+    def test_poll_interval_is_gone_and_the_vfs_cache_stays_full(self):
+        flags = self._exec_start().split()
+        assert "--poll-interval" not in flags
+        assert flags[flags.index("--vfs-cache-mode") + 1] == "full"
+
+    def test_the_rc_listens_on_the_socket_the_daemon_is_given(self):
+        from istota.nextcloud import rclone_rc
+
+        flags = self._exec_start().split()
+        assert "--rc" in flags
+        assert flags[flags.index("--rc-addr") + 1] == f"unix://{RC_DIR}/rc.sock"
+        assert rclone_rc.RC_SOCKET.name == "rc.sock"
+        for flag in ("--rc-no-auth", "--rc-serve", "--rc-web-gui", "--rc-user", "--rc-pass"):
+            assert flag not in flags, flag
+
+    def test_the_password_comes_from_a_file_the_unit_requires(self):
+        """`EnvironmentFile=` with no `-`: a missing file fails the unit rather
+        than starting an rc with no password."""
+        assert RC_ENV in _unit_lines(self.UNIT, "EnvironmentFile")
+        assert f"-{RC_ENV}" not in _unit_lines(self.UNIT, "EnvironmentFile")
+
+    def test_a_stale_socket_is_removed_before_rclone_starts(self):
+        assert f"-/bin/rm -f {RC_DIR}/rc.sock" in _unit_lines(self.UNIT, "ExecStartPre")
+
+    def _ensure(self, tmp_path, existing: str | None = None):
+        function = re.search(r"^ensure_rclone_rc\(\) \{.*?^\}", self.TEXT, re.M | re.S)
+        assert function, "provision.sh defines ensure_rclone_rc"
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        calls = tmp_path / "calls"
+        _stub(bindir, "chown", f'echo "chown $*" >> {calls}\n')
+        _stub(bindir, "install", f'echo "install $*" >> {calls}\nmkdir -p "${{@: -1}}"\n')
+        env_file = tmp_path / "rclone-rc.env"
+        if existing is not None:
+            env_file.write_text(existing)
+        result = subprocess.run(
+            ["bash", "-c", f"set -euo pipefail\nISTOTA_UID=10001\n"
+             f"RCLONE_RC_DIR={tmp_path / 'rclone-rc'}\nRCLONE_RC_ENV={env_file}\n"
+             f"{function.group(0)}\nensure_rclone_rc"],
+            env={"PATH": f"{bindir}:{os.environ['PATH']}"}, capture_output=True, text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip(), env_file, calls.read_text().splitlines()
+
+    def test_provision_writes_a_password_once(self, tmp_path):
+        said, env_file, calls = self._ensure(tmp_path)
+        assert said == "new"
+        lines = env_file.read_text().splitlines()
+        assert lines[0] == "RCLONE_RC_USER=istota"
+        assert re.fullmatch(r"RCLONE_RC_PASS=[0-9a-f]{64}", lines[1])
+        assert oct(env_file.stat().st_mode & 0o777) == "0o640"
+        assert f"chown root:10001 {env_file}" in calls
+        assert any(c.startswith("install -d -m 0700 -o 10001 -g 10001") for c in calls)
+
+        again, second, _calls = self._rerun(tmp_path, env_file)
+        assert again == ""
+        assert second.read_text() == env_file.read_text()
+
+    def _rerun(self, tmp_path, env_file):
+        second = tmp_path / "second"
+        second.mkdir()
+        return self._ensure(second, existing=env_file.read_text())
+
+    def test_a_file_without_a_password_is_replaced(self, tmp_path):
+        said, env_file, _calls = self._ensure(tmp_path, existing="RCLONE_RC_USER=istota\n")
+        assert said == "new"
+        assert "RCLONE_RC_PASS=" in env_file.read_text()
+
+    def test_provision_runs_it_for_the_nextcloud_mount_and_restarts_on_a_new_password(self):
+        block = self.TEXT.split('if [ "$(host_env STORAGE)" = "nextcloud" ]; then', 1)[1]
+        block = block.split("\nelse\n", 1)[0]
+        assert '[ -z "$(ensure_rclone_rc)" ] || mount_unit_changed=1' in block
+        assert block.index("ensure_rclone_rc") < block.index("systemctl enable --now mount-nextcloud.service")
 
 
 class TestTheHostLayout:
@@ -1489,16 +1590,20 @@ class TestTheHostLayout:
 
     def test_the_mount_unit_mounts_the_estate_path(self):
         service = _unit(HOST / "mount-nextcloud.service")["Service"]
-        assert service["ExecStartPre"] == f"-/bin/fusermount3 -uz {MOUNT_DIR}"
+        assert _unit_lines(HOST / "mount-nextcloud.service", "ExecStartPre")[0] == (
+            f"-/bin/fusermount3 -uz {MOUNT_DIR}")
         assert service["ExecStart"].split()[-1] == MOUNT_DIR
         assert service["ExecStop"] == f"/bin/fusermount3 -u {MOUNT_DIR}"
         assert f"--config {STACK_DIR}/rclone.conf" in service["ExecStart"]
 
     @pytest.mark.parametrize("unit", sorted(p.name for p in HOST.glob("*.service")))
     def test_every_unit_reads_the_stacks_host_env(self, unit):
-        service = _unit(HOST / unit)["Service"]
-        if "EnvironmentFile" in service:
-            assert service["EnvironmentFile"] == f"-{STACK_DIR}/host.env"
+        files = _unit_lines(HOST / unit, "EnvironmentFile")
+        if files:
+            assert f"-{STACK_DIR}/host.env" in files
+            # The mount's rc password is the one other file, and only there.
+            assert set(files) - {f"-{STACK_DIR}/host.env"} <= (
+                {RC_ENV} if unit == "mount-nextcloud.service" else set())
 
 
 def _functions_setting(tree, name: str):

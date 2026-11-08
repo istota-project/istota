@@ -302,6 +302,14 @@ def plan_masks(config: Config, protected: list[Path]) -> tuple[list[Path], list[
             # it unmasked for want of a cover that was never mounted.
             _mask_dir(module_root)
 
+    # The rclone mount's rc (#939): write and delete on the bot's whole
+    # Nextcloud. Nothing binds it, and this keeps it so whatever
+    # `sandbox_ro_paths` names.
+    from istota.nextcloud import rclone_rc
+
+    if rclone_rc.configured():
+        _mask_dir(rclone_rc.RC_DIR)
+
     return masks, refused
 
 

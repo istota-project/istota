@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The scheduler syncs the money, feeds and health module jobs every ten minutes instead of every minute, so it no longer reads each user's module folders on Nextcloud once a minute. After a module is enabled, a user is added or Garmin is connected, the first feeds poll or Garmin backfill can now take up to ten minutes to start. Turning a module off still stops its jobs at once.
 
+- **The daemon reads your Nextcloud files only after they change.** With full Nextcloud integration, the TASKS.md poll, the CRON.md sync and the shared-file organizer used to read the mount every 30 to 120 seconds, and each read re-listed the folders from the root. The daemon now asks Nextcloud every 30 seconds whether anything under its root changed, follows only the changed folders, and tells the mount which listings to drop, so the mount keeps the rest for ten minutes. An edit you make in Nextcloud still reaches the bot within about a minute, and each poller also runs once an hour regardless. `[scheduler] tree_watch_interval` sets the interval. **Upgrade note:** `istota-stack update` reprovisions the VM, which writes a password for the mount's new control socket and restarts the mount and the stack once; nothing else is needed. `istota doctor` checks the socket as `nextcloud.rclone_rc`.
+
 - The daemon no longer rewrites `status.json` on Nextcloud every minute. It writes the file when the worker or queue counts change, and otherwise every five minutes, so a status that has not changed now has an `updated_at` up to five minutes old instead of one minute. A reader that treats an older `updated_at` as a stopped daemon needs a threshold above five minutes.
 
 ### Fixed
