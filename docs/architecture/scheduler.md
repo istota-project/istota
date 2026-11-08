@@ -29,8 +29,9 @@ while not shutdown_requested:
     check_briefings()           # every briefing_check_interval (60s)
     check_shared_blocks()       # every briefing_check_interval
     check_briefing_triggers()   # every tasks_file_poll_interval (30s; NC-app trigger files)
+    tree_watch.run_pass()       # every tree_watch_interval (30s); Nextcloud mount only
     _sync_all_module_jobs()     # every 600s; the _module.* rows (money, feeds, health)
-    check_scheduled_jobs()      # every briefing_check_interval; syncs CRON.md first
+    check_scheduled_jobs()      # every briefing_check_interval; syncs a changed CRON.md first
     _run_sleep_cycles()         # off-thread; polled every briefing_check_interval
     check_travel_timezone()     # off-thread; every TRAVEL_TZ_CHECK_INTERVAL
     poll_emails()               # off-thread; every email_poll_interval (60s)
@@ -243,6 +244,8 @@ Runs every `briefing_check_interval`:
 
 ## Poller intervals
 
+On the Nextcloud mount, the CRON.md sync, the shared-file organizer and the TASKS.md poll read the mount only after the tree watch saw a change in the folders they read, and once an hour regardless. The tree watch sends one PROPFIND on the bot's root per interval, walks down only folders whose ETag changed, and tells the mount's rclone rc which listings to drop, so the mount can keep its directory cache for ten minutes (#939). Where the watch cannot answer (a local workspace, a failed pass, a root on external storage) every poller reads on its own interval as before.
+
 | Poller | Default interval | Config key |
 |---|---|---|
 | Task queue | 2s | `poll_interval` |
@@ -252,6 +255,7 @@ Runs every `briefing_check_interval`:
 | Briefings/jobs/sleep/cleanup | 60s | `briefing_check_interval` |
 | TASKS.md files | 30s | `tasks_file_poll_interval` |
 | Shared files | 120s | `shared_file_check_interval` |
+| Nextcloud tree watch (ETag of the bot's root) | 30s | `tree_watch_interval` |
 | Heartbeats | 60s | `heartbeat_check_interval` |
 | SQLite health (`quick_check` + self-heal `REINDEX`) | 86400s (24h) | `db_health_check_interval` |
 | Runtime self-check (`istota doctor`) | 3600s (1h) | `doctor_check_interval` |

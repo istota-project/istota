@@ -652,6 +652,7 @@ class SchedulerConfig:
     briefing_check_interval: int = 60  # seconds between briefing checks
     tasks_file_poll_interval: int = 30  # seconds between TASKS.md file polls (and briefing trigger files); 0 = off
     shared_file_check_interval: int = 120  # seconds between shared file organization checks; 0 = off
+    tree_watch_interval: int = 30  # seconds between ETag checks of the bot's Nextcloud root (full Nextcloud integration only); 0 = off: the pollers read on their own intervals, and the VM's mount shows a Nextcloud edit only after its 10-minute cache
     heartbeat_check_interval: int = 60  # seconds between heartbeat checks; 0 = off
     db_health_check_interval: int = 86400  # seconds between SQLite quick_check sweeps over per-user DBs
     # Seconds between `istota doctor` sweeps. Matters more than the boot run:

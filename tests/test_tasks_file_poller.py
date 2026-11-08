@@ -584,3 +584,74 @@ class TestFinishedMarkerReconcile:
             )
         poll_user_tasks_file(config, "alice", self.PATH)
         assert f.read_text() == "- [~] first...\n"
+
+
+# --- the tree watcher gates the poll (#939) ---
+
+
+class TestTheTreeWatcherGatesThePoll:
+    """With the watcher answering, a user's config/ is listed only after it
+    changed in Nextcloud, or after a completion's write failed."""
+
+    @pytest.fixture
+    def watched(self, make_config, tmp_path, monkeypatch):
+        from istota.config import NextcloudConfig
+        from istota.nextcloud import tree_watch
+
+        from .support import tree_watch_fake
+
+        config = make_config(
+            nextcloud=NextcloudConfig(url="https://cloud.example.com", username="istota",
+                                      app_password="x"),
+            workspace_mount_path=tmp_path / "mount",
+            users={"alice": UserConfig(display_name="Alice"), "bob": UserConfig()},
+        )
+        fake = tree_watch_fake.install(monkeypatch, users=("alice", "bob"), bot_dir="istota")
+        tree_watch.run_pass(config)
+        yield config, fake
+        tree_watch.reset()
+
+    def _listed(self, config):
+        from istota.tasks_file_poller import poll_all_tasks_files
+
+        with patch("istota.tasks_file_poller.list_files",
+                   return_value=[{"name": "TASKS.md", "is_dir": False}]) as mock_list, \
+             patch("istota.tasks_file_poller.poll_user_tasks_file", return_value=[]):
+            poll_all_tasks_files(config)
+        return [c.args[1] for c in mock_list.call_args_list]
+
+    def test_only_a_changed_config_dir_is_listed(self, watched):
+        from istota.nextcloud import tree_watch
+
+        config, fake = watched
+        assert len(self._listed(config)) == 2
+        assert self._listed(config) == []
+
+        fake.write("/Users/alice/istota/config/TASKS.md")
+        tree_watch.run_pass(config)
+        assert self._listed(config) == ["/Users/alice/istota/config"]
+
+    def test_a_failed_completion_write_brings_the_next_poll(self, watched):
+        config, _fake = watched
+        self._listed(config)
+        task = TestHandleTasksFileCompletion()._setup_task_and_istota_entry(config)
+        with patch("istota.tasks_file_poller._read_tasks_file",
+                   return_value="- [~] Send email..."), \
+             patch("istota.tasks_file_poller._write_tasks_file", side_effect=OSError("mount")):
+            handle_tasks_file_completion(config, task, success=True, result="Done")
+
+        assert self._listed(config) == ["/Users/alice/istota/config"]
+
+    def test_a_read_that_failed_is_tried_again_on_the_next_poll(self, watched):
+        """Review finding: nothing changes in Nextcloud for a failed read, so
+        the poll itself asks for the retry the old 30 s interval gave."""
+        config, _fake = watched
+        self._listed(config)
+        with patch("istota.tasks_file_poller._tasks_file_lock", side_effect=OSError("mount")):
+            poll_user_tasks_file(config, "alice", "/Users/alice/istota/config/TASKS.md")
+        assert self._listed(config) == ["/Users/alice/istota/config"]
+
+    def test_without_the_watcher_every_poll_lists(self, make_config):
+        config = make_config()
+        assert self._listed(config) == ["/Users/alice/istota/config"]
+        assert self._listed(config) == ["/Users/alice/istota/config"]

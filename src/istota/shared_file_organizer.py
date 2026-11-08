@@ -12,6 +12,8 @@ from .storage import get_user_shared_path, ensure_user_directories_v2
 
 logger = logging.getLogger("istota.shared_file_organizer")
 
+_WATCH_KEY = "shared-files"
+
 # Bot-managed directories at the root, skipped whoever owns them.
 _ROOT_SKIP = frozenset({"users"})
 
@@ -51,15 +53,35 @@ def discover_and_organize_shared_files(config: Config) -> list[OrganizedFile]:
     moves to /Users/{owner}/shared/, and creates user_resources entries.
 
     Returns list of organized files with their new locations.
+
+    With the tree watcher answering (#939), a pass runs only when the root's
+    entries changed, and takes the root's entries and their owners from the
+    watcher's listing, which already asked for ``oc:owner-id``. Its hourly
+    pass, and every pass while the watcher cannot answer, lists the mount and
+    asks each entry's owner, as before.
     """
+    from .nextcloud import tree_watch
+
+    run, snap = tree_watch.should_run(_WATCH_KEY, [tree_watch.ROOT])
+    if not run:
+        return []
+    listing = None if tree_watch.heal_due(_WATCH_KEY) else tree_watch.root_listing()
+    failed = False
+
     organized = []
 
-    # List all items at root level (use mount-aware function)
-    try:
-        root_items = list_files(config, "")
-    except Exception as e:
-        logger.error("Error listing root directory: %s", e)
-        return []
+    if listing is not None:
+        root_items = [
+            {"name": e["name"], "is_dir": e["is_dir"], "owner": e.get("owner_id") or None}
+            for e in listing
+        ]
+    else:
+        try:
+            root_items = list_files(config, "")
+        except Exception as e:
+            # Not recorded as a run, so the next pass tries again.
+            logger.error("Error listing root directory: %s", e)
+            return []
 
     for item in root_items:
         item_name = item["name"]
@@ -68,8 +90,8 @@ def discover_and_organize_shared_files(config: Config) -> list[OrganizedFile]:
         if item_name.lower() in _ROOT_SKIP:
             continue
 
-        # Get owner for this item (always via WebDAV - can't get owner from filesystem)
-        owner = get_file_owner(config, item_name)
+        # The owner is WebDAV's to say; the filesystem cannot.
+        owner = item["owner"] if "owner" in item else get_file_owner(config, item_name)
         if not owner:
             # Could not determine owner, skip
             continue
@@ -97,6 +119,7 @@ def discover_and_organize_shared_files(config: Config) -> list[OrganizedFile]:
         # Move the item to user's shared folder
         if not move_file(config, item_name, dest_path):
             logger.error("Failed to move %s to %s", item_name, dest_path)
+            failed = True
             continue
 
         # Determine resource type
@@ -123,4 +146,6 @@ def discover_and_organize_shared_files(config: Config) -> list[OrganizedFile]:
 
         logger.info("Organized: %s -> %s (owner: %s)", item_name, dest_path, owner)
 
+    if not failed:
+        tree_watch.record_run(_WATCH_KEY, snap)
     return organized

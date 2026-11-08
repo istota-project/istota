@@ -3006,6 +3006,82 @@ prompt_file = "Users/alice/istota/scripts/prompts/gone.txt"
         assert len(jobs) == 0
 
 
+class TestTheTreeWatcherGatesTheCronSync:
+    """With the tree watcher answering (#939), a user's CRON.md is read only
+    after `config/`, `scripts/` or a `prompt_file`'s directory changed in
+    Nextcloud. The files are edited on disk without telling the fake tree, so
+    a sync that reads anyway shows up as a changed row."""
+
+    JOB = "```toml\n[[jobs]]\nname = \"daily\"\ncron = \"0 9 * * *\"\n{body}\n```\n"
+
+    @pytest.fixture
+    def watched(self, db_path, tmp_path, monkeypatch):
+        from istota.config import NextcloudConfig
+        from istota.nextcloud import tree_watch
+
+        from .support import tree_watch_fake
+
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        config = Config(
+            db_path=db_path,
+            users={"alice": UserConfig(timezone="UTC",
+                                       disabled_modules=["feeds", "money", "location"])},
+            workspace_path=mount, workspace_mount_path=mount,
+            nextcloud=NextcloudConfig(url="https://cloud.example.com", username="istota",
+                                      app_password="x"),
+        )
+        fake = tree_watch_fake.install(monkeypatch, users=("alice",), bot_dir="istota")
+        tree_watch.run_pass(config)
+        cron = mount / "Users/alice/istota/config/CRON.md"
+        cron.parent.mkdir(parents=True)
+        yield config, fake, cron
+        tree_watch.reset()
+
+    def _prompt(self, config):
+        from istota.scheduler import _sync_cron_files
+
+        with db.get_db(config.db_path) as conn:
+            _sync_cron_files(conn, config)
+            return [j.prompt for j in db.get_user_scheduled_jobs(conn, "alice")]
+
+    def test_an_unchanged_config_dir_is_not_read(self, watched):
+        from istota.nextcloud import tree_watch
+
+        config, fake, cron = watched
+        cron.write_text(self.JOB.format(body='prompt = "one"'))
+        assert self._prompt(config) == ["one"]
+
+        cron.write_text(self.JOB.format(body='prompt = "two"'))
+        assert self._prompt(config) == ["one"]
+
+        fake.write("/Users/alice/istota/config/CRON.md")
+        tree_watch.run_pass(config)
+        assert self._prompt(config) == ["two"]
+
+    def test_a_prompt_file_outside_the_bot_dir_is_followed(self, watched):
+        from istota.nextcloud import tree_watch
+
+        config, fake, cron = watched
+        notes = config.workspace_path / "Users/alice/notes"
+        notes.mkdir(parents=True)
+        (notes / "daily.txt").write_text("first")
+        fake.mkdir("/Users/alice/notes")
+        fake.write("/Users/alice/notes/daily.txt")
+        cron.write_text(self.JOB.format(body='prompt_file = "/Users/alice/notes/daily.txt"'))
+        assert self._prompt(config) == ["first"]
+        # The sync registered the directory; one pass observes it, and the
+        # sync after that reads once more because its set of paths grew.
+        tree_watch.run_pass(config)
+        assert self._prompt(config) == ["first"]
+
+        (notes / "daily.txt").write_text("second")
+        assert self._prompt(config) == ["first"]
+        fake.write("/Users/alice/notes/daily.txt")
+        tree_watch.run_pass(config)
+        assert self._prompt(config) == ["second"]
+
+
 # ---------------------------------------------------------------------------
 # TestProcessOneTask
 # ---------------------------------------------------------------------------

@@ -250,6 +250,7 @@ Whether the bot replies to a turn nobody addressed to it, in a room more than on
 | `briefing_check_interval` | `60` | Seconds between briefing/job/cleanup checks |
 | `tasks_file_poll_interval` | `30` | Seconds between TASKS.md polls; `0` turns them off |
 | `shared_file_check_interval` | `120` | Seconds between shared file checks; `0` turns them off |
+| `tree_watch_interval` | `30` | Seconds between checks of whether anything under the bot's Nextcloud root changed, with full Nextcloud integration. The TASKS.md poll, the CRON.md sync and the shared-file organizer then read the mount only after a change, or hourly. `0` turns the check off: the three read on their own intervals, and on the VM's rclone mount a change made in Nextcloud then takes up to ten minutes to show |
 | `heartbeat_check_interval` | `60` | Seconds between heartbeat checks; `0` turns them off |
 | `db_health_check_interval` | `86400` | Seconds between SQLite `quick_check` + self-heal `REINDEX` sweeps over framework + per-user DBs (24h) |
 | `doctor_check_interval` | `3600` | Seconds between re-runs of the `istota doctor` runtime self-check (1h; 0 disables). Re-run rather than trusted from boot, because the drift it catches happens after boot — a mount drops, a credential expires, a binary goes missing under a config the daemon already loaded |

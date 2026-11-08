@@ -123,7 +123,9 @@ def _tasks_file_lock(config: Config, file_path: str, *, user_id: str):
     return text_files.file_lock(config, user_id, config_dir / name)
 
 
-def discover_tasks_files(config: Config) -> list[DiscoveredTasksFile]:
+def discover_tasks_files(
+    config: Config, users: list[str] | None = None,
+) -> list[DiscoveredTasksFile]:
     """
     Discover TASKS.md files in users' bot-managed directories.
 
@@ -132,6 +134,7 @@ def discover_tasks_files(config: Config) -> list[DiscoveredTasksFile]:
 
     Args:
         config: Application config
+        users: The users to scan, every configured user when None
 
     Returns:
         List of discovered TASKS files with owner info
@@ -140,7 +143,7 @@ def discover_tasks_files(config: Config) -> list[DiscoveredTasksFile]:
 
     discovered = []
 
-    for user_id in config.users:
+    for user_id in (config.users if users is None else users):
         user_path = get_user_config_path(user_id, config.bot_dir_name)
 
         try:
@@ -319,7 +322,8 @@ def poll_user_tasks_file(config: Config, user_id: str, file_path: str) -> list[i
     The read, the task creation and the write back all run under the file's
     lock, so a web save cannot land between the read and the write and be
     overwritten. A lock held past its timeout skips the file for this pass;
-    nothing has been created, so the next pass picks the same lines up.
+    nothing has been created, so the next pass picks the same lines up (the
+    tree watcher is told to let it, since nothing changed in Nextcloud).
     """
     try:
         lock = _tasks_file_lock(config, file_path, user_id=user_id)
@@ -327,9 +331,11 @@ def poll_user_tasks_file(config: Config, user_id: str, file_path: str) -> list[i
             return _poll_user_tasks_file_locked(config, user_id, file_path)
     except MemoryMdLocked:
         logger.info("TASKS.md for %s is being written; skipping it this pass", user_id)
+        _poll_again(config, user_id)
         return []
     except OSError as e:
         logger.error("Error reading %s for %s: %s", file_path, user_id, e)
+        _poll_again(config, user_id)
         return []
 
 
@@ -338,8 +344,9 @@ def _poll_user_tasks_file_locked(config: Config, user_id: str, file_path: str) -
     try:
         file_content = _read_tasks_file(config, file_path, user_id=user_id)
     except Exception as e:
-        # File read error - log and skip
+        # File read error - log, and read it again on the next pass
         logger.error("Error reading %s for %s: %s", file_path, user_id, e)
+        _poll_again(config, user_id)
         return []
 
     # Parse tasks from file
@@ -462,10 +469,23 @@ def poll_all_tasks_files(config: Config) -> list[int]:
     Returns:
         List of all created task IDs
     """
+    from .nextcloud import tree_watch
+
     all_task_ids = []
 
-    # Auto-discover TASKS files
-    discovered_files = discover_tasks_files(config)
+    # Only the users whose config/ changed in Nextcloud, where the tree watcher
+    # can say (#939); every user otherwise, and every user once an hour.
+    due: dict[str, tuple | None] = {}
+    for user_id in list(config.users):
+        run, snap = tree_watch.should_run(
+            f"tasks:{user_id}", [tree_watch.user_config_dir(config, user_id)],
+        )
+        if run:
+            due[user_id] = snap
+
+    discovered_files = discover_tasks_files(config, list(due))
+    for user_id, snap in due.items():
+        tree_watch.record_run(f"tasks:{user_id}", snap)
 
     for tasks_file in discovered_files:
         # One user's file must not cost every user after it in the listing.
@@ -485,6 +505,14 @@ def poll_all_tasks_files(config: Config) -> list[int]:
         all_task_ids.extend(task_ids)
 
     return all_task_ids
+
+
+def _poll_again(config: Config, user_id: str) -> None:
+    """The poll writes a marker this completion could not (ISSUE-726); with
+    the tree watcher in front of it, it has to be told to look."""
+    from .nextcloud import tree_watch
+
+    tree_watch.mark_changed(tree_watch.user_config_dir(config, user_id))
 
 
 def handle_tasks_file_completion(
@@ -553,8 +581,10 @@ def handle_tasks_file_completion(
             "TASKS.md for %s is being written; the next poll writes task %d's marker",
             task.user_id, task.id,
         )
+        _poll_again(config, task.user_id)
     except Exception as e:
         logger.error("Error updating %s after completion for %s: %s", istota_task.file_path, task.user_id, e)
+        _poll_again(config, task.user_id)
 
     # Send email notification if user has email configured
     user_config = config.get_user(task.user_id)
