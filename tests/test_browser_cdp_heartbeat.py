@@ -762,3 +762,49 @@ class TestHealthEndpoint:
         assert data["status"] == "ok"
         assert data["cdp_healthy"] is True
         assert data["cdp_last_error"] == ""
+
+    def test_the_chrome_version_is_reported_to_a_token_holder(self, monkeypatch):
+        """#930: nothing reported which Chrome was running."""
+        _healthy_chrome(monkeypatch)
+        monkeypatch.setattr(chrome, "installed_version", lambda: "157.0.8103.38")
+        assert browse_api.health()["chrome_version"] == "157.0.8103.38"
+
+    def test_a_peer_without_the_token_is_not_told_the_version(self, monkeypatch):
+        _healthy_chrome(monkeypatch)
+        monkeypatch.setattr(chrome, "installed_version", lambda: "157.0.8103.38")
+        monkeypatch.setattr(
+            browse_api, "request", types.SimpleNamespace(args={}, environ={}), raising=False,
+        )
+        assert "chrome_version" not in browse_api.health()
+
+
+class TestTheInstalledVersion:
+    """What `google-chrome-stable --version` says, read once (#930)."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh(self, monkeypatch):
+        monkeypatch.setattr(chrome, "_installed_version", None)
+
+    def _binary(self, tmp_path, monkeypatch, output: str, status: int = 0):
+        binary = tmp_path / "google-chrome-stable"
+        calls = tmp_path / "calls"
+        binary.write_text(f"#!/bin/sh\necho x >> {calls}\nprintf '%s\\n' '{output}'\nexit {status}\n")
+        binary.chmod(0o755)
+        monkeypatch.setenv("CHROME_EXECUTABLE", str(binary))
+        return calls
+
+    def test_the_version_is_read_from_the_binary_once(self, tmp_path, monkeypatch):
+        calls = self._binary(tmp_path, monkeypatch, "Google Chrome 157.0.8103.38 ")
+        assert chrome.installed_version() == "157.0.8103.38"
+        assert chrome.installed_version() == "157.0.8103.38"
+        assert calls.read_text().count("x") == 1
+
+    def test_an_unreadable_version_is_empty_and_asked_again(self, tmp_path, monkeypatch):
+        calls = self._binary(tmp_path, monkeypatch, "Segmentation fault", status=1)
+        assert chrome.installed_version() == ""
+        assert chrome.installed_version() == ""
+        assert calls.read_text().count("x") == 2
+
+    def test_a_missing_binary_is_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CHROME_EXECUTABLE", str(tmp_path / "absent"))
+        assert chrome.installed_version() == ""

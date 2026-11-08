@@ -483,10 +483,12 @@ def test_state_cold_sizes_only_own_profile_without_launch(api, monkeypatch):
     (other / "private").write_bytes(b"x" * 100)
     (own / "link").symlink_to(other, target_is_directory=True)
     monkeypatch.setattr(api.pool, "acquire", MagicMock(side_effect=AssertionError("started Chrome")))
+    monkeypatch.setattr(api.chrome, "installed_version", lambda: "157.0.8103.38")
     response = api.app.test_client().get("/state", headers={"X-Istota-User": "alice"})
     assert response.status_code == 200
     assert response.json == {"status": "ok", "user_scope": "alice", "profile_exists": True,
-                             "profile_size_bytes": 5, "live": False, "cookie_domains": None, "sessions": [], "session_count": 0}
+                             "profile_size_bytes": 5, "live": False, "cookie_domains": None, "sessions": [], "session_count": 0,
+                             "chrome_version": "157.0.8103.38"}
 
 
 def test_state_live_returns_domains_never_cookie_details(api):
