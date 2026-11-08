@@ -5,7 +5,8 @@
   import { createSearch } from '$lib/stores/search';
   import { hrefFor } from '$lib/search/links';
   import { viewer } from '$lib/fileViewer/store.svelte';
-  import { Button, Input, LoadMore, Modal, Select } from '@minot/ui';
+  import { History } from '@lucide/svelte';
+  import { Button, Icon, Input, LoadMore, Modal, Select } from '@minot/ui';
   import SearchResultRow from './SearchResultRow.svelte';
 
   let {
@@ -49,14 +50,19 @@
   const options = $derived(groups.flatMap((group) => group.results).filter(actionable));
   const active = $derived(options[$controller.activeIndex]);
   const optionId = (hit: SearchHit) => `${uid}-${encodeURIComponent(hit.id)}`;
+  const recents = $derived($controller.query.trim() ? [] : $controller.recentQueries);
+  const recentId = (index: number) => `${uid}-recent-${index}`;
+  const activeRecent = $derived(recents.length ? $controller.activeIndex : -1);
+  const activeId = $derived(
+    activeRecent >= 0 ? recentId(activeRecent) : active ? optionId(active) : undefined,
+  );
 
   $effect(() => {
     if (!open) controller.close();
   });
   onDestroy(() => controller.close());
   $effect(() => {
-    if (open && active)
-      document.getElementById(optionId(active))?.scrollIntoView?.({ block: 'nearest' });
+    if (open && activeId) document.getElementById(activeId)?.scrollIntoView?.({ block: 'nearest' });
   });
 
   async function openHit(hit: SearchHit) {
@@ -70,15 +76,24 @@
     else if (file) viewer.openFile(file);
   }
 
+  async function useRecent(query: string) {
+    controller.setQuery(query);
+    await tick();
+    document.getElementById(inputId)?.focus();
+  }
+
   function handleKeydown(event: KeyboardEvent) {
     if (event.isComposing) return;
+    const count = recents.length || options.length;
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
-      if (options.length)
+      if (count)
         controller.setActive(
-          ($controller.activeIndex + (event.key === 'ArrowDown' ? 1 : -1) + options.length) %
-            options.length,
+          ($controller.activeIndex + (event.key === 'ArrowDown' ? 1 : -1) + count) % count,
         );
+    } else if (event.key === 'Enter' && activeRecent >= 0) {
+      event.preventDefault();
+      void useRecent(recents[activeRecent]);
     } else if (event.key === 'Enter' && active) {
       event.preventDefault();
       void openHit(active);
@@ -108,7 +123,7 @@
       aria-label="Search everything"
       aria-expanded={true}
       aria-controls={listId}
-      aria-activedescendant={active ? optionId(active) : undefined}
+      aria-activedescendant={activeId}
       aria-autocomplete="list"
       autocomplete="off"
       maxlength={200}
@@ -127,22 +142,31 @@
   </div>
   <div class="search-results">
     {#if !$controller.query.trim()}
-      {#if $controller.recentQueries.length}
-        <p class="micro-label">Recent searches</p>
-        {#each $controller.recentQueries as query}<Button
-            variant="secondary"
-            onclick={() => {
-              controller.setQuery(query);
-              document.getElementById(inputId)?.focus();
-            }}>{query}</Button
-          >{/each}
-      {:else}<p class="muted">Type at least 2 characters.</p>{/if}
+      {#if !recents.length}<p class="muted">Type at least 2 characters.</p>{/if}
     {:else if $controller.query.trim().length < 2}<p class="muted">
         Type at least 2 characters.
       </p>{/if}
     {#if $controller.loading}<p role="status" class="muted">Searching…</p>{/if}
     {#if $controller.error}<p role="status" class="muted">{$controller.error}</p>{/if}
     <div id={listId} role="listbox" aria-label="Search results" aria-busy={$controller.loading}>
+      {#if recents.length}
+        <div role="group" aria-labelledby={`${uid}-recent`} class="search-group">
+          <h2 class="micro-label" id={`${uid}-recent`}>Recent searches</h2>
+          {#each recents as query, index (query)}
+            <button
+              id={recentId(index)}
+              type="button"
+              role="option"
+              aria-selected={index === activeRecent}
+              tabindex="-1"
+              class="recent-row"
+              class:active={index === activeRecent}
+              onclick={() => void useRecent(query)}
+              ><Icon icon={History} /><span class="truncate">{query}</span></button
+            >
+          {/each}
+        </div>
+      {/if}
       {#each groups as group}
         <div role="group" aria-labelledby={`${uid}-group-${group.source}`} class="search-group">
           <h2 class="micro-label" id={`${uid}-group-${group.source}`}>{group.label}</h2>
@@ -174,11 +198,13 @@
         loading={$controller.loading}
         label="Show more"
       />{/if}
-    {#if !$controller.selectedSource && $controller.query.trim().length >= 2}
-      {#each $controller.onDemand as source}<Button
-          variant="secondary"
-          onclick={() => void selectSource(source.source)}>Search {source.label}</Button
-        >{/each}
+    {#if !$controller.selectedSource && $controller.query.trim().length >= 2 && $controller.onDemand.length}
+      <div class="hstack wrap">
+        {#each $controller.onDemand as source}<Button
+            variant="secondary"
+            onclick={() => void selectSource(source.source)}>Search {source.label}</Button
+          >{/each}
+      </div>
     {/if}
   </div>
   {#snippet footer()}<span class="caption">↑ ↓ to move · Enter to open · Esc to close</span
@@ -199,6 +225,27 @@
   }
   .search-group + .search-group {
     margin-top: var(--space-4);
+  }
+  .recent-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+    border: 0;
+    border-radius: var(--radius-sm);
+    padding: var(--space-2);
+    color: var(--text-primary);
+    background: transparent;
+    text-align: left;
+    font: inherit;
+    cursor: pointer;
+  }
+  .recent-row :global(.ui-icon) {
+    color: var(--text-muted);
+  }
+  .recent-row.active,
+  .recent-row:hover {
+    background: var(--hover-bg);
   }
   h2,
   p {
