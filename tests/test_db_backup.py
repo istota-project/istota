@@ -361,32 +361,105 @@ class TestStagedSnapshotAndManifest:
         assert opened
         assert not [p for p in opened if p.resolve().is_relative_to(root)]
 
-    def test_without_a_manifest_the_prior_snapshot_is_read_once(self, tmp_path, monkeypatch):
-        """The transition: a dated dir from before the manifest existed is read
-        on the first run after the upgrade, and the next run reads nothing."""
-        cfg, path = self._seeded(tmp_path)
-        db_backup.backup_databases(cfg, today="2026-07-11")
-        (_root(tmp_path) / "2026-07-11" / "manifest.json").unlink()
+    def _spies(self, monkeypatch, cfg):
+        """Record every file counted and every file copied, and require each
+        copy to be gone from staging by the next upload."""
         opened: list[Path] = []
+        copied: list[Path] = []
         real_count = db_backup._data_row_count
+        real_copy = db_backup.shutil.copyfile
+        real_upload = db_backup._upload
 
-        def _spy(p):
+        def _count(p):
             opened.append(Path(p).resolve())
             return real_count(p)
 
-        monkeypatch.setattr(db_backup, "_data_row_count", _spy)
+        def _copy(src, dst, *a, **kw):
+            copied.append(Path(src).resolve())
+            return real_copy(src, dst, *a, **kw)
+
+        def _upload(staged, dest):
+            assert not list(db_backup._staging_parent(cfg).rglob("*.prior"))
+            return real_upload(staged, dest)
+
+        monkeypatch.setattr(db_backup, "_data_row_count", _count)
+        monkeypatch.setattr(db_backup.shutil, "copyfile", _copy)
+        monkeypatch.setattr(db_backup, "_upload", _upload)
+        return opened, copied
+
+    def test_without_a_manifest_a_snapshot_with_data_reads_no_prior(self, tmp_path, monkeypatch):
+        """The transition: a dated dir from before the manifest existed. The
+        guard acts only on an empty snapshot, so one with data never reads it."""
+        cfg, path = self._seeded(tmp_path)
+        db_backup.backup_databases(cfg, today="2026-07-11")
+        (_root(tmp_path) / "2026-07-11" / "manifest.json").unlink()
+        opened, copied = self._spies(monkeypatch, cfg)
         root = _root(tmp_path).resolve()
 
-        db_backup.backup_databases(cfg, today="2026-07-12")
-        assert root / "2026-07-11" / "alice" / "location.db" in opened
+        results = db_backup.backup_databases(cfg, today="2026-07-12")
+        assert next(r for r in results if r["label"] == "location:alice")["status"] == "ok"
+        assert copied == []
+        assert not [p for p in opened if p.is_relative_to(root)]
 
-        opened.clear()
         _empty_places(path)
         results = db_backup.backup_databases(cfg, today="2026-07-13")
         loc = next(r for r in results if r["label"] == "location:alice")
         assert loc["status"] == "suspect"
         assert loc["prior_rows"] == 1
+        assert copied == []
+
+    def test_without_a_manifest_an_empty_snapshot_copies_the_prior_down(self, tmp_path, monkeypatch):
+        """ISSUE-937: SQLite's scattered reads of a file on an rclone mount
+        turn into overlapping range GETs several times the file's size, so the
+        prior is copied down in one sequential read and counted locally."""
+        cfg, path = self._seeded(tmp_path)
+        db_backup.backup_databases(cfg, today="2026-07-11")
+        (_root(tmp_path) / "2026-07-11" / "manifest.json").unlink()
+        _empty_places(path)
+        opened, copied = self._spies(monkeypatch, cfg)
+        root = _root(tmp_path).resolve()
+
+        results = db_backup.backup_databases(cfg, today="2026-07-12")
+        loc = next(r for r in results if r["label"] == "location:alice")
+        assert loc["status"] == "suspect"
+        assert loc["prior_rows"] == 1
+        assert copied == [root / "2026-07-11" / "alice" / "location.db"]
         assert not [p for p in opened if p.is_relative_to(root)]
+
+    def test_a_user_named_like_the_copy_does_not_collide(self, tmp_path, monkeypatch):
+        cfg = _config(tmp_path)
+        cfg.users = {"prior.db": UserConfig(), "zed": UserConfig()}
+        db.init_db(cfg.db_path)
+        paths = [_seed_module_db(cfg, user, "location") for user in cfg.users]
+        for p in paths:
+            _add_place(p)
+        db_backup.backup_databases(cfg, today="2026-07-11")
+        (_root(tmp_path) / "2026-07-11" / "manifest.json").unlink()
+        for p in paths:
+            _empty_places(p)
+
+        results = db_backup.backup_databases(cfg, today="2026-07-12")
+        for user in cfg.users:
+            assert next(r for r in results if r["label"] == f"location:{user}")["status"] == "suspect"
+
+    def test_a_prior_that_will_not_copy_fails_closed(self, tmp_path, monkeypatch):
+        """An empty snapshot whose prior cannot be downloaded is not uploaded
+        as good: the DB errors, and the next run tries again."""
+        cfg, path = self._seeded(tmp_path)
+        db_backup.backup_databases(cfg, today="2026-07-11")
+        (_root(tmp_path) / "2026-07-11" / "manifest.json").unlink()
+        _empty_places(path)
+
+        def _fail(*_a, **_kw):
+            raise OSError("no space left on device")
+
+        monkeypatch.setattr(db_backup.shutil, "copyfile", _fail)
+        results = db_backup.backup_databases(cfg, today="2026-07-12")
+        loc = next(r for r in results if r["label"] == "location:alice")
+        assert loc["status"] == "error"
+        dated = _root(tmp_path) / "2026-07-12"
+        assert not (dated / "alice" / "location.db").exists()
+        assert "alice/location.db" not in (db_backup._read_manifest(dated) or {})
 
     def test_a_newer_copy_without_a_manifest_entry_is_not_skipped(self, tmp_path):
         """A dir whose manifest write failed still holds the newest good copy.

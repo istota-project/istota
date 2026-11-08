@@ -24,9 +24,10 @@ file copied to the destination under a temporary name and renamed into place,
 so no SQLite write happens on the mount and a partial upload never carries a
 snapshot's name. The guard's prior count comes from ``manifest.json`` in the
 newest older dated dir that records the DB, written at the end of each run.
-Reading the prior snapshot itself, as the guard did before, downloads it in
-full from an rclone mount; that read is now only the fallback for a DB no
-manifest records, which after the upgrade happens once.
+Reading the prior snapshot itself, as the guard did before, downloads it
+several times over from an rclone mount; that read is now only the fallback
+for a DB no manifest records whose fresh snapshot is empty, and it copies the
+file to staging in one sequential read before counting (ISSUE-937).
 
 Each run writes to its own dated directory (``<root>/<YYYY-MM-DD>/…``) so the
 history isn't a single overwritten slot: a corrupted or emptied live DB can't
@@ -472,26 +473,33 @@ def _write_manifest(dated_dir: Path, rows: dict[str, int]) -> None:
         logger.warning("db_backup_manifest_write_failed dir=%s err=%s", dated_dir, exc)
 
 
-def _prior_row_count(root: Path, date_str: str, rel: str, manifests: dict) -> int | None:
-    """Rows in the last good snapshot of ``rel`` before ``date_str``, or None
-    when there is none. ``manifests`` caches each dir's manifest for the run.
-
-    The newest older dir holding a good copy of ``rel`` decides, as the guard
-    always compared against the newest good copy. Its manifest answers when it
-    records ``rel``; only a dir without that entry (one from before manifests,
-    or whose manifest write failed) has its snapshot opened, which on the mount
-    downloads it. Skipping such a dir for an older manifest would compare
-    against a count from before it, which can be 0.
-    """
-    dated_dir = _prior_good_dir(root, date_str, rel)
-    if dated_dir is None:
-        return None
+def _recorded_row_count(dated_dir: Path, rel: str, manifests: dict) -> int | None:
+    """The row count ``dated_dir``'s manifest records for ``rel``, or None.
+    ``manifests`` caches each dir's manifest for the run."""
     if dated_dir not in manifests:
         manifests[dated_dir] = _read_manifest(dated_dir)
     recorded = manifests[dated_dir]
     if recorded is not None and rel in recorded:
         return recorded[rel]
-    return _data_row_count(dated_dir / rel)
+    return None
+
+
+def _copied_row_count(snapshot: Path, scratch: Path) -> int:
+    """Rows in ``snapshot``, counted from a copy in ``scratch`` (ISSUE-937).
+
+    SQLite opened on an rclone mount reads scattered pages, which rclone turns
+    into overlapping range requests, 3.8 times the framework DB's size on
+    production; one sequential copy downloads it once. A failed copy raises,
+    so the DB errors and is retried next run rather than passing the guard.
+    """
+    fd, name = tempfile.mkstemp(dir=scratch, suffix=".prior")
+    os.close(fd)
+    local = Path(name)
+    try:
+        shutil.copyfile(snapshot, local)
+        return _data_row_count(local)
+    finally:
+        local.unlink(missing_ok=True)
 
 
 def _upload(staged: Path, dest: Path) -> None:
@@ -503,17 +511,33 @@ def _upload(staged: Path, dest: Path) -> None:
 
 def _guard_and_upload(
     root: Path, date_str: str, rel: str, staged: Path, result: dict, manifests: dict,
+    scratch: Path,
 ) -> tuple[dict, int]:
     """Check the staged snapshot against the prior count, then upload it: to
     ``dest`` when it is good, to ``dest.suspect`` when a DB that held data now
     holds none (or cannot be read). Returns the result and the staged row
-    count; the result carries the two counts only where there was a prior."""
+    count; the result carries the two counts only where the prior was read.
+
+    The newest older dir holding a good copy of ``rel`` decides, as the guard
+    always compared against the newest good copy. Its manifest answers when it
+    records ``rel``. A dir without that entry (one from before manifests, or
+    whose manifest write failed) has its snapshot downloaded and counted, but
+    only when the staged snapshot is empty: the guard acts on nothing else.
+    Skipping such a dir for an older manifest would compare against a count
+    from before it, which can be 0.
+    """
     dest = Path(result["dest"])
     new_rows = _data_row_count(staged)
-    prior_rows = _prior_row_count(root, date_str, rel, manifests)
-    if prior_rows is None:
+    dated_dir = _prior_good_dir(root, date_str, rel)
+    if dated_dir is None:
         _upload(staged, dest)  # first-ever snapshot — nothing to compare against
         return result, new_rows
+    prior_rows = _recorded_row_count(dated_dir, rel, manifests)
+    if prior_rows is None:
+        if new_rows > 0:
+            _upload(staged, dest)
+            return result, new_rows
+        prior_rows = _copied_row_count(dated_dir / rel, scratch)
     result = {**result, "prior_rows": prior_rows, "new_rows": new_rows}
     if prior_rows > 0 and new_rows <= 0:
         suspect = dest.with_name(dest.name + ".suspect")
@@ -708,7 +732,8 @@ def _snapshot_all(
             res = _snapshot_one(src, staged, label)
             res = {**res, "dest": str(dest)}
             if res["status"] == "ok":
-                res, rows = _guard_and_upload(root, date_str, rel, staged, res, manifests)
+                res, rows = _guard_and_upload(
+                    root, date_str, rel, staged, res, manifests, run_dir)
                 if res["status"] == "ok":
                     good_rows[rel] = rows
                 else:
