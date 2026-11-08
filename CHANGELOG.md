@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Group members can change their group's files.** Every current member can upload, create folders, edit text files and delete files and empty folders in the group's folder from Files, and upload from the group's Shared files card, which also lists recent changes. Existing group folders became member-writable with this change, and members who joined earlier were not told; the All users folder stays admin-only, and `GROUP.md` and `memories` at the top of the folder cannot be changed from Files. See docs/features/groups.md.
 - Recent searches in the search dialog are a list you can move through with the arrow keys and open with Enter, instead of a row of buttons with no space between them.
+- An invoice that bank sync marked paid shows a small "synced" badge after its paid date, instead of repeating the same date as "paid by sync on".
 
 - The feeds poll no longer queues a task every five minutes for each user. The scheduler checks the user's feeds first and queues the poll only when a feed is due, so the admin task list and the daemon log carry far fewer empty runs.
 

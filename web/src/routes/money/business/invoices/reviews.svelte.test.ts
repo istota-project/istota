@@ -65,7 +65,9 @@ it.each(['settle', 'dismiss'])(
     await fireEvent.click(await screen.findByRole('button', { name: /Payments to review \(1\)/ }));
     expect(screen.getByText('<b>Acme payment</b>', { exact: false }).querySelector('b')).toBeNull();
     expect(screen.getByText('Assets:Bank:Checking')).toBeTruthy();
-    expect(screen.getByText(`paid by sync on ${formatDate('2026-04-15')}`)).toBeTruthy();
+    expect(screen.getByText(`Paid ${formatDate('2026-04-15')}`, { exact: false })).toBeTruthy();
+    expect(screen.getByTitle('Settled automatically by bank sync').textContent).toContain('synced');
+    expect(screen.queryByText(/paid by sync/)).toBeNull();
     const button = screen.getByRole('button', {
       name: action === 'settle' ? /Settle INV-000004/ : 'Not an invoice payment',
     });

@@ -385,7 +385,12 @@
               <span class="paid-note caption">
                 Paid {formatDate(inv.paid_date)}
                 {#if inv.paid_by_sync_date}
-                  <span>paid by sync on {formatDate(inv.paid_by_sync_date)}</span>
+                  <Badge
+                    size="sm"
+                    tone="subtle"
+                    uppercase={false}
+                    title="Settled automatically by bank sync">synced</Badge
+                  >
                 {/if}
               </span>
             {/if}
