@@ -10168,6 +10168,55 @@ def run_briefing_now(
     return task_id, ""
 
 
+def _feeds_poll_has_work(app_config: Config, user_id: str) -> bool:
+    """Whether the user's feeds poll would find a feed due (#933).
+
+    Raises when it cannot tell, and the caller queues the task: a broken
+    look must never stop polling.
+    """
+    from istota import module_loader
+    from istota.feeds import db as feeds_db
+
+    path = module_loader.resolve_module_db_path(app_config, user_id, "feeds")
+    if path is None:
+        raise RuntimeError("no module DB resolver on this config")
+    # Opening a missing path would create it empty. The poll task's own
+    # `ensure_initialised` creates it properly, imports a legacy feeds.toml and
+    # seeds the default subscriptions, so a missing DB is work, not none.
+    if not path.exists():
+        return True
+    timeout_ms = app_config.scheduler.main_loop_read_timeout_ms or 30_000
+    with feeds_db.connect(path, busy_timeout_ms=timeout_ms) as feeds_conn:
+        return feeds_db.has_due_feeds(feeds_conn)
+
+
+def _job_has_work_checks() -> dict[str, Callable[[Config, str], bool]]:
+    """Scheduled jobs the scheduler looks at before queuing, by job name.
+
+    A check returning False means the run would do nothing, so the slot is
+    spent without a task. Like the `sharing-ics-poll` gate, it reads local
+    state only.
+    """
+    from istota.feeds.jobs import MODULE_PREFIX as FEEDS_PREFIX
+
+    return {f"{FEEDS_PREFIX}run_scheduled": _feeds_poll_has_work}
+
+
+def _job_has_work(app_config: Config, job: "db.ScheduledJob", checks) -> bool:
+    """Run the job's pre-check, if it has one; fail open on any error."""
+    check = checks.get(job.name)
+    if check is None:
+        return True
+    try:
+        return check(app_config, job.user_id)
+    except Exception as e:  # noqa: BLE001 — queue the task as before
+        logger.warning(
+            "Scheduled job '%s' (user: %s): pre-check failed, queuing anyway: %s",
+            job.name, job.user_id, e,
+        )
+        return True
+
+
 def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
     """
     Check for scheduled jobs that should run and queue them as tasks.
@@ -10190,6 +10239,7 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
         logger.debug("No enabled scheduled jobs found")
         return created_tasks
     logger.debug("Found %d enabled scheduled job(s)", len(jobs))
+    has_work_checks = _job_has_work_checks()
 
     # Group by user_id to look up timezone once per user
     jobs_by_user: dict[str, list[db.ScheduledJob]] = {}
@@ -10283,6 +10333,15 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                         "Scheduled job '%s' (user: %s) skipped: %d prior run(s) "
                         "still in flight",
                         job.name, job.user_id, inflight,
+                    )
+                    continue
+                # Nothing to do: spend the slot without a task, as the stale
+                # branch does, so the cadence holds. Failure counters untouched.
+                if not _job_has_work(app_config, job, has_work_checks):
+                    db.set_scheduled_job_last_run(conn, job.id)
+                    logger.debug(
+                        "Scheduled job '%s' (user: %s) skipped: nothing to do",
+                        job.name, job.user_id,
                     )
                     continue
                 # As in `check_briefings`: one unusable `job.user_id` costs its

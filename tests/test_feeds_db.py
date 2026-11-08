@@ -3349,3 +3349,62 @@ class TestAStarredFeedKeepsWorking:
         with feeds_db.connect(path) as conn:
             after = _guids(conn)
         assert [g for g in after if not g.startswith("star")] == []
+
+
+class TestHasDueFeeds:
+    """The scheduler's pre-check before it queues a `run-scheduled` task (#933).
+
+    It must agree with `feeds_due_for_poll` row for row, or the scheduler skips
+    a tick the poll would have used, or queues one that finds nothing.
+    """
+
+    NOW = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+
+    def _set(self, path, feed_id, **cols):
+        with feeds_db.connect(path) as conn:
+            for col, value in cols.items():
+                conn.execute(
+                    f"UPDATE feeds SET {col} = ? WHERE id = ?", (value, feed_id),
+                )
+            conn.commit()
+
+    def test_a_feed_never_polled_is_due(self, tmp_path):
+        path, _ = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            assert feeds_db.has_due_feeds(conn, now=self.NOW) is True
+
+    def test_a_feed_due_later_is_not(self, tmp_path):
+        path, feed_id = _seed_one_feed(tmp_path)
+        self._set(path, feed_id, next_poll_at=(self.NOW + timedelta(hours=1)).isoformat())
+        with feeds_db.connect(path) as conn:
+            assert feeds_db.has_due_feeds(conn, now=self.NOW) is False
+            assert feeds_db.feeds_due_for_poll(conn, now=self.NOW) == []
+
+    def test_a_due_feed_under_a_live_claim_is_not(self, tmp_path):
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            assert feeds_db.claim_feed_for_poll(conn, feed_id, now=self.NOW)
+            during = self.NOW + timedelta(seconds=10)
+            assert feeds_db.has_due_feeds(conn, now=during) is False
+
+    def test_the_claim_expiring_makes_it_due_again(self, tmp_path):
+        path, feed_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.claim_feed_for_poll(conn, feed_id, now=self.NOW)
+            later = self.NOW + timedelta(seconds=POLL_CLAIM_SECONDS + 1)
+            assert feeds_db.has_due_feeds(conn, now=later) is True
+
+    def test_no_feeds_is_no_work(self, tmp_path):
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            assert feeds_db.has_due_feeds(conn, now=self.NOW) is False
+
+    def test_a_non_utc_clock_is_converted(self, tmp_path):
+        """Lexical comparison, as in `feeds_due_for_poll`: an eastward clock
+        unconverted would read a feed due at 13:00 UTC as due at 12:00 UTC."""
+        path, feed_id = _seed_one_feed(tmp_path)
+        self._set(path, feed_id, next_poll_at=(self.NOW + timedelta(hours=1)).isoformat())
+        east = timezone(timedelta(hours=2))
+        with feeds_db.connect(path) as conn:
+            assert feeds_db.has_due_feeds(conn, now=self.NOW.astimezone(east)) is False

@@ -907,3 +907,148 @@ class TestCronMdLeavesFeedsModuleJobsAlone:
             ("alice", f"{MODULE_PREFIX}run_scheduled"),
         ).fetchall()
         assert len(rows) == 1
+
+
+# ---------------------------------------------------------------------------
+# check_scheduled_jobs queues run_scheduled only when a feed is due (#933)
+# ---------------------------------------------------------------------------
+
+
+class TestRunScheduledOnlyWhenAFeedIsDue:
+    """Every five minutes, one task per user, was the cost of a poll that
+    usually found nothing due. The scheduler now looks first, in-process."""
+
+    SEEDED_LAST_RUN = "2026-01-01 00:00:00"
+
+    def _setup(self, tmp_path):
+        from istota.config import SchedulerConfig
+
+        app_config = _make_app_config(tmp_path, ["alice"])
+        app_config.scheduler = SchedulerConfig(cron_max_staleness_minutes=0)
+        conn = _conn(tmp_path)
+        _sync_feeds_module_jobs(conn, app_config)
+        # The first seed queues an immediate poll; not what is under test.
+        conn.execute("DELETE FROM tasks")
+        conn.execute(
+            "UPDATE scheduled_jobs SET last_run_at = ? WHERE user_id = 'alice'",
+            (self.SEEDED_LAST_RUN,),
+        )
+        conn.commit()
+        return app_config, conn
+
+    def _feeds_db(self, app_config, *, next_poll_at):
+        from istota.feeds import db as feeds_db
+
+        path = app_config.module_db_path("alice", "feeds")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            feed_id = feeds_db.upsert_feed(
+                conn, url="https://example.com/feed.xml", title=None,
+                site_url=None, source_type="rss", category_id=None,
+                poll_interval_minutes=30,
+            )
+            conn.execute(
+                "UPDATE feeds SET next_poll_at = ? WHERE id = ?",
+                (next_poll_at, feed_id),
+            )
+            conn.commit()
+
+    def _run(self, conn, app_config):
+        from unittest.mock import patch
+
+        from istota.scheduler import check_scheduled_jobs
+
+        with patch("istota.scheduler._sync_cron_files"):
+            created = check_scheduled_jobs(conn, app_config)
+        conn.commit()
+        return created
+
+    def _poll_tasks(self, conn):
+        return conn.execute(
+            "SELECT id FROM tasks WHERE user_id = 'alice' AND skill_args = ?",
+            (json.dumps(["run-scheduled"]),),
+        ).fetchall()
+
+    def _last_run(self, conn, name="run_scheduled"):
+        return conn.execute(
+            "SELECT last_run_at FROM scheduled_jobs WHERE user_id = 'alice' "
+            "AND name = ?",
+            (f"{MODULE_PREFIX}{name}",),
+        ).fetchone()[0]
+
+    def test_nothing_due_queues_nothing_and_keeps_the_cadence(self, tmp_path):
+        from datetime import datetime, timedelta, timezone
+
+        app_config, conn = self._setup(tmp_path)
+        later = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        self._feeds_db(app_config, next_poll_at=later)
+
+        self._run(conn, app_config)
+
+        assert self._poll_tasks(conn) == []
+        assert self._last_run(conn) != self.SEEDED_LAST_RUN
+        failures = conn.execute(
+            "SELECT consecutive_failures, auto_disabled_at FROM scheduled_jobs "
+            "WHERE user_id = 'alice' AND name = ?",
+            (f"{MODULE_PREFIX}run_scheduled",),
+        ).fetchone()
+        assert tuple(failures) == (0, None)
+
+    def test_no_feeds_database_queues_the_task_that_creates_it(self, tmp_path):
+        """The poll task is what initialises the DB, imports a legacy
+        feeds.toml and seeds the default subscriptions. If the first-seed poll
+        failed, or the DB was lost, skipping here would leave it missing."""
+        app_config, conn = self._setup(tmp_path)
+        assert not app_config.module_db_path("alice", "feeds").exists()
+
+        self._run(conn, app_config)
+
+        assert len(self._poll_tasks(conn)) == 1
+        # Looking must not create the file the poll's own init would own.
+        assert not app_config.module_db_path("alice", "feeds").exists()
+
+    def test_a_due_feed_queues_the_task(self, tmp_path):
+        app_config, conn = self._setup(tmp_path)
+        self._feeds_db(app_config, next_poll_at=None)
+
+        self._run(conn, app_config)
+
+        assert len(self._poll_tasks(conn)) == 1
+        assert self._last_run(conn) != self.SEEDED_LAST_RUN
+
+    def test_a_broken_pre_check_queues_the_task(self, tmp_path):
+        from unittest.mock import patch
+
+        app_config, conn = self._setup(tmp_path)
+        self._feeds_db(app_config, next_poll_at=None)
+
+        with patch(
+            "istota.feeds.db.has_due_feeds", side_effect=RuntimeError("boom"),
+        ):
+            self._run(conn, app_config)
+
+        assert len(self._poll_tasks(conn)) == 1
+
+    def test_an_unreadable_feeds_database_queues_the_task(self, tmp_path):
+        app_config, conn = self._setup(tmp_path)
+        path = app_config.module_db_path("alice", "feeds")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"not a sqlite database at all, just bytes" * 4)
+
+        self._run(conn, app_config)
+
+        assert len(self._poll_tasks(conn)) == 1
+
+    def test_the_prune_job_is_not_gated(self, tmp_path):
+        """Only `run_scheduled` has a pre-check: a prune with no due feeds still
+        has entries to age out."""
+        app_config, conn = self._setup(tmp_path)
+
+        self._run(conn, app_config)
+
+        prune = conn.execute(
+            "SELECT id FROM tasks WHERE user_id = 'alice' AND skill_args = ?",
+            (json.dumps(["prune"]),),
+        ).fetchall()
+        assert len(prune) == 1
