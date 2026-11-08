@@ -4,9 +4,8 @@ Three steps, each its own CLI verb, which `istota-stack localize-workspace`
 runs in order with the stack's writers stopped:
 
 - `copy_workspace` (`istota workspace localize`): copies the workspace's own
-  top-level entries (`Users/`, `Channels/`, `Groups/`, `PERSONA.md`,
-  `WORLDVIEW.md`) from the rclone mount to the local tree. Nothing else at
-  the root of the bot's
+  top-level entries (`Users/`, `Channels/`, `Groups/`, `PERSONA.md`) from the
+  rclone mount to the local tree. Nothing else at the root of the bot's
   Nextcloud files is the workspace's. Every level is opened `O_NOFOLLOW`
   relative to the one above it, because every user's tree is bound read-write
   into that user's sandbox and anything in it may be planted; a symlink, FIFO,
@@ -61,7 +60,7 @@ EXIT_SKIPPED = 2
 EXIT_IO = 3
 
 TOP_LEVEL_DIRS = ("Users", "Channels", "Groups")
-TOP_LEVEL_FILES = ("PERSONA.md", "WORLDVIEW.md")
+TOP_LEVEL_FILES = ("PERSONA.md",)
 NOTE_NAME = "MOVED.md"
 PRE_LOCALIZE_SUFFIX = ".pre-localize"
 #: The first line `istota apply` writes into a config it owns (`apply.CONFIG_HEADER`).

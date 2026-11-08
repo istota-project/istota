@@ -371,12 +371,16 @@ class TestNoSystemLinePointsAtTheUserHalf:
             'don\'t say "as I mentioned above"',
             # Names the severity categories listed under it in the same file.
             "Only for the categories below.",
+            # The worldview's "above" and "below" are positions, not referents.
+            "markets included, above the people in it",
+            "runs below reason",
         }
 
         guidelines = sorted((repo / "config" / "guidelines").glob("*.md"))
         assert guidelines, "the guidelines glob found nothing"
         sources = guidelines + [
             repo / "config" / "emissaries.md",
+            repo / "config" / "worldview.md",
             repo / "config" / "persona.md",
         ]
 

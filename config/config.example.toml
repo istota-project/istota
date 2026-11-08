@@ -8,9 +8,8 @@ bot_name = "Istota"
 # `istota setup` writes `false` here for local single-user installs.
 # emissaries_enabled = true
 
-# Include WORLDVIEW.md from the file root, between emissaries and the persona
-# (default: true). Nothing is shipped; without the file there is no worldview.
-# Set false to switch it off without deleting the file.
+# Include worldview.md (the positions the agent judges from, after Common Task)
+# in system prompts, between emissaries and the persona (default: true).
 # worldview_enabled = true
 
 # =============================================================================

@@ -8,7 +8,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 |---|---|---|
 | `bot_name` | `"Istota"` | User-facing name (chat, emails, folder names) |
 | `emissaries_enabled` | `true` | Include emissaries.md in system prompts |
-| `worldview_enabled` | `true` | Include `WORLDVIEW.md` from the file root, between emissaries and the persona, when the file exists. See [persona](persona.md#worldview) |
+| `worldview_enabled` | `true` | Include worldview.md in system prompts, between emissaries and the persona. See [persona](persona.md#worldview) |
 | `model` | `""` | **Deprecated** (ISSUE-418). This was the `claude_code` brain's own default living at the top level, where it was applied to whatever brain ran and shadowed that brain's configured default — so a room pinned to `native` still got the Claude model. Still loads, and is migrated onto `[brain.claude_code]` with a warning; never onto `[brain.native]`. Set the per-brain key instead. |
 | `effort` | `""` | **Deprecated** (ISSUE-418), migrated the same way as `model` above. |
 | `db_path` | `"data/istota.db"` | SQLite database path |
