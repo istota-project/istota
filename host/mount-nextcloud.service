@@ -14,6 +14,10 @@ Type=notify
 User=10001
 Group=10001
 EnvironmentFile=-/srv/app/istota/host.env
+# RCLONE_RC_USER and RCLONE_RC_PASS for the rc below, written by provision.sh
+# (root's, 0640, group 10001, which the daemon reads it as). Required: without
+# it rclone would serve the rc with no password.
+EnvironmentFile=/srv/app/istota/rclone-rc.env
 # The VFS cache, owned by the uid above. rclone's default is $HOME/.cache, and
 # this user's home is /srv/app/istota, which it cannot write: rclone then disables
 # the cache and writes needing it fail ("can't open file - writer failed").
@@ -21,14 +25,24 @@ CacheDirectory=istota-rclone
 CacheDirectoryMode=0700
 # Self-heal a dead endpoint ("Transport endpoint is not connected") first.
 ExecStartPre=-/bin/fusermount3 -uz /srv/mount/nextcloud/content
+# A socket left by a killed rclone makes the rc's listen fail.
+ExecStartPre=-/bin/rm -f /srv/app/istota/rclone-rc/rc.sock
+# --dir-cache-time is long because the daemon's tree watcher asks Nextcloud
+# what changed and tells rclone over the rc (vfs/forget, vfs/refresh, #939);
+# src/istota/nextcloud/tree_watch.py's DIR_CACHE_SECONDS is the same value.
+# There is no --poll-interval: the WebDAV backend has no change notification.
+# The rc can write and delete anywhere on the remote; its socket is in a
+# directory only this uid can enter (0700) and it takes a password. Only the
+# daemon container binds it, and no task sandbox does.
 ExecStart=/usr/bin/rclone mount \
   --config /srv/app/istota/rclone.conf \
   --allow-other \
   --cache-dir /var/cache/istota-rclone \
   --vfs-cache-mode full \
   --vfs-cache-max-age 1h \
-  --dir-cache-time 30s \
-  --poll-interval 10s \
+  --dir-cache-time 10m \
+  --rc \
+  --rc-addr unix:///srv/app/istota/rclone-rc/rc.sock \
   --timeout 30s \
   --contimeout 15s \
   --low-level-retries 3 \

@@ -12,11 +12,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Group members can change their group's files.** Every current member can upload, create folders, edit text files and delete files and empty folders in the group's folder from Files, and upload from the group's Shared files card, which also lists recent changes. Existing group folders became member-writable with this change, and members who joined earlier were not told; the All users folder stays admin-only, and `GROUP.md` and `memories` at the top of the folder cannot be changed from Files. See docs/features/groups.md.
 - Recent searches in the search dialog are a list you can move through with the arrow keys and open with Enter, instead of a row of buttons with no space between them.
 
+- The feeds poll no longer queues a task every five minutes for each user. The scheduler checks the user's feeds first and queues the poll only when a feed is due, so the admin task list and the daemon log carry far fewer empty runs.
+
+- Scheduled skill jobs no longer look up the user's calendars on Nextcloud before every run. Only the calendar and location skills read that list, so the other module jobs, such as the feeds and money polls, now make no CalDAV requests.
+
+- The scheduler syncs the money, feeds and health module jobs every ten minutes instead of every minute, so it no longer reads each user's module folders on Nextcloud once a minute. After a module is enabled, a user is added or Garmin is connected, the first feeds poll or Garmin backfill can now take up to ten minutes to start. Turning a module off still stops its jobs at once.
+
+- **The daemon reads your Nextcloud files only after they change.** With full Nextcloud integration, the TASKS.md poll, the CRON.md sync and the shared-file organizer used to read the mount every 30 to 120 seconds, and each read re-listed the folders from the root. The daemon now asks Nextcloud every 30 seconds whether anything under its root changed, follows only the changed folders, and tells the mount which listings to drop, so the mount keeps the rest for ten minutes. An edit you make in Nextcloud still reaches the bot within about a minute, and each poller also runs once an hour regardless. `[scheduler] tree_watch_interval` sets the interval. **Upgrade note:** `istota-stack update` reprovisions the VM, which writes a password for the mount's new control socket and restarts the mount and the stack once; nothing else is needed. `istota doctor` checks the socket as `nextcloud.rclone_rc`.
+
+- The daemon no longer rewrites `status.json` on Nextcloud every minute. It writes the file when the worker or queue counts change, and otherwise every five minutes, so a status that has not changed now has an `updated_at` up to five minutes old instead of one minute. A reader that treats an older `updated_at` as a stopped daemon needs a threshold above five minutes.
+
 ### Fixed
 
 - The browser image installs Google's current stable Chrome on every `istota-stack update`. Before, Docker's build cache kept the Chrome from an earlier build until something else in the browser image changed, so Chrome could fall weeks behind. `istota doctor` now reports the running Chrome and warns when a newer stable release has been out for more than a week.
 - Files no longer says your tasks can read and change the All users folder from your private chat. Tasks reach it only from a room linked to All users, and its note in Files now says so.
 - The P&L and P&L % columns of the Money overview's holdings are green and red again. An amount under a cent now shows no sign or colour, and a zero P&L % no longer shows a "+".
+- The daily database backup no longer downloads the previous day's snapshots back from the Nextcloud mount. Each snapshot is now taken and checked on local disk, compared against the row counts the last run recorded in a `manifest.json` beside the snapshots, and uploaded once. The first backup after the upgrade still reads each prior snapshot once, since no manifest exists yet. The server needs free local disk beside its databases for the largest one.
 
 ## [0.48.0] - 2026-11-02
 

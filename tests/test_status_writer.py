@@ -133,3 +133,80 @@ class TestStatusWriter:
             content = _call(mock_request, "PUT").kwargs["content"]
             data = json.loads(content)
             assert data["users_configured"] == 2
+
+
+def _puts(mock_request):
+    return [c for c in mock_request.call_args_list if c[0][0] == "PUT"]
+
+
+class TestStatusWriteOnlyOnChange:
+    """ISSUE-936: PUT when the payload changes or the heartbeat is due, not every tick."""
+
+    def test_unchanged_counts_make_one_put(self):
+        cfg = _make_config()
+        with patch("istota.status_writer.time.time", return_value=1000.0):
+            init_status_writer()
+        with _dav_ok() as mock_request:
+            for t in (1060.0, 1120.0, 1180.0):
+                with patch("istota.status_writer.time.time", return_value=t):
+                    write_status(cfg, active_workers=1, pending_fg=0, pending_bg=0)
+            assert len(_puts(mock_request)) == 1
+
+    def test_a_changed_count_puts_again(self):
+        cfg = _make_config()
+        with patch("istota.status_writer.time.time", return_value=1000.0):
+            init_status_writer()
+        with _dav_ok() as mock_request:
+            with patch("istota.status_writer.time.time", return_value=1060.0):
+                write_status(cfg, active_workers=1, pending_fg=0, pending_bg=0)
+            with patch("istota.status_writer.time.time", return_value=1120.0):
+                write_status(cfg, active_workers=1, pending_fg=2, pending_bg=0)
+            puts = _puts(mock_request)
+            assert len(puts) == 2
+            assert json.loads(puts[1].kwargs["content"])["queue"]["pending_foreground"] == 2
+
+    def test_heartbeat_puts_when_nothing_changed(self):
+        cfg = _make_config()
+        with patch("istota.status_writer.time.time", return_value=1000.0):
+            init_status_writer()
+        with _dav_ok() as mock_request:
+            with patch("istota.status_writer.time.time", return_value=1060.0):
+                write_status(cfg, active_workers=0, pending_fg=0, pending_bg=0)
+            with patch("istota.status_writer.time.time", return_value=1060.0 + 240):
+                write_status(cfg, active_workers=0, pending_fg=0, pending_bg=0)
+            assert len(_puts(mock_request)) == 1
+            # The fifth 60 s tick, landing a little early on our clock because
+            # the gate measured before the DB queries, still writes.
+            with patch("istota.status_writer.time.time", return_value=1060.0 + 299.95):
+                write_status(cfg, active_workers=0, pending_fg=0, pending_bg=0)
+            puts = _puts(mock_request)
+            assert len(puts) == 2
+            assert json.loads(puts[1].kwargs["content"])["updated_at"] == 1359
+
+    def test_a_failed_put_is_retried_on_the_next_call(self):
+        cfg = _make_config()
+        with patch("istota.status_writer.time.time", return_value=1000.0):
+            init_status_writer()
+        with patch(
+            "istota.nextcloud._http.httpx.request",
+            return_value=MagicMock(status_code=503, text="Unavailable"),
+        ):
+            with patch("istota.status_writer.time.time", return_value=1060.0):
+                write_status(cfg, active_workers=0, pending_fg=0, pending_bg=0)
+        with _dav_ok() as mock_request:
+            with patch("istota.status_writer.time.time", return_value=1120.0):
+                write_status(cfg, active_workers=0, pending_fg=0, pending_bg=0)
+            assert len(_puts(mock_request)) == 1
+
+    def test_a_restart_writes_first(self):
+        cfg = _make_config()
+        with _dav_ok() as mock_request:
+            with patch("istota.status_writer.time.time", return_value=1000.0):
+                init_status_writer()
+                write_status(cfg, active_workers=0, pending_fg=0, pending_bg=0)
+            with patch("istota.status_writer.time.time", return_value=1060.0):
+                init_status_writer()
+                write_status(cfg, active_workers=0, pending_fg=0, pending_bg=0)
+            puts = _puts(mock_request)
+            assert len(puts) == 2
+            assert json.loads(puts[1].kwargs["content"])["started_at"] == 1060

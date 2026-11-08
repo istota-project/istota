@@ -456,6 +456,32 @@ class TestGateHasDiscoveredCalendars:
         assert "OWNER" not in env
 
 
+class TestNeedsDiscoveredCalendars:
+    """ISSUE-931: the scheduler runs CalDAV discovery for a skill task only
+    when the skill it names has a spec behind the gate above."""
+
+    def test_true_for_the_shipped_calendar_readers_only(self):
+        from istota.skills._env import needs_discovered_calendars
+        from istota.skills._loader import load_skill_index
+        index = load_skill_index(Path("/nonexistent"), bundled_dir=None)
+        assert needs_discovered_calendars(["calendar"], index) is True
+        assert needs_discovered_calendars(["location"], index) is True
+        assert needs_discovered_calendars(["feeds"], index) is False
+        assert needs_discovered_calendars(["briefing"], index) is False
+        assert needs_discovered_calendars(["feeds", "location"], index) is True
+
+    def test_unknown_skill_and_empty_list_need_nothing(self):
+        from istota.skills._env import needs_discovered_calendars
+        meta = SkillMeta(
+            name="x",
+            description="x",
+            env_specs=[EnvSpec(var="OWNER", source="user_id")],
+        )
+        assert needs_discovered_calendars(["missing"], {"x": meta}) is False
+        assert needs_discovered_calendars([], {"x": meta}) is False
+        assert needs_discovered_calendars(["x"], {"x": meta}) is False
+
+
 class TestPhase2ManifestAcceptance:
     """Spot-check the shipped manifests have the expected sensitive flags
     and gates after the Phase 2 migration. Pinned so a future manifest

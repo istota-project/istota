@@ -2713,6 +2713,41 @@ class TestTheNativeBrainDoesNotAddTheDerivedCache:
         assert str(cache_root / "alice") in roots
 
 
+class TestTheMountsRcIsMasked:
+    """#939. The rclone rc can write and delete anywhere on the bot's
+    Nextcloud. The compose overlay binds it into the daemon at
+    `rclone_rc.RC_DIR`; every sandbox covers that path with an empty tmpfs, so
+    a `sandbox_ro_paths` entry above it cannot hand it to a task."""
+
+    def _config(self, tmp_path):
+        mount = tmp_path / "mnt" / "shared"
+        (mount / "Users" / "alice").mkdir(parents=True)
+        (tmp_path / "data").mkdir()
+        return Config(
+            db_path=tmp_path / "data" / "istota.db",
+            temp_dir=tmp_path / "tmp",
+            workspace_path=mount,
+            skills_dir=tmp_path / "skills",
+            security=SecurityConfig(sandbox_enabled=True, sandbox_ro_paths=["/run"]),
+        )
+
+    def test_with_the_rc_bound_in_its_directory_is_masked(
+        self, tmp_path, make_sandbox_task, monkeypatch,
+    ):
+        from istota.nextcloud import rclone_rc
+
+        monkeypatch.setenv(rclone_rc.RC_ENV_VAR, "1")
+        result = _run_bwrap(self._config(tmp_path), make_sandbox_task(), is_admin=True)
+        assert str(rclone_rc.RC_DIR) in _tmpfs_masks(result)
+
+    def test_without_it_nothing_is_added(self, tmp_path, make_sandbox_task, monkeypatch):
+        from istota.nextcloud import rclone_rc
+
+        monkeypatch.delenv(rclone_rc.RC_ENV_VAR, raising=False)
+        result = _run_bwrap(self._config(tmp_path), make_sandbox_task(), is_admin=True)
+        assert str(rclone_rc.RC_DIR) not in result
+
+
 class TestSessionLogContainment:
     """Where the native brain's session transcripts sit relative to the sandbox.
 

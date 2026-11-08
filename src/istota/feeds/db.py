@@ -746,22 +746,42 @@ def feeds_due_for_poll(
     (ISSUE-388). An expired claim is no claim — a process that died mid-fetch
     must not take its feed off the air.
     """
-    now = now or datetime.now(timezone.utc)
-    # Both comparisons below are lexical on ISO strings, so an offset other
-    # than +00:00 compares wrong by that offset — eastward a live claim reads
-    # as expired hours early, westward an expired one holds. Every writer here
-    # stores UTC, so a caller's clock is converted rather than trusted.
-    iso = _utc_iso(now)
+    where, params = _due_for_poll_where(now)
     rows = conn.execute(
-        """
+        f"""
         SELECT * FROM feeds
-        WHERE (next_poll_at IS NULL OR next_poll_at <= ?)
-          AND (poll_claimed_until IS NULL OR poll_claimed_until <= ?)
+        WHERE {where}
         ORDER BY (next_poll_at IS NULL) DESC, next_poll_at ASC, id ASC
         """,
-        (iso, iso),
+        params,
     ).fetchall()
     return [_row_to_feed(r) for r in rows]
+
+
+def has_due_feeds(conn: sqlite3.Connection, now: datetime | None = None) -> bool:
+    """Whether :func:`feeds_due_for_poll` would return anything.
+
+    The scheduler asks this before it queues a ``run-scheduled`` task, so a
+    tick with nothing due costs one read rather than a task (#933).
+    """
+    where, params = _due_for_poll_where(now)
+    row = conn.execute(f"SELECT 1 FROM feeds WHERE {where} LIMIT 1", params).fetchone()
+    return row is not None
+
+
+def _due_for_poll_where(now: datetime | None) -> tuple[str, tuple[str, str]]:
+    """The due-and-unclaimed predicate shared by the two readers above."""
+    now = now or datetime.now(timezone.utc)
+    # Both comparisons are lexical on ISO strings, so an offset other than
+    # +00:00 compares wrong by that offset — eastward a live claim reads as
+    # expired hours early, westward an expired one holds. Every writer here
+    # stores UTC, so a caller's clock is converted rather than trusted.
+    iso = _utc_iso(now)
+    where = (
+        "(next_poll_at IS NULL OR next_poll_at <= ?) "
+        "AND (poll_claimed_until IS NULL OR poll_claimed_until <= ?)"
+    )
+    return where, (iso, iso)
 
 
 def claim_feed_for_poll(

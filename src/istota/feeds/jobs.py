@@ -5,7 +5,8 @@ these jobs into the ``scheduled_jobs`` table. Names use the
 ``_module.feeds.`` prefix so CRON.md orphan deletion never touches them.
 
 Two jobs are auto-seeded. ``run_scheduled`` polls every feed whose
-``next_poll_at`` is in the past, every five minutes. ``prune`` applies
+``next_poll_at`` is in the past; the scheduler looks every five
+minutes and queues it only when a feed is due (#933). ``prune`` applies
 the entry retention policy once a day. Users wanting a
 narrated/observable poll can add their own prompt-based job to CRON.md.
 
@@ -59,8 +60,8 @@ def jobs_for_user(feeds_context, user_id: str) -> list[dict]:
 
     Returns dicts with ``name``, ``cron``, ``skill``, ``skill_args``
     (JSON-encoded ``list[str]``). Consumed by
-    ``_sync_feeds_module_jobs``. Always seeds both jobs: the poller
-    cheaply no-ops when no feed is due, and the prune cheaply no-ops
+    ``_sync_feeds_module_jobs``. Always seeds both jobs: the scheduler
+    queues no poll when no feed is due (#933), and the prune cheaply no-ops
     when nothing is over its age window or its per-feed maximum.
     """
     if feeds_context is None:

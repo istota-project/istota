@@ -320,3 +320,84 @@ class TestDiscoverAndOrganize:
 
         result = discover_and_organize_shared_files(config)
         assert result == []
+
+
+# --- the tree watcher gates the pass (#939) ---
+
+
+class TestTheTreeWatcherGatesThePass:
+    """With the watcher answering, the organizer reads the root only when its
+    entries changed, and takes each entry's owner from the watcher's listing."""
+
+    @pytest.fixture
+    def watched(self, make_config, tmp_path, monkeypatch):
+        from istota.nextcloud import tree_watch
+
+        from .support import tree_watch_fake
+
+        config = make_config(workspace_mount_path=tmp_path / "mount")
+        fake = tree_watch_fake.install(monkeypatch, users=("alice",), bot_dir="istota")
+        tree_watch.run_pass(config)
+        yield config, fake
+        tree_watch.reset()
+
+    @patch("istota.shared_file_organizer.ensure_user_directories_v2")
+    @patch("istota.shared_file_organizer.move_file", return_value=True)
+    @patch("istota.shared_file_organizer.path_exists", return_value=False)
+    @patch("istota.shared_file_organizer.get_file_owner", return_value=None)
+    @patch("istota.shared_file_organizer.list_files", return_value=[])
+    def test_an_unchanged_root_is_not_read(
+        self, mock_list, mock_owner, mock_exists, mock_move, mock_ensure, watched,
+    ):
+        config, _fake = watched
+        discover_and_organize_shared_files(config)
+        mock_list.reset_mock()
+        mock_owner.reset_mock()
+
+        assert discover_and_organize_shared_files(config) == []
+        mock_list.assert_not_called()
+        mock_owner.assert_not_called()
+
+    @patch("istota.shared_file_organizer.ensure_user_directories_v2")
+    @patch("istota.shared_file_organizer.move_file", return_value=True)
+    @patch("istota.shared_file_organizer.path_exists", return_value=False)
+    @patch("istota.shared_file_organizer.get_file_owner", return_value=None)
+    @patch("istota.shared_file_organizer.list_files", return_value=[])
+    def test_a_new_share_is_organized_with_the_owner_from_the_listing(
+        self, mock_list, mock_owner, mock_exists, mock_move, mock_ensure, watched,
+    ):
+        from istota.nextcloud import tree_watch
+
+        config, fake = watched
+        discover_and_organize_shared_files(config)
+        mock_list.reset_mock()
+        fake.write("/report.pdf")
+        fake.nodes["/report.pdf"]["owner"] = "alice"
+        tree_watch.run_pass(config)
+
+        result = discover_and_organize_shared_files(config)
+
+        assert [r.new_path for r in result] == ["/Users/alice/shared/report.pdf"]
+        mock_list.assert_not_called()
+        mock_owner.assert_not_called()
+
+    @patch("istota.shared_file_organizer.ensure_user_directories_v2")
+    @patch("istota.shared_file_organizer.move_file", return_value=False)
+    @patch("istota.shared_file_organizer.path_exists", return_value=False)
+    @patch("istota.shared_file_organizer.get_file_owner", return_value=None)
+    @patch("istota.shared_file_organizer.list_files", return_value=[])
+    def test_a_move_that_failed_is_tried_again_on_the_next_pass(
+        self, mock_list, mock_owner, mock_exists, mock_move, mock_ensure, watched,
+    ):
+        from istota.nextcloud import tree_watch
+
+        config, fake = watched
+        discover_and_organize_shared_files(config)
+        fake.write("/report.pdf")
+        fake.nodes["/report.pdf"]["owner"] = "alice"
+        tree_watch.run_pass(config)
+        discover_and_organize_shared_files(config)
+        assert mock_move.call_count == 1
+
+        discover_and_organize_shared_files(config)
+        assert mock_move.call_count == 2

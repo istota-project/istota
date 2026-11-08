@@ -854,6 +854,8 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 
 # Background sweeps and retention. Every interval is in seconds; 0 turns it off.
 # shared_file_check_interval = 120             # shared-file organization checks
+# tree_watch_interval = 30                     # ETag check of the bot's Nextcloud root; the TASKS.md poll, the CRON.md sync and
+#                                              # the shared-file organizer read the mount only after a change, or hourly
 # heartbeat_check_interval = 60                # HEARTBEAT.md checks
 # db_health_check_interval = 86400             # SQLite quick_check over per-user DBs
 # worktree_reap_interval = 21600               # removes developer worktrees whose work has landed

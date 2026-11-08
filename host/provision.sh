@@ -339,6 +339,24 @@ mount_cache_name() {
     echo "${target:-$remote}"
 }
 
+# The mount's rc (#939): the socket's directory, the daemon's uid's alone, and
+# the password file systemd hands rclone and the daemon reads, root's and
+# readable by group 10001. Prints "new" when it wrote a password, which a
+# running mount does not have yet.
+RCLONE_RC_DIR="${STACK}/rclone-rc"
+RCLONE_RC_ENV="${STACK}/rclone-rc.env"
+ensure_rclone_rc() {
+    install -d -m 0700 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "$RCLONE_RC_DIR"
+    if ! grep -Eq '^RCLONE_RC_PASS=.+' "$RCLONE_RC_ENV" 2>/dev/null; then
+        (umask 077; printf 'RCLONE_RC_USER=istota\nRCLONE_RC_PASS=%s\n' \
+            "$(openssl rand -hex 32)" > "${RCLONE_RC_ENV}.new")
+        mv -f "${RCLONE_RC_ENV}.new" "$RCLONE_RC_ENV"
+        echo new
+    fi
+    chown "root:${ISTOTA_UID}" "$RCLONE_RC_ENV"
+    chmod 0640 "$RCLONE_RC_ENV"
+}
+
 # One line per entry not yet uploaded, relative to the cache's vfsMeta.
 mount_pending_uploads() {
     local name meta
@@ -619,6 +637,7 @@ if [ "$(host_env STORAGE)" = "nextcloud" ]; then
     else
         log "STORAGE=nextcloud: no ${STACK}/rclone.conf yet. \`istota-stack setup\` writes it from the Nextcloud answers (the management role writes it from istota_rclone_conf); then re-run this."
     fi
+    [ -n "$bare_metal_mount" ] || [ -z "$(ensure_rclone_rc)" ] || mount_unit_changed=1
     # Never write into an unmounted path: the stack requires the mount.
     changed_file "${dropin}/mount.conf" "$(cat <<'EOF'
 [Unit]

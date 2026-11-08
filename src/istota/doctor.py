@@ -1408,6 +1408,69 @@ def check_writable_dirs(config: "Config", probe: bool) -> list[CheckResult]:
     return results
 
 
+def check_rclone_rc(config: "Config", probe: bool) -> CheckResult:
+    """The Nextcloud mount's rc answers, takes its password and refuses a
+    caller without it (#939).
+
+    The tree watcher tells rclone over it which directories changed, which is
+    what lets the mount keep its listings for ten minutes. Without it a change
+    in Nextcloud still arrives, once the mount's cache has expired, so a
+    missing or silent rc is a WARN. A password it refuses (the file replaced
+    under a running mount) and an rc that answers with no password at all,
+    which would let anything that reaches the socket write to the whole
+    remote, are FAILs. Reason codes only, never a response body.
+    """
+    from istota.nextcloud import rclone_rc
+
+    name = "nextcloud.rclone_rc"
+    if not config.storage_is_nextcloud:
+        return CheckResult(name, SKIP, "the workspace is not the Nextcloud mount")
+    if _non_daemon_env_markers():
+        return CheckResult(name, SKIP, "inside a task, which the rc is never bound into")
+    if not rclone_rc.configured():
+        return CheckResult(
+            name, WARN,
+            "the mount's rc is not bound into this process, so a change in Nextcloud "
+            "reaches the TASKS.md poll, the CRON.md sync and the shared-file organizer "
+            "within ten minutes rather than within the tree watcher's interval",
+            remedy=(
+                "Run `istota-stack update`, which reprovisions the VM: provision.sh writes "
+                "/srv/app/istota/rclone-rc.env and restarts the mount, and istota-stack "
+                "binds the rc into the daemon."
+            ),
+        )
+    if not probe:
+        return CheckResult(name, SKIP, "not probed")
+    anonymous = rclone_rc.call("rc/noop", authenticate=False)
+    if anonymous.ok:
+        return CheckResult(
+            name, FAIL, "the mount's rc answers without a password",
+            remedy=(
+                "mount-nextcloud.service must read /srv/app/istota/rclone-rc.env; "
+                "re-run provision.sh, then `systemctl restart mount-nextcloud.service`."
+            ),
+        )
+    answer = rclone_rc.call("rc/noop")
+    if answer.ok:
+        return CheckResult(name, OK, "the mount's rc answers and requires its password")
+    if answer.reason in ("unauthorized", "no_credentials"):
+        return CheckResult(
+            name, FAIL, f"the mount's rc refused this process ({answer.reason})",
+            remedy=(
+                "The password rclone started with is not the one in "
+                "/srv/app/istota/rclone-rc.env: restart the mount "
+                "(`systemctl restart mount-nextcloud.service`)."
+            ),
+        )
+    return CheckResult(
+        name, WARN, f"the mount's rc did not answer ({answer.reason})",
+        remedy=(
+            "Check mount-nextcloud.service (`journalctl -u mount-nextcloud.service`); "
+            "runtime.mount_liveness says whether the mount itself is up."
+        ),
+    )
+
+
 def check_mount_liveness(config: "Config", probe: bool) -> CheckResult:
     """A configured workspace mount is actually mounted.
 
@@ -11089,6 +11152,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("runtime.task_failure_rate", check_task_failure_rate),
     ("runtime.writable_dirs", check_writable_dirs),
     ("runtime.mount_liveness", check_mount_liveness),
+    ("nextcloud.rclone_rc", check_rclone_rc),
     ("runtime.workspace_xattr", check_workspace_xattr),
     ("runtime.workspace_mode", check_workspace_mode),
     ("runtime.workspace_disk", check_workspace_disk),
@@ -11209,6 +11273,8 @@ CHECK_SCOPES: dict[str, str] = {
     "runtime.task_failure_rate": DEPLOYMENT,
     "runtime.writable_dirs": DEPLOYMENT,
     "runtime.mount_liveness": DEPLOYMENT,
+    # Deployment: the rc is the VM's mount, bound into the daemon alone.
+    "nextcloud.rclone_rc": DEPLOYMENT,
     "runtime.workspace_xattr": DEPLOYMENT,
     "runtime.workspace_mode": DEPLOYMENT,
     "runtime.workspace_disk": DEPLOYMENT,

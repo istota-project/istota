@@ -12,10 +12,21 @@ volume; ``doctor``'s ``backups.off_volume`` says so, and
 
 The snapshot uses SQLite's online backup API (``Connection.backup``), which
 produces a consistent copy of a *live* WAL DB without stopping writers and
-without copying the ``-wal`` / ``-shm`` sidecars. The destination is a plain
+without copying the ``-wal`` / ``-shm`` sidecars. The copy is a plain
 rollback-journal DB file — safe to sit on a FUSE mount because nothing ever
 opens it in WAL there; it's cold storage. A ``wal_checkpoint(TRUNCATE)`` runs
 first to keep the source WAL small.
+
+**Each snapshot is taken on local disk and uploaded once** (ISSUE-935). The
+backup API writes into a staging directory beside the framework DB, one
+database at a time, the collapse guard counts rows there, and only then is the
+file copied to the destination under a temporary name and renamed into place,
+so no SQLite write happens on the mount and a partial upload never carries a
+snapshot's name. The guard's prior count comes from ``manifest.json`` in the
+newest older dated dir that records the DB, written at the end of each run.
+Reading the prior snapshot itself, as the guard did before, downloads it in
+full from an rclone mount; that read is now only the fallback for a DB no
+manifest records, which after the upgrade happens once.
 
 Each run writes to its own dated directory (``<root>/<YYYY-MM-DD>/…``) so the
 history isn't a single overwritten slot: a corrupted or emptied live DB can't
@@ -36,18 +47,20 @@ Restore is a plain file copy back to the local path (see ``db_restore``); then
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import shutil
 import sqlite3
 import sys
+import tempfile
 import time
 from datetime import date as _date
 from datetime import timedelta
 from pathlib import Path
 
-from istota.lib.atomic_write import write_bytes_atomic
+from istota.lib.atomic_write import atomic_writer, write_bytes_atomic, write_text_atomic
 from istota.lib.workspace_marker import (
     FSTYPE_ENV, MARKER_NAME, marker_present, marker_required, undeclared_mount,
 )
@@ -84,6 +97,14 @@ _FILE_MODE = 0o600
 # clock reset to "now" on every boot, and a host that deploys more than once a
 # day (auto-update cron) would defer the backup forever.
 _LAST_RUN_FILENAME = ".db_backup_last_run"
+
+#: Row counts of a dated dir's good snapshots, keyed by relpath.
+MANIFEST_NAME = "manifest.json"
+_MANIFEST_FORMAT = 1
+#: Local staging for snapshots before upload, beside the framework DB.
+_STAGING_DIRNAME = ".backup-staging"
+# A run directory older than this was left by a process that died mid-run.
+_STALE_STAGING_SECONDS = 24 * 3600
 
 
 def _data_row_count(path: Path) -> int:
@@ -348,22 +369,22 @@ def _dated_dirs(root: Path) -> list[Path]:
 
 
 
-def _prior_good_snapshot(root: Path, date_str: str, rel: str) -> Path | None:
-    """Newest non-suspect snapshot of ``rel`` in a dated dir strictly older than
-    ``date_str``. ``rel`` is like ``framework/istota.db`` or ``alice/location.db``."""
+def _prior_good_dir(root: Path, date_str: str, rel: str) -> Path | None:
+    """Newest dated dir strictly older than ``date_str`` holding a non-suspect
+    snapshot of ``rel``, which is like ``framework/istota.db`` or
+    ``alice/location.db``."""
     for d in _dated_dirs(root):
         if d.name >= date_str:
             continue
-        candidate = d / rel
-        if candidate.exists():
-            return candidate
+        if (d / rel).exists():
+            return d
     return None
 
 
 def _was_recently_covered(root: Path, date_str: str, rel: str) -> bool:
     """Whether ``rel`` has a good snapshot from the last ``_VANISHED_LOOKBACK_DAYS``.
 
-    Separate from ``_prior_good_snapshot``, which the collapse guard uses and
+    Separate from ``_prior_good_dir``, which the collapse guard uses and
     where looking arbitrarily far back is the right behaviour: comparing row
     counts against the last good copy is worth doing however old it is. Here the
     question is different — did coverage just shrink — and that only has a
@@ -419,30 +440,120 @@ def _snapshot_one(src: Path, dest: Path, label: str) -> dict:
     return {**result, "status": "ok"}
 
 
-def _apply_collapse_guard(root: Path, date_str: str, rel: str, result: dict) -> dict:
-    """If ``rel`` previously held data but this fresh snapshot is empty/unreadable,
-    quarantine the fresh file as ``*.suspect`` and mark the result suspect."""
+def _read_manifest(dated_dir: Path) -> dict[str, int] | None:
+    """The row counts a dated dir's manifest records, or None when it has none.
+
+    An unreadable or malformed manifest is None, as is an entry that is not an
+    int: the caller then looks further back, and in the end reads the snapshot.
+    """
+    path = dated_dir / MANIFEST_NAME
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        logger.warning("db_backup_manifest_unreadable path=%s err=%s", path, exc)
+        return None
+    rows = data.get("rows") if isinstance(data, dict) else None
+    if not isinstance(rows, dict):
+        logger.warning("db_backup_manifest_malformed path=%s", path)
+        return None
+    return {
+        rel: count for rel, count in rows.items()
+        if isinstance(rel, str) and isinstance(count, int) and not isinstance(count, bool)
+    }
+
+
+def _write_manifest(dated_dir: Path, rows: dict[str, int]) -> None:
+    body = json.dumps({"format": _MANIFEST_FORMAT, "rows": rows}, indent=2, sort_keys=True)
+    try:
+        write_text_atomic(dated_dir / MANIFEST_NAME, body + "\n", mode=_FILE_MODE)
+    except OSError as exc:  # the next run falls back to reading the snapshot
+        logger.warning("db_backup_manifest_write_failed dir=%s err=%s", dated_dir, exc)
+
+
+def _prior_row_count(root: Path, date_str: str, rel: str, manifests: dict) -> int | None:
+    """Rows in the last good snapshot of ``rel`` before ``date_str``, or None
+    when there is none. ``manifests`` caches each dir's manifest for the run.
+
+    The newest older dir holding a good copy of ``rel`` decides, as the guard
+    always compared against the newest good copy. Its manifest answers when it
+    records ``rel``; only a dir without that entry (one from before manifests,
+    or whose manifest write failed) has its snapshot opened, which on the mount
+    downloads it. Skipping such a dir for an older manifest would compare
+    against a count from before it, which can be 0.
+    """
+    dated_dir = _prior_good_dir(root, date_str, rel)
+    if dated_dir is None:
+        return None
+    if dated_dir not in manifests:
+        manifests[dated_dir] = _read_manifest(dated_dir)
+    recorded = manifests[dated_dir]
+    if recorded is not None and rel in recorded:
+        return recorded[rel]
+    return _data_row_count(dated_dir / rel)
+
+
+def _upload(staged: Path, dest: Path) -> None:
+    """Copy ``staged`` to ``dest`` under a temporary name, then rename it in."""
+    _secure_mkdir(dest.parent)
+    with open(staged, "rb") as source, atomic_writer(dest, mode=_FILE_MODE) as target:
+        shutil.copyfileobj(source, target, 1024 * 1024)
+
+
+def _guard_and_upload(
+    root: Path, date_str: str, rel: str, staged: Path, result: dict, manifests: dict,
+) -> tuple[dict, int]:
+    """Check the staged snapshot against the prior count, then upload it: to
+    ``dest`` when it is good, to ``dest.suspect`` when a DB that held data now
+    holds none (or cannot be read). Returns the result and the staged row
+    count; the result carries the two counts only where there was a prior."""
     dest = Path(result["dest"])
-    prior = _prior_good_snapshot(root, date_str, rel)
-    if prior is None:
-        return result  # first-ever snapshot — nothing to compare against
-    prior_rows = _data_row_count(prior)
-    new_rows = _data_row_count(dest)
+    new_rows = _data_row_count(staged)
+    prior_rows = _prior_row_count(root, date_str, rel, manifests)
+    if prior_rows is None:
+        _upload(staged, dest)  # first-ever snapshot — nothing to compare against
+        return result, new_rows
     result = {**result, "prior_rows": prior_rows, "new_rows": new_rows}
     if prior_rows > 0 and new_rows <= 0:
         suspect = dest.with_name(dest.name + ".suspect")
         try:
-            if suspect.exists():
-                suspect.unlink()
-            dest.rename(suspect)
+            # A good copy from earlier today is replaced by the quarantine,
+            # as when the fresh file was renamed over it.
+            _upload(staged, suspect)
+            dest.unlink(missing_ok=True)
         except OSError as exc:  # noqa: BLE001
             logger.error("db_backup_quarantine_failed label=%s err=%s", result["label"], exc)
         logger.error(
             "db_backup_suspect label=%s prior_rows=%d new_rows=%d — quarantined as .suspect",
             result["label"], prior_rows, new_rows,
         )
-        result["status"] = "suspect"
-    return result
+        return {**result, "status": "suspect"}, new_rows
+    _upload(staged, dest)
+    return result, new_rows
+
+
+def _staging_parent(config) -> Path:
+    db_path = getattr(config, "db_path", None)
+    if db_path:
+        return Path(db_path).parent / _STAGING_DIRNAME
+    return Path(tempfile.gettempdir()) / f"istota{_STAGING_DIRNAME}"
+
+
+def _sweep_stale_staging(parent: Path) -> None:
+    """Remove run dirs a killed process left; a live run's dir is younger."""
+    cutoff = time.time() - _STALE_STAGING_SECONDS
+    try:
+        entries = list(parent.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if entry.is_symlink() or not entry.is_dir() or entry.stat().st_mtime >= cutoff:
+                continue
+            shutil.rmtree(entry)
+        except OSError as exc:
+            logger.warning("db_backup_staging_sweep_failed dir=%s err=%s", entry, exc)
 
 
 def _good_db_relpaths(dated_dir: Path) -> set[str]:
@@ -532,43 +643,25 @@ def backup_databases(
     # dir to 0700 up front, then each per-DB subdir + file as it's written.
     _secure_mkdir(root)
     _secure_mkdir(dated_root)
-    results: list[dict] = []
+    staging_parent = _staging_parent(config)
+    _secure_mkdir(staging_parent)
+    _sweep_stale_staging(staging_parent)
+    # Per run, so a manual run beside the scheduler's cannot share a file.
+    run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=staging_parent))
+    try:
+        results, good_rows, suspect_rels = _snapshot_all(
+            config, root, date_str, dated_root, run_dir)
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
 
-    def _run(src: Path, rel: str, label: str) -> None:
-        dest = dated_root / rel
-        try:
-            res = _snapshot_one(src, dest, label)
-            if res["status"] == "ok":
-                res = _apply_collapse_guard(root, date_str, rel, res)
-            elif res["status"] == "skip_missing" and _was_recently_covered(root, date_str, rel):
-                # A DB nobody ever created is a skip; one that was being
-                # snapshotted days ago and now isn't there is coverage
-                # disappearing, which is the failure ISSUE-262 was about.
-                res = {**res, "status": "vanished"}
-                logger.error(
-                    "db_backup_vanished label=%s src=%s — had a snapshot within "
-                    "%d days and the source is now gone",
-                    label, res["src"], _VANISHED_LOOKBACK_DAYS,
-                )
-            results.append(res)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("db_backup_failed label=%s err=%s", label, exc)
-            results.append({"label": label, "status": "error", "error": str(exc)})
-
-    if getattr(config, "db_path", None):
-        _run(Path(config.db_path), "framework/istota.db", "framework")
-
-    for user_id in config.users:
-        for module in MODULES:
-            try:
-                src = config.module_db_path(user_id, module)
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "db_backup_path_failed user=%s module=%s err=%s",
-                    user_id, module, exc,
-                )
-                continue
-            _run(src, f"{user_id}/{module}.db", f"{module}:{user_id}")
+    # A same-day rerun keeps the counts of what it did not retake: a DB that
+    # errored this time still has this morning's file in the dir.
+    manifest_rows = _read_manifest(dated_root) or {}
+    for rel in suspect_rels:
+        manifest_rows.pop(rel, None)
+    manifest_rows.update(good_rows)
+    if manifest_rows:
+        _write_manifest(dated_root, manifest_rows)
 
     _prune_old_snapshots(root, getattr(config.scheduler, "db_backup_retention", 7))
     copy_config_files(config, date_str)
@@ -596,6 +689,68 @@ def backup_databases(
         ok, suspect, errored, vanished, dated_root,
     )
     return results
+
+
+def _snapshot_all(
+    config, root: Path, date_str: str, dated_root: Path, run_dir: Path,
+) -> tuple[list[dict], dict[str, int], set[str]]:
+    """Snapshot every DB through ``run_dir``, one at a time. Returns the per-DB
+    results, the row counts of the good ones, and the relpaths quarantined."""
+    results: list[dict] = []
+    good_rows: dict[str, int] = {}
+    suspect_rels: set[str] = set()
+    manifests: dict[Path, dict[str, int] | None] = {}
+
+    def _run(src: Path, rel: str, label: str) -> None:
+        dest = dated_root / rel
+        staged = run_dir / rel
+        try:
+            res = _snapshot_one(src, staged, label)
+            res = {**res, "dest": str(dest)}
+            if res["status"] == "ok":
+                res, rows = _guard_and_upload(root, date_str, rel, staged, res, manifests)
+                if res["status"] == "ok":
+                    good_rows[rel] = rows
+                else:
+                    suspect_rels.add(rel)
+            elif res["status"] == "skip_missing" and _was_recently_covered(root, date_str, rel):
+                # A DB nobody ever created is a skip; one that was being
+                # snapshotted days ago and now isn't there is coverage
+                # disappearing, which is the failure ISSUE-262 was about.
+                res = {**res, "status": "vanished"}
+                logger.error(
+                    "db_backup_vanished label=%s src=%s — had a snapshot within "
+                    "%d days and the source is now gone",
+                    label, res["src"], _VANISHED_LOOKBACK_DAYS,
+                )
+            results.append(res)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("db_backup_failed label=%s err=%s", label, exc)
+            results.append({"label": label, "status": "error", "error": str(exc)})
+        finally:
+            # Local disk holds one staged DB at a time, the largest at most.
+            for leftover in (staged, staged.with_name(staged.name + "-journal")):
+                try:
+                    leftover.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning("db_backup_staging_unlink_failed path=%s err=%s", leftover, exc)
+
+    if getattr(config, "db_path", None):
+        _run(Path(config.db_path), "framework/istota.db", "framework")
+
+    for user_id in config.users:
+        for module in MODULES:
+            try:
+                src = config.module_db_path(user_id, module)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "db_backup_path_failed user=%s module=%s err=%s",
+                    user_id, module, exc,
+                )
+                continue
+            _run(src, f"{user_id}/{module}.db", f"{module}:{user_id}")
+
+    return results, good_rows, suspect_rels
 
 
 def main() -> int:

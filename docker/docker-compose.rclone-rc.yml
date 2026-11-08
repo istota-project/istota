@@ -1,0 +1,19 @@
+# The rclone mount's remote control, for the daemon's tree watcher (#939).
+#
+# istota-stack adds this file with -f when host.env says STORAGE=nextcloud and
+# provision.sh has made /srv/app/istota/rclone-rc (the socket's directory,
+# 0700, uid 10001) and /srv/app/istota/rclone-rc.env (the password, root's,
+# 0640, group 10001), and exports the two paths for it. The rc can write and
+# delete anywhere on the bot's Nextcloud, so it goes to the daemon alone: not
+# web, not a devbox, and no task sandbox (`sandbox.plan.plan_masks` covers
+# /run/istota-rclone with an empty tmpfs). The daemon sends vfs/forget,
+# vfs/refresh and rc/noop and nothing else (`istota.nextcloud.rclone_rc`).
+# Without this file the watcher still runs, and a change reaches the pollers
+# once the mount's own directory cache has expired.
+services:
+  daemon:
+    environment:
+      ISTOTA_RCLONE_RC: "1"
+    volumes:
+      - ${ISTOTA_RCLONE_RC_DIR:?istota-stack sets ISTOTA_RCLONE_RC_DIR}:/run/istota-rclone/rc:ro
+      - ${ISTOTA_RCLONE_RC_ENV:?istota-stack sets ISTOTA_RCLONE_RC_ENV}:/run/istota-rclone/rc.env:ro

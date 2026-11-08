@@ -37,7 +37,7 @@ istota-skill feeds import-opml PATH
 istota-skill feeds export-opml
 ```
 
-`run-scheduled` is the scheduler's entry point, not something to run by hand. It runs every five minutes and, unlike `poll`, caps its burst at 50 feeds by default; the due list is oldest-first, so a larger backlog drains over consecutive ticks rather than being dropped. `--limit` overrides in both directions.
+`run-scheduled` is the scheduler's entry point, not something to run by hand. The scheduler looks every five minutes and queues it only when at least one feed is due. Unlike `poll`, it caps its burst at 50 feeds by default; the due list is oldest-first, so a larger backlog drains over consecutive ticks rather than being dropped. `--limit` overrides in both directions.
 
 ## Entry retention
 

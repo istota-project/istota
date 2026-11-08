@@ -29,14 +29,16 @@ while not shutdown_requested:
     check_briefings()           # every briefing_check_interval (60s)
     check_shared_blocks()       # every briefing_check_interval
     check_briefing_triggers()   # every tasks_file_poll_interval (30s; NC-app trigger files)
-    check_scheduled_jobs()      # every briefing_check_interval
+    tree_watch.run_pass()       # every tree_watch_interval (30s); Nextcloud mount only
+    _sync_all_module_jobs()     # every 600s; the _module.* rows (money, feeds, health)
+    check_scheduled_jobs()      # every briefing_check_interval; syncs a changed CRON.md first
     _run_sleep_cycles()         # off-thread; polled every briefing_check_interval
     check_travel_timezone()     # off-thread; every TRAVEL_TZ_CHECK_INTERVAL
     poll_emails()               # off-thread; every email_poll_interval (60s)
     discover_and_organize_shared_files()  # every shared_file_check_interval (120s)
     poll_all_tasks_files()      # every tasks_file_poll_interval (30s)
     run_cleanup_checks()        # every briefing_check_interval
-    write_status()              # every 60s
+    write_status()              # checked every 60s; PUTs on change, else every 300s
     check_db_health()           # off-thread; every db_health_check_interval (24h)
     check_doctor()              # off-thread; every doctor_check_interval (1h)
     check_worktree_reap()       # off-thread; every worktree_reap_interval (6h)
@@ -155,7 +157,7 @@ Steps 3–5 (and the standalone `fail_stuck_locked_running_tasks()` maintenance 
 | `task.command` set | `_execute_command_task()` | Shell command. Admin-gated (non-admin tasks refused at runtime + dropped at sync time). Same trusted env resolver as skill-tasks. JSON `{"status":"error","error":"…"}` envelopes on stdout are detected and surfaced as failures even when returncode is 0. |
 | neither | LLM path via the brain | Default; runs through `execute_task` |
 
-Auto-seeded `_module.*` rows dispatch as skill-tasks — `feeds.run_scheduled` and `feeds.prune`, `money.run_scheduled`, and `health.garmin_sync` for users with a Garmin connection. `_purge_obsolete_skill_jobs` removes rows whose skill name is no longer in the index.
+Auto-seeded `_module.*` rows are synced by the `module-job-sync` gate every ten minutes, not with the CRON.md sync, so a newly enabled module, a new user or a Garmin connection is seeded within ten minutes. They dispatch as skill-tasks — `feeds.run_scheduled` and `feeds.prune`, `money.run_scheduled`, and `health.garmin_sync` for users with a Garmin connection. `_purge_obsolete_skill_jobs` removes rows whose skill name is no longer in the index. Before queuing `feeds.run_scheduled`, `check_scheduled_jobs` reads the user's feeds database in-process (`feeds.db.has_due_feeds`); when no feed is due it advances `last_run_at` and creates no task. A pre-check that fails queues the task as before.
 
 ## Task processing
 
@@ -242,6 +244,8 @@ Runs every `briefing_check_interval`:
 
 ## Poller intervals
 
+On the Nextcloud mount, the CRON.md sync, the shared-file organizer and the TASKS.md poll read the mount only after the tree watch saw a change in the folders they read, and once an hour regardless. The tree watch sends one PROPFIND on the bot's root per interval, walks down only folders whose ETag changed, and tells the mount's rclone rc which listings to drop, so the mount can keep its directory cache for ten minutes (#939). Where the watch cannot answer (a local workspace, a failed pass, a root on external storage) every poller reads on its own interval as before.
+
 | Poller | Default interval | Config key |
 |---|---|---|
 | Task queue | 2s | `poll_interval` |
@@ -251,6 +255,7 @@ Runs every `briefing_check_interval`:
 | Briefings/jobs/sleep/cleanup | 60s | `briefing_check_interval` |
 | TASKS.md files | 30s | `tasks_file_poll_interval` |
 | Shared files | 120s | `shared_file_check_interval` |
+| Nextcloud tree watch (ETag of the bot's root) | 30s | `tree_watch_interval` |
 | Heartbeats | 60s | `heartbeat_check_interval` |
 | SQLite health (`quick_check` + self-heal `REINDEX`) | 86400s (24h) | `db_health_check_interval` |
 | Runtime self-check (`istota doctor`) | 3600s (1h) | `doctor_check_interval` |

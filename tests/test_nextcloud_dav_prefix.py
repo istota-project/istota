@@ -181,6 +181,8 @@ class TestTheAccountLevelCallers:
         look inside the mount, so the prefix must not be applied here."""
         from istota import status_writer
 
+        # The writer skips an unchanged payload, so start from a fresh daemon.
+        status_writer.init_status_writer()
         resp = MagicMock(status_code=201, text="")
         with patch("istota.nextcloud._http.httpx.request", return_value=resp) as request:
             status_writer.write_status(_config(PREFIX), 0, 0, 0)

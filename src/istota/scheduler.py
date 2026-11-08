@@ -2638,7 +2638,9 @@ def _execute_skill_task(
         process_cli_auth,
         strip_model_credentials,
     )
-    from .skills._env import EnvContext, build_skill_env, dispatch_setup_env_hooks
+    from .skills._env import (
+        EnvContext, build_skill_env, dispatch_setup_env_hooks, needs_discovered_calendars,
+    )
     from .skills._loader import load_skill_index
 
     skill_name = task.skill or ""
@@ -2704,6 +2706,12 @@ def _execute_skill_task(
             user_resources = db.get_user_resources(conn, task.user_id)
     user_cfg = config.get_user(task.user_id)
 
+    # The env below is built from the whole index, but only the gated CALDAV_*
+    # specs read this list, and only the calendar and location CLIs read those.
+    discovered_calendars = []
+    if not reach.public and needs_discovered_calendars([skill_name], skill_index):
+        discovered_calendars = discover_calendars_for_task(task, config)
+
     ctx = EnvContext(
         config=config,
         task=task,
@@ -2711,7 +2719,7 @@ def _execute_skill_task(
         user_config=user_cfg,
         user_temp_dir=user_temp_dir,
         is_admin=config.is_admin(task.user_id),
-        discovered_calendars=[] if reach.public else discover_calendars_for_task(task, config),
+        discovered_calendars=discovered_calendars,
     )
 
     env = build_clean_env(config)
@@ -9349,8 +9357,51 @@ def cleanup_old_claude_logs(retention_days: int) -> int:
     return deleted
 
 
+def _cron_prompt_dirs(app_config: Config, user_id: str, doc) -> list[str]:
+    """The directories of the `prompt_file`s a user's CRON.md names, outside
+    `config/` and `scripts/`, which the tree watcher follows anyway.
+
+    Read from the fence rather than from `doc.jobs`, which leaves out a job
+    whose `prompt_file` could not be read: that file appearing is a change the
+    sync has to see.
+    """
+    import tomllib
+
+    from .nextcloud import tree_watch
+    from .sandbox.host_paths import owner_path_parts
+
+    if doc is None or not doc.block:
+        return []
+    try:
+        jobs = tomllib.loads(doc.block).get("jobs") or []
+    except (tomllib.TOMLDecodeError, AttributeError):
+        return []
+    covered = (
+        tree_watch.user_config_dir(app_config, user_id),
+        tree_watch.user_scripts_dir(app_config, user_id),
+    )
+    dirs: set[str] = set()
+    for job in jobs if isinstance(jobs, list) else []:
+        ref = job.get("prompt_file") if isinstance(job, dict) else None
+        parts = owner_path_parts(ref, user_id) if isinstance(ref, str) else None
+        if not parts:
+            continue
+        # A file directly in the user's folder makes the whole tree a watched
+        # path: rare, and the alternative is an edit waiting for the hour.
+        directory = "/".join([f"/Users/{user_id}", *parts[:-1]])
+        if not any(directory == c or directory.startswith(c + "/") for c in covered):
+            dirs.add(directory)
+    return sorted(dirs)
+
+
 def _sync_cron_files(conn, app_config: Config) -> None:
-    """Sync CRON.md files to DB for all configured users."""
+    """Sync CRON.md files to DB for all configured users.
+
+    Per user, only when the tree watcher (#939) says the user's `config/`,
+    `scripts/` or a `prompt_file`'s directory changed in Nextcloud, or an hour
+    has passed; every time where the watcher cannot answer.
+    """
+    from .nextcloud import tree_watch
     from .rooms import egress
     from .cron_loader import (
         _MODULE_JOB_PREFIX,
@@ -9359,9 +9410,22 @@ def _sync_cron_files(conn, app_config: Config) -> None:
         sync_cron_jobs_to_db,
     )
 
-    for user_id in app_config.users:
+    for user_id in list(app_config.users):
+        key = f"cron:{user_id}"
+        paths = [
+            tree_watch.user_config_dir(app_config, user_id),
+            tree_watch.user_scripts_dir(app_config, user_id),
+            *tree_watch.registered(key),
+        ]
+        run, snap = tree_watch.should_run(key, paths)
+        if not run:
+            continue
+        # A pass that holds something for a fault to clear is not recorded,
+        # so the next tick tries again: nothing changes in Nextcloud for it.
+        retry = False
         try:
             doc = load_cron_document(app_config, user_id)
+            tree_watch.watch(key, _cron_prompt_dirs(app_config, user_id, doc))
             if doc is not None:
                 # Count only user-defined DB jobs when deciding whether to
                 # migrate-to-file; module-managed jobs don't belong in CRON.md.
@@ -9386,6 +9450,7 @@ def _sync_cron_files(conn, app_config: Config) -> None:
                     if not migrate_db_jobs_to_file(
                         conn, app_config, user_id, overwrite=True
                     ):
+                        retry = True
                         # Every reason for a False here is a failure: the file
                         # was read a moment ago, so the mount is configured,
                         # and `user_db_jobs` is non-empty. The rows are intact
@@ -9397,6 +9462,7 @@ def _sync_cron_files(conn, app_config: Config) -> None:
                             "will retry", len(user_db_jobs), user_id,
                         )
                 elif not doc.jobs and not doc.states_no_jobs:
+                    retry = bool(doc.unread_names)
                     # The file lists jobs and the parser could use none of
                     # them — an unreadable `prompt_file`, a typo in a key.
                     # Syncing that would orphan-delete every row while the
@@ -9420,6 +9486,7 @@ def _sync_cron_files(conn, app_config: Config) -> None:
                             )
                     conn.commit()
                 else:
+                    retry = bool(doc.unread_names)
                     refused_subjects = sync_cron_jobs_to_db(
                         conn, user_id, doc.jobs,
                         is_admin=app_config.is_admin(user_id),
@@ -9436,10 +9503,23 @@ def _sync_cron_files(conn, app_config: Config) -> None:
                 migrate_db_jobs_to_file(conn, app_config, user_id)
         except Exception as e:
             logger.error("Error syncing CRON.md for %s: %s", user_id, e)
+            continue
+        if not retry:
+            tree_watch.record_run(key, snap)
 
-    # Sync module-managed jobs (e.g. money's run_scheduled).
-    # These are not user-editable via CRON.md; their definitions come from
-    # the module's jobs.py and the user's istota resource entry.
+
+MODULE_JOB_SYNC_INTERVAL = 600  # 10 minutes
+
+
+def _sync_all_module_jobs(conn, app_config: Config) -> None:
+    """Sync every module's ``_module.*`` jobs (money, feeds, health).
+
+    Not part of the CRON.md sync: these rows are not user-editable, and their
+    inputs (module enablement, Garmin tokens, money's config files) have no
+    single change signal, so the ``module-job-sync`` gate runs this on a slow
+    cadence rather than every tick (#932). Each module is guarded on its own
+    so one broken module does not stop the others.
+    """
     try:
         _sync_money_module_jobs(conn, app_config)
     except Exception as e:
@@ -10168,11 +10248,76 @@ def run_briefing_now(
     return task_id, ""
 
 
+def _feeds_poll_has_work(app_config: Config, user_id: str) -> bool:
+    """Whether the user's feeds poll would find a feed due (#933).
+
+    Raises when it cannot tell, and the caller queues the task: a broken
+    look must never stop polling.
+    """
+    from istota import module_loader
+    from istota.feeds import db as feeds_db
+
+    path = module_loader.resolve_module_db_path(app_config, user_id, "feeds")
+    if path is None:
+        raise RuntimeError("no module DB resolver on this config")
+    # Opening a missing path would create it empty. The poll task's own
+    # `ensure_initialised` creates it properly, imports a legacy feeds.toml and
+    # seeds the default subscriptions, so a missing DB is work, not none.
+    if not path.exists():
+        return True
+    timeout_ms = app_config.scheduler.main_loop_read_timeout_ms or 30_000
+    with feeds_db.connect(path, busy_timeout_ms=timeout_ms) as feeds_conn:
+        return feeds_db.has_due_feeds(feeds_conn)
+
+
+def _job_has_work_checks() -> dict[str, Callable[[Config, str], bool]]:
+    """Scheduled jobs the scheduler looks at before queuing, by job name.
+
+    A check returning False means the run would do nothing, so the slot is
+    spent without a task. Like the `sharing-ics-poll` gate, it reads local
+    state only.
+    """
+    from istota.feeds.jobs import MODULE_PREFIX as FEEDS_PREFIX
+
+    return {f"{FEEDS_PREFIX}run_scheduled": _feeds_poll_has_work}
+
+
+def _job_has_work(app_config: Config, job: "db.ScheduledJob", checks) -> bool:
+    """Run the job's pre-check, if it has one; fail open on any error."""
+    check = checks.get(job.name)
+    if check is None:
+        return True
+    try:
+        return check(app_config, job.user_id)
+    except Exception as e:  # noqa: BLE001 — queue the task as before
+        logger.warning(
+            "Scheduled job '%s' (user: %s): pre-check failed, queuing anyway: %s",
+            job.name, job.user_id, e,
+        )
+        return True
+
+
+_SYNCED_JOB_MODULES = ("money", "feeds", "health")
+
+
+def _module_job_switched_off(conn, app_config: Config, job: "db.ScheduledJob") -> bool:
+    """Whether ``job`` is a module row whose module the user has turned off.
+
+    The module sync drops such rows, but it runs every ten minutes (#932), so
+    without this a row would keep firing for up to that long after the switch.
+    """
+    parts = job.name.split(".", 2)
+    if len(parts) < 3 or parts[0] != "_module" or parts[1] not in _SYNCED_JOB_MODULES:
+        return False
+    return not app_config.is_module_enabled(job.user_id, parts[1], conn=conn)
+
+
 def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
     """
     Check for scheduled jobs that should run and queue them as tasks.
 
-    Syncs CRON.md files to DB, then reads job definitions from the
+    Syncs CRON.md files to DB (module jobs sync on their own gate,
+    ``module-job-sync``), then reads job definitions from the
     scheduled_jobs table and evaluates cron expressions in each user's timezone.
 
     Returns:
@@ -10190,6 +10335,7 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
         logger.debug("No enabled scheduled jobs found")
         return created_tasks
     logger.debug("Found %d enabled scheduled job(s)", len(jobs))
+    has_work_checks = _job_has_work_checks()
 
     # Group by user_id to look up timezone once per user
     jobs_by_user: dict[str, list[db.ScheduledJob]] = {}
@@ -10283,6 +10429,22 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                         "Scheduled job '%s' (user: %s) skipped: %d prior run(s) "
                         "still in flight",
                         job.name, job.user_id, inflight,
+                    )
+                    continue
+                # Nothing to do: spend the slot without a task, as the stale
+                # branch does, so the cadence holds. Failure counters untouched.
+                if _module_job_switched_off(conn, app_config, job):
+                    db.set_scheduled_job_last_run(conn, job.id)
+                    logger.debug(
+                        "Scheduled job '%s' (user: %s) skipped: module is off",
+                        job.name, job.user_id,
+                    )
+                    continue
+                if not _job_has_work(app_config, job, has_work_checks):
+                    db.set_scheduled_job_last_run(conn, job.id)
+                    logger.debug(
+                        "Scheduled job '%s' (user: %s) skipped: nothing to do",
+                        job.name, job.user_id,
                     )
                     continue
                 # As in `check_briefings`: one unusable `job.user_id` costs its
@@ -10489,6 +10651,15 @@ def build_interval_gates(
         triggered = check_briefing_triggers(config.db_path, config)
         if triggered:
             logger.info("Processed %d briefing trigger(s)", len(triggered))
+
+    def _tree_watch(now: float) -> None:
+        from .nextcloud import tree_watch
+
+        tree_watch.run_pass(config)
+
+    def _module_job_sync(now: float) -> None:
+        with db.get_db(config.db_path) as conn:
+            _sync_all_module_jobs(conn, config)
 
     def _scheduled_jobs(now: float) -> None:
         with db.get_db(config.db_path) as conn:
@@ -10766,6 +10937,33 @@ def build_interval_gates(
             field="tasks_file_poll_interval",
             enabled=lambda c: bool(c.scheduler.tasks_file_poll_interval),
             on_error="Error checking briefing triggers: %s",
+        ),
+        # #939: one PROPFIND on the bot's root, and a walk down only what
+        # changed, so the CRON.md sync, `shared-files` and `tasks-file-poll`
+        # read the mount only after a change in Nextcloud (or hourly). Before
+        # all three, and inline, so a change seen here reaches them this tick.
+        # Network I/O on the loop thread, bounded by a 10 s request timeout and
+        # one request when nothing changed.
+        IntervalGate(
+            name="tree-watch",
+            run=_tree_watch,
+            field="tree_watch_interval",
+            enabled=lambda c: bool(c.scheduler.tree_watch_interval) and c.storage_is_nextcloud,
+            on_error="Error watching the Nextcloud tree: %s",
+        ),
+        # The `_module.*` rows (#932). Every ten minutes rather than with the
+        # CRON.md sync every tick: each pass resolves every user's module
+        # workspace on the mount. Seeded to 0 so a deploy seeds at once. Before
+        # `scheduled-jobs`, so a one-shot run evaluates the rows it just
+        # synced. On the loop thread, as it was inside `scheduled-jobs`, so
+        # the two never write the same rows concurrently.
+        IntervalGate(
+            name="module-job-sync",
+            run=_module_job_sync,
+            fixed_interval=MODULE_JOB_SYNC_INTERVAL,
+            on_error="Error syncing module jobs: %s",
+            one_shot=True,
+            one_shot_on_error="Error syncing module jobs: %s",
         ),
         IntervalGate(
             name="scheduled-jobs",
