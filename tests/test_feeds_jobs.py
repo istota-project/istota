@@ -1052,3 +1052,92 @@ class TestRunScheduledOnlyWhenAFeedIsDue:
             (json.dumps(["prune"]),),
         ).fetchall()
         assert len(prune) == 1
+
+    # The sync that drops a disabled module's rows runs every ten minutes
+    # (#932), so the scheduler checks the switch before it fires one.
+
+    def test_feeds_off_queues_nothing_and_spends_the_slot(self, tmp_path):
+        app_config, conn = self._setup(tmp_path)
+        app_config.users["alice"].disabled_modules = ["feeds"]
+
+        self._run(conn, app_config)
+
+        queued = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE user_id = 'alice'"
+        ).fetchone()[0]
+        assert queued == 0
+        assert self._last_run(conn) != self.SEEDED_LAST_RUN
+        assert self._last_run(conn, "prune") != self.SEEDED_LAST_RUN
+
+    def test_only_the_synced_modules_are_checked(self, tmp_path):
+        """`is_module_enabled` answers False for a name it does not know, so
+        checking any `_module.*` row would stop one with no sync for good."""
+        from dataclasses import replace
+
+        from istota.scheduler import _module_job_switched_off
+
+        app_config, conn = self._setup(tmp_path)
+        job = db.get_user_scheduled_jobs(conn, "alice")[0]
+        other = replace(job, name="_module.example.job")
+        assert _module_job_switched_off(conn, app_config, other) is False
+        assert _module_job_switched_off(conn, app_config, job) is False
+        app_config.users["alice"].disabled_modules = ["feeds"]
+        assert _module_job_switched_off(conn, app_config, job) is True
+
+
+# ---------------------------------------------------------------------------
+# Module jobs sync on their own cadence, not with CRON.md (#932)
+# ---------------------------------------------------------------------------
+
+
+class TestModuleJobSyncIsItsOwnPass:
+    """The CRON.md sync ran every tick and re-synced every module's jobs on
+    the way out, touching each user's module directories on the mount each
+    time. The module half is now its own function behind its own gate."""
+
+    def _module_rows(self, conn):
+        return conn.execute(
+            "SELECT name FROM scheduled_jobs WHERE user_id = 'alice' "
+            "AND substr(name, 1, 8) = '_module.'"
+        ).fetchall()
+
+    def test_the_cron_file_sync_no_longer_seeds_module_jobs(self, tmp_path):
+        from istota.scheduler import _sync_cron_files
+
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        _sync_cron_files(conn, app_config)
+        assert self._module_rows(conn) == []
+
+    def test_the_module_pass_seeds_them(self, tmp_path):
+        from istota.scheduler import _sync_all_module_jobs
+
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        _sync_all_module_jobs(conn, app_config)
+        names = {r[0] for r in self._module_rows(conn)}
+        assert f"{MODULE_PREFIX}run_scheduled" in names
+
+    def test_one_module_failing_does_not_stop_the_others(self, tmp_path, monkeypatch):
+        from istota import scheduler
+
+        def _boom(conn, app_config):
+            raise RuntimeError("money is broken")
+
+        monkeypatch.setattr(scheduler, "_sync_money_module_jobs", _boom)
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        scheduler._sync_all_module_jobs(conn, app_config)
+        names = {r[0] for r in self._module_rows(conn)}
+        assert f"{MODULE_PREFIX}run_scheduled" in names
+
+    def test_the_gate_runs_the_module_pass_against_the_framework_db(self, tmp_path):
+        from istota.scheduler import build_interval_gates
+
+        app_config = _make_app_config(tmp_path, ["alice"])
+        conn = _conn(tmp_path)
+        gate = {g.name: g for g in build_interval_gates(app_config)}["module-job-sync"]
+        gate.run(0.0)
+        names = {r[0] for r in self._module_rows(conn)}
+        assert f"{MODULE_PREFIX}run_scheduled" in names
+

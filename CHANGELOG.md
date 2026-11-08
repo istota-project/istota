@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Scheduled skill jobs no longer look up the user's calendars on Nextcloud before every run. Only the calendar and location skills read that list, so the other module jobs, such as the feeds and money polls, now make no CalDAV requests.
 
+- The scheduler syncs the money, feeds and health module jobs every ten minutes instead of every minute, so it no longer reads each user's module folders on Nextcloud once a minute. After a module is enabled, a user is added or Garmin is connected, the first feeds poll or Garmin backfill can now take up to ten minutes to start. Turning a module off still stops its jobs at once.
+
 - The daemon no longer rewrites `status.json` on Nextcloud every minute. It writes the file when the worker or queue counts change, and otherwise every five minutes, so a status that has not changed now has an `updated_at` up to five minutes old instead of one minute. A reader that treats an older `updated_at` as a stopped daemon needs a threshold above five minutes.
 
 ### Fixed

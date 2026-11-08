@@ -29,7 +29,8 @@ while not shutdown_requested:
     check_briefings()           # every briefing_check_interval (60s)
     check_shared_blocks()       # every briefing_check_interval
     check_briefing_triggers()   # every tasks_file_poll_interval (30s; NC-app trigger files)
-    check_scheduled_jobs()      # every briefing_check_interval
+    _sync_all_module_jobs()     # every 600s; the _module.* rows (money, feeds, health)
+    check_scheduled_jobs()      # every briefing_check_interval; syncs CRON.md first
     _run_sleep_cycles()         # off-thread; polled every briefing_check_interval
     check_travel_timezone()     # off-thread; every TRAVEL_TZ_CHECK_INTERVAL
     poll_emails()               # off-thread; every email_poll_interval (60s)
@@ -155,7 +156,7 @@ Steps 3–5 (and the standalone `fail_stuck_locked_running_tasks()` maintenance 
 | `task.command` set | `_execute_command_task()` | Shell command. Admin-gated (non-admin tasks refused at runtime + dropped at sync time). Same trusted env resolver as skill-tasks. JSON `{"status":"error","error":"…"}` envelopes on stdout are detected and surfaced as failures even when returncode is 0. |
 | neither | LLM path via the brain | Default; runs through `execute_task` |
 
-Auto-seeded `_module.*` rows dispatch as skill-tasks — `feeds.run_scheduled` and `feeds.prune`, `money.run_scheduled`, and `health.garmin_sync` for users with a Garmin connection. `_purge_obsolete_skill_jobs` removes rows whose skill name is no longer in the index. Before queuing `feeds.run_scheduled`, `check_scheduled_jobs` reads the user's feeds database in-process (`feeds.db.has_due_feeds`); when no feed is due it advances `last_run_at` and creates no task. A pre-check that fails queues the task as before.
+Auto-seeded `_module.*` rows are synced by the `module-job-sync` gate every ten minutes, not with the CRON.md sync, so a newly enabled module, a new user or a Garmin connection is seeded within ten minutes. They dispatch as skill-tasks — `feeds.run_scheduled` and `feeds.prune`, `money.run_scheduled`, and `health.garmin_sync` for users with a Garmin connection. `_purge_obsolete_skill_jobs` removes rows whose skill name is no longer in the index. Before queuing `feeds.run_scheduled`, `check_scheduled_jobs` reads the user's feeds database in-process (`feeds.db.has_due_feeds`); when no feed is due it advances `last_run_at` and creates no task. A pre-check that fails queues the task as before.
 
 ## Task processing
 

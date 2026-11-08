@@ -66,6 +66,9 @@ EXPECTED_BINDINGS: list[tuple[str, str | None]] = [
     # Added after the baseline extraction: web-raised pushes (ISSUE-702).
     ("notification-handoff", None),
     ("briefing-triggers", "tasks_file_poll_interval"),
+    # Split out of `scheduled-jobs` (#932): the `_module.*` rows on a fixed
+    # ten-minute look, ahead of the gate that evaluates them.
+    ("module-job-sync", None),
     ("scheduled-jobs", "briefing_check_interval"),
     # Added after the baseline extraction: assignment wakes (assignments spec).
     ("assignments", "briefing_check_interval"),
@@ -171,6 +174,8 @@ EXPECTED_OVERLAP_EXPECTED = {
 EXPECTED_ONE_SHOT = [
     "briefings",
     "shared-blocks",
+    # #932: was inside `scheduled-jobs`, so a one-shot run still syncs it first.
+    "module-job-sync",
     "scheduled-jobs",
     "sleep-cycles",
     "travel-timezone",
@@ -237,6 +242,18 @@ class TestTheFieldBindings:
             _by_name()["travel-timezone"].interval(Config())
             == sched.TRAVEL_TZ_CHECK_INTERVAL
         )
+
+    def test_module_jobs_sync_every_ten_minutes_from_the_first_tick(self):
+        """#932. Not every tick (each pass touches every user's module
+        directories on the mount) and not hourly (a new user's first feeds
+        poll and a Garmin backfill wait on the seed)."""
+        gate = _by_name()["module-job-sync"]
+        assert gate.interval(Config()) == 600 == sched.MODULE_JOB_SYNC_INTERVAL
+        assert gate.seed(Config()) == 0.0
+        assert gate.enabled(Config()) is True
+        assert not gate.background
+        assert gate.one_shot
+        assert gate.on_error and gate.one_shot_on_error
 
     def test_the_status_file_keeps_its_literal_sixty_seconds(self):
         assert _by_name()["status-write"].interval(Config()) == 60

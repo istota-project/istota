@@ -9445,9 +9445,19 @@ def _sync_cron_files(conn, app_config: Config) -> None:
         except Exception as e:
             logger.error("Error syncing CRON.md for %s: %s", user_id, e)
 
-    # Sync module-managed jobs (e.g. money's run_scheduled).
-    # These are not user-editable via CRON.md; their definitions come from
-    # the module's jobs.py and the user's istota resource entry.
+
+MODULE_JOB_SYNC_INTERVAL = 600  # 10 minutes
+
+
+def _sync_all_module_jobs(conn, app_config: Config) -> None:
+    """Sync every module's ``_module.*`` jobs (money, feeds, health).
+
+    Not part of the CRON.md sync: these rows are not user-editable, and their
+    inputs (module enablement, Garmin tokens, money's config files) have no
+    single change signal, so the ``module-job-sync`` gate runs this on a slow
+    cadence rather than every tick (#932). Each module is guarded on its own
+    so one broken module does not stop the others.
+    """
     try:
         _sync_money_module_jobs(conn, app_config)
     except Exception as e:
@@ -10225,11 +10235,27 @@ def _job_has_work(app_config: Config, job: "db.ScheduledJob", checks) -> bool:
         return True
 
 
+_SYNCED_JOB_MODULES = ("money", "feeds", "health")
+
+
+def _module_job_switched_off(conn, app_config: Config, job: "db.ScheduledJob") -> bool:
+    """Whether ``job`` is a module row whose module the user has turned off.
+
+    The module sync drops such rows, but it runs every ten minutes (#932), so
+    without this a row would keep firing for up to that long after the switch.
+    """
+    parts = job.name.split(".", 2)
+    if len(parts) < 3 or parts[0] != "_module" or parts[1] not in _SYNCED_JOB_MODULES:
+        return False
+    return not app_config.is_module_enabled(job.user_id, parts[1], conn=conn)
+
+
 def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
     """
     Check for scheduled jobs that should run and queue them as tasks.
 
-    Syncs CRON.md files to DB, then reads job definitions from the
+    Syncs CRON.md files to DB (module jobs sync on their own gate,
+    ``module-job-sync``), then reads job definitions from the
     scheduled_jobs table and evaluates cron expressions in each user's timezone.
 
     Returns:
@@ -10345,6 +10371,13 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                     continue
                 # Nothing to do: spend the slot without a task, as the stale
                 # branch does, so the cadence holds. Failure counters untouched.
+                if _module_job_switched_off(conn, app_config, job):
+                    db.set_scheduled_job_last_run(conn, job.id)
+                    logger.debug(
+                        "Scheduled job '%s' (user: %s) skipped: module is off",
+                        job.name, job.user_id,
+                    )
+                    continue
                 if not _job_has_work(app_config, job, has_work_checks):
                     db.set_scheduled_job_last_run(conn, job.id)
                     logger.debug(
@@ -10556,6 +10589,10 @@ def build_interval_gates(
         triggered = check_briefing_triggers(config.db_path, config)
         if triggered:
             logger.info("Processed %d briefing trigger(s)", len(triggered))
+
+    def _module_job_sync(now: float) -> None:
+        with db.get_db(config.db_path) as conn:
+            _sync_all_module_jobs(conn, config)
 
     def _scheduled_jobs(now: float) -> None:
         with db.get_db(config.db_path) as conn:
@@ -10833,6 +10870,20 @@ def build_interval_gates(
             field="tasks_file_poll_interval",
             enabled=lambda c: bool(c.scheduler.tasks_file_poll_interval),
             on_error="Error checking briefing triggers: %s",
+        ),
+        # The `_module.*` rows (#932). Every ten minutes rather than with the
+        # CRON.md sync every tick: each pass resolves every user's module
+        # workspace on the mount. Seeded to 0 so a deploy seeds at once. Before
+        # `scheduled-jobs`, so a one-shot run evaluates the rows it just
+        # synced. On the loop thread, as it was inside `scheduled-jobs`, so
+        # the two never write the same rows concurrently.
+        IntervalGate(
+            name="module-job-sync",
+            run=_module_job_sync,
+            fixed_interval=MODULE_JOB_SYNC_INTERVAL,
+            on_error="Error syncing module jobs: %s",
+            one_shot=True,
+            one_shot_on_error="Error syncing module jobs: %s",
         ),
         IntervalGate(
             name="scheduled-jobs",
