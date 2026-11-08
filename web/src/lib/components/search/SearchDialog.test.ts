@@ -35,6 +35,7 @@ const group = (source: string, results: SearchHit[], extra = {}): SearchGroup =>
 let controller: ReturnType<typeof createSearch>;
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
   controller = createSearch();
   vi.spyOn(navigation, 'goto');
 });
@@ -220,4 +221,27 @@ it('lists sources before typing and searches only the source chosen first', asyn
       expect.objectContaining({ sources: ['money'], limit: 20 }),
     ),
   );
+});
+
+it('lists recent searches as options the arrow keys and Enter reach', async () => {
+  localStorage.setItem('istota.search.recent', JSON.stringify(['window', 'kazuo']));
+  controller = createSearch();
+  api.search.mockResolvedValue({
+    query: 'kazuo',
+    groups: [group('chats', [hit('a')])],
+    on_demand: [],
+  });
+  render(SearchDialog, { open: true, controller });
+  const listbox = screen.getByRole('listbox', { name: 'Search results' });
+  const recents = within(listbox).getByRole('group', { name: 'Recent searches' });
+  const rows = within(recents).getAllByRole('option');
+  expect(rows.map((row) => row.textContent)).toEqual(['window', 'kazuo']);
+  const input = screen.getByRole('combobox');
+  expect(input.getAttribute('aria-activedescendant')).toBe(rows[0].id);
+  await fireEvent.keyDown(input, { key: 'ArrowDown' });
+  expect(input.getAttribute('aria-activedescendant')).toBe(rows[1].id);
+  await fireEvent.keyDown(input, { key: 'Enter' });
+  expect((input as HTMLInputElement).value).toBe('kazuo');
+  await waitFor(() => expect(api.search).toHaveBeenCalledWith('kazuo', expect.anything()));
+  expect(within(listbox).queryByRole('group', { name: 'Recent searches' })).toBeNull();
 });

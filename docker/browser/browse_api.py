@@ -3796,6 +3796,8 @@ def health():
     if not request.environ.get("istota.browser_api_token_matched"):
         del data["instances"], data["cdp_last_error"]
         return jsonify(data)
+    # Only to a token holder: which Chrome runs here says which bugs it has.
+    data["chrome_version"] = chrome.installed_version()
     if request.args.get("v") == "1":
         data["instances"] = [
             {"user": inst.user_id, "slot": inst.slot, "last_used": inst.last_used,
@@ -3949,7 +3951,8 @@ def browser_state():
         return jsonify({"status": "error", "error": "Could not inspect browser state"}), 502
     return jsonify({"status": "ok", "profile_exists": profile.is_dir(),
                     "profile_size_bytes": size, "live": live, "cookie_domains": domains,
-                    "sessions": sessions, "session_count": len(sessions)})
+                    "sessions": sessions, "session_count": len(sessions),
+                    "chrome_version": chrome.installed_version()})
 
 
 @app.route("/state", methods=["DELETE"])

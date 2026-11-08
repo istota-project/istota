@@ -42,6 +42,16 @@ ENV TZ=America/New_York
 # that run apt to this.
 ARG APT_MIRROR=
 
+# CHROME_VERSION is Google's current stable, which istota-stack asks Google's
+# version history API for and passes to every build (#930). BuildKit caches a
+# RUN by its text and its parent, not by what a URL returns, so fetching
+# "current" gave a new Chrome only when a layer above it changed. With the
+# version in scope, this layer (and the chrome stage's) rebuilds when stable
+# moves and only then, and both stages plan for the same .deb. A .deb that is
+# not that version fails the build rather than being cached under its name.
+# Empty fetches whatever is current, unchecked, as before.
+ARG CHROME_VERSION=
+
 # Google ships Chrome's Linux .deb for amd64 and arm64, so the image builds
 # natively on either and an arm64 host needs no emulation. The arch comes from
 # dpkg rather than TARGETARCH, which the legacy builder leaves empty. An arm64
@@ -86,6 +96,9 @@ RUN --mount=type=cache,id=browser-apt-archives,target=/var/cache/apt-build,shari
     libfreetype6 \
     && sed -i '/en_US.UTF-8/s/^# //' /etc/locale.gen && locale-gen \
     && wget -q "https://dl.google.com/linux/direct/google-chrome-stable_current_${arch}.deb" \
+    && deb_version="$(dpkg-deb -f "google-chrome-stable_current_${arch}.deb" Version)" \
+    && if [ -n "$CHROME_VERSION" ] && [ "${deb_version%-*}" != "$CHROME_VERSION" ]; then \
+        echo "Google served Chrome ${deb_version} as current, not stable ${CHROME_VERSION}; build again later" >&2; exit 1; fi \
     && apt-get install -s -y "./google-chrome-stable_current_${arch}.deb" > /tmp/chrome-plan \
     && chrome_deps="$(awk '$1 == "Inst" && $2 != "google-chrome-stable" { print $2 }' /tmp/chrome-plan)" \
     && apt-get install -y --no-install-recommends ${chrome_deps} \
@@ -165,11 +178,18 @@ ENTRYPOINT ["./entrypoint.sh"]
 # Google Chrome, on top of everything else. `dpkg -i` rather than `apt-get
 # install`, which refuses a local .deb with --no-download: the base stage
 # already holds every package Chrome depends on, and `apt-get check` fails the
-# build if the .deb now wants one it does not.
+# build if the .deb now wants one it does not. CHROME_VERSION is the base
+# stage's (see there); the label is what `istota-stack local-layers` compares
+# with stable to decide whether a layer it built is stale.
 FROM ${BROWSER_BASE} AS chrome
+ARG CHROME_VERSION=
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     wget -q -O /tmp/google-chrome.deb "https://dl.google.com/linux/direct/google-chrome-stable_current_${arch}.deb"; \
+    deb_version="$(dpkg-deb -f /tmp/google-chrome.deb Version)"; \
+    if [ -n "$CHROME_VERSION" ] && [ "${deb_version%-*}" != "$CHROME_VERSION" ]; then \
+        echo "Google served Chrome ${deb_version} as current, not stable ${CHROME_VERSION}; build again later" >&2; exit 1; fi; \
     dpkg -i /tmp/google-chrome.deb; \
     apt-get check; \
     rm /tmp/google-chrome.deb
+LABEL org.istota.chrome-version="${CHROME_VERSION}"

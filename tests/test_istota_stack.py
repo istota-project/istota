@@ -48,6 +48,16 @@ pytestmark = pytest.mark.skipif(
     reason="needs ssh-keygen and git",
 )
 
+# Google's version history, for the stable Chrome the browser build is keyed on
+# (#930): STUB_CHROME_STABLE is the answer, unset is an unreachable API, so no
+# test reaches the network.
+CURL_STUB = r"""#!/bin/bash
+printf '%s\n' "$*" >> "$STUB_CALLS.curl"
+[ -n "${STUB_CHROME_STABLE+set}" ] || exit 7
+printf '{\n  "releases": [\n    {"version": "999.0.0.1", "fraction": 0.005, "serving": {"startTime": "2026-11-06T18:00:00Z"}},\n    {"version": "%s", "fraction": 1, "serving": {"startTime": "2026-11-03T21:11:56Z"}},\n    {"version": "1.0.0.1", "fraction": 1, "serving": {"startTime": "2026-10-01T00:00:00Z", "endTime": "2026-11-03T21:11:56Z"}}\n  ]\n}\n' \
+  "$STUB_CHROME_STABLE"
+"""
+
 DOCKER_STUB = r"""#!/bin/bash
 printf '%s\n' "$*" >> "$STUB_CALLS"
 [ -z "${COMPOSE_IGNORE_ORPHANS:-}" ] || printf '%s\n' "$*" >> "$STUB_CALLS.ignore-orphans"
@@ -59,7 +69,19 @@ for ref in ${STUB_MISSING_IMAGES:-}; do
   case "$args" in *" image inspect $ref "*|*" image inspect "*" $ref "*) exit 1 ;; esac
 done
 case " $* " in
+  *" image inspect "*"chrome-version"*)
+    # The Chrome version a browser image was built for (its label).
+    printf '%s\n' "${STUB_CHROME_LABEL:-}"
+    exit 0 ;;
   *" build "*)
+    echo "CHROME_VERSION=${CHROME_VERSION-unset}" >> "$STUB_CALLS.build-chrome"
+    # Google's "current" .deb, when it is not the version the build was keyed on.
+    want="${CHROME_VERSION:-}"
+    case "$args" in *" CHROME_VERSION="*) want="$(printf '%s' "$args" | sed -E 's/.* CHROME_VERSION=([^ ]*) .*/\1/')" ;; esac
+    if [ -n "${STUB_CHROME_DEB:-}" ] && [ -n "$want" ] && [ "$want" != "$STUB_CHROME_DEB" ]; then
+      echo "Google served Chrome ${STUB_CHROME_DEB}-1 as current, not stable ${want}; build again later"
+      exit 1
+    fi
     # What a build was told: ISTOTA_IMAGE as compose would read it, the
     # Dockerfile on stdin (`-`), and the tag it made. The arm below exits.
     echo "ISTOTA_IMAGE=${ISTOTA_IMAGE-unset}" >> "$STUB_CALLS.build-image"
@@ -69,7 +91,10 @@ case " $* " in
     fi
     prev=""
     for a in "$@"; do
-      if [ "$prev" = -t ] && [ "${STUB_BUILD_RC:-0}" = 0 ]; then echo "$a" >> "$STUB_CALLS.built"; fi
+      if [ "$prev" = -t ] && [ "${STUB_BUILD_RC:-0}" = 0 ]; then
+        echo "$a" >> "$STUB_CALLS.built"
+        if [ -n "${STUB_BUILD_NEW_ID:-}" ]; then echo "$a=$STUB_BUILD_NEW_ID" >> "$STUB_CALLS.ids"; fi
+      fi
       prev="$a"
     done ;;
   *" image inspect "*"-cc "*)
@@ -321,6 +346,8 @@ def fx(tmp_path) -> Fixture:
     bindir.mkdir()
     (bindir / "docker").write_text(DOCKER_STUB)
     (bindir / "docker").chmod(0o755)
+    (bindir / "curl").write_text(CURL_STUB)
+    (bindir / "curl").chmod(0o755)
     install_flock(bindir)
     calls = tmp_path / "docker-calls"
     env = {
@@ -3470,6 +3497,130 @@ class TestTheAptMirror:
         assert result.returncode == 0, result.stderr
         assert "mirror=unset" in result.stdout
         assert "WARNING: APT_MIRROR" in result.stdout + result.stderr
+
+
+class TestTheChromeVersion:
+    """The browser's Chrome layers are keyed on Google's stable version (#930):
+    BuildKit caches the RUN that fetches google-chrome-stable_current by its
+    text, so without the version as a build argument a new Chrome arrived only
+    when a layer above it changed."""
+
+    BROWSER = "daemon\\nweb\\nnginx\\nbrowser\\n"
+
+    def _build(self, fx, **env) -> subprocess.CompletedProcess:
+        env.setdefault("STUB_SERVICES", self.BROWSER)
+        return _source(fx, "build_images v0", **env)
+
+    def _seen(self, fx) -> list[str]:
+        path = Path(f"{fx.calls}.build-chrome")
+        return path.read_text().splitlines() if path.exists() else []
+
+    def test_the_stable_version_reaches_the_build(self, fx):
+        result = self._build(fx, STUB_CHROME_STABLE="157.0.8103.38")
+        assert result.returncode == 0, result.stderr
+        assert self._seen(fx) == ["CHROME_VERSION=157.0.8103.38"]
+        asked = Path(f"{fx.calls}.curl").read_text()
+        assert "versionhistory.googleapis.com/v1/chrome/platforms/linux/channels/stable/versions" in asked
+
+    def test_an_unreachable_api_builds_as_before_and_says_so(self, fx):
+        result = self._build(fx)
+        assert result.returncode == 0, result.stderr
+        assert self._seen(fx) == ["CHROME_VERSION="]
+        assert "WARNING: could not ask Google" in result.stdout + result.stderr
+
+    def test_an_answer_that_is_not_a_version_is_not_passed(self, fx):
+        result = self._build(fx, STUB_CHROME_STABLE="157.0.8103.38;rm")
+        assert self._seen(fx) == ["CHROME_VERSION="]
+        assert "WARNING: could not ask Google" in result.stdout + result.stderr
+
+    def test_google_is_asked_once_per_run(self, fx):
+        _source(fx, "build_images v0; build_images v0", STUB_CHROME_STABLE="157.0.8103.38",
+                STUB_SERVICES=self.BROWSER)
+        assert len(Path(f"{fx.calls}.curl").read_text().splitlines()) == 1
+
+    def test_a_stack_without_a_browser_asks_google_nothing(self, fx):
+        result = self._build(fx, STUB_SERVICES="daemon\\nweb\\nnginx\\n", STUB_CHROME_STABLE="157.0.8103.38")
+        assert result.returncode == 0, result.stderr
+        assert not Path(f"{fx.calls}.curl").exists()
+        assert "WARNING" not in result.stdout + result.stderr
+
+    def test_a_deb_google_has_not_switched_yet_does_not_fail_the_update(self, fx):
+        """The API can name a release before dl.google.com serves it as
+        current; the Dockerfile refuses that .deb, and the build runs again
+        without the key rather than failing every image with it."""
+        result = self._build(fx, STUB_CHROME_STABLE="157.0.8103.38", STUB_CHROME_DEB="156.0.8078.79")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert self._seen(fx) == ["CHROME_VERSION=157.0.8103.38", "CHROME_VERSION="]
+        assert "does not serve stable Chrome 157.0.8103.38 yet" in result.stdout + result.stderr
+
+    def test_any_other_failure_fails_the_build(self, fx):
+        result = self._build(fx, STUB_CHROME_STABLE="157.0.8103.38", STUB_BUILD_FAIL="build")
+        assert result.returncode != 0
+        assert self._seen(fx) == ["CHROME_VERSION=157.0.8103.38"]
+
+    def test_the_chrome_layer_is_keyed_on_it_too(self, fx):
+        result = fx.run("local-layers", STUB_MISSING_IMAGES="istota-browser:v0",
+                        STUB_IMAGE_ENV_CC=CC_ENV, STUB_CHROME_STABLE="157.0.8103.38")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert [b for b in _layer_builds(fx) if "--target chrome" in b] == [
+            "build --build-arg BROWSER_BASE=istota-browser-base:v0 --build-arg CHROME_VERSION=157.0.8103.38 "
+            f"--target chrome -t istota-browser:v0 {fx.src}/docker/browser"
+        ]
+
+    def test_a_chrome_layer_for_an_older_stable_is_built_again(self, fx):
+        (fx.stack / ".env").write_text(fx.env_text() + "ISTOTA_IMAGE=istota:v0-cc\n")
+        result = fx.run("local-layers", STUB_CC_IMAGES="istota:v0-cc", STUB_IMAGE_ENV_CC=CC_ENV,
+                        STUB_CHROME_STABLE="157.0.8103.38", STUB_CHROME_LABEL="156.0.8078.79")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert [b for b in _layer_builds(fx) if "--target chrome" in b]
+
+    def test_a_chrome_layer_for_the_current_stable_is_kept(self, fx):
+        (fx.stack / ".env").write_text(fx.env_text() + "ISTOTA_IMAGE=istota:v0-cc\n")
+        result = fx.run("local-layers", STUB_CC_IMAGES="istota:v0-cc", STUB_IMAGE_ENV_CC=CC_ENV,
+                        STUB_CHROME_STABLE="157.0.8103.38", STUB_CHROME_LABEL="157.0.8103.38")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _layer_builds(fx) == []
+
+    def test_with_no_answer_an_existing_chrome_layer_is_kept(self, fx):
+        """Offline, the layer cannot be rebuilt anyway: the app's VM needs no
+        network to come up."""
+        (fx.stack / ".env").write_text(fx.env_text() + "ISTOTA_IMAGE=istota:v0-cc\n")
+        result = fx.run("local-layers", STUB_CC_IMAGES="istota:v0-cc", STUB_IMAGE_ENV_CC=CC_ENV,
+                        STUB_CHROME_LABEL="156.0.8078.79")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _layer_builds(fx) == []
+
+    def test_a_lagging_deb_keeps_the_existing_layer_and_says_so(self, fx):
+        (fx.stack / ".env").write_text(fx.env_text() + "ISTOTA_IMAGE=istota:v0-cc\n")
+        env = dict(STUB_CC_IMAGES="istota:v0-cc", STUB_IMAGE_ENV_CC=CC_ENV, STUB_CHROME_STABLE="157.0.8103.38",
+                   STUB_CHROME_LABEL="156.0.8078.79", STUB_CHROME_DEB="156.0.8078.79",
+                   STUB_PRESENT_IDS="istota-browser:v0=sha256:old")
+        result = fx.run("local-layers", **env)
+        assert result.returncode == 1
+        assert len([b for b in _layer_builds(fx) if "--target chrome" in b]) == 1, "built again without the key"
+        status = _status(fx, **env)["chrome"]
+        assert status["state"] == "failed"
+        assert "previous layer is still in use" in status["detail"]
+        assert "not stable 157.0.8103.38" in status["detail"]
+
+    def test_with_no_layer_a_lagging_deb_still_gives_the_browser_a_chrome(self, fx):
+        result = fx.run("local-layers", STUB_MISSING_IMAGES="istota-browser:v0", STUB_IMAGE_ENV_CC=CC_ENV,
+                        STUB_CHROME_STABLE="157.0.8103.38", STUB_CHROME_DEB="156.0.8078.79")
+        assert result.returncode == 0, result.stdout + result.stderr
+        chrome_builds = [b for b in _layer_builds(fx) if "--target chrome" in b]
+        assert len(chrome_builds) == 2 and "CHROME_VERSION" not in chrome_builds[1]
+
+    def test_a_rebuilt_layer_removes_the_image_it_replaced(self, fx):
+        (fx.stack / ".env").write_text(fx.env_text() + "ISTOTA_IMAGE=istota:v0-cc\n")
+        result = fx.run("local-layers", STUB_CC_IMAGES="istota:v0-cc", STUB_IMAGE_ENV_CC=CC_ENV,
+                        STUB_CHROME_STABLE="157.0.8103.38", STUB_CHROME_LABEL="156.0.8078.79",
+                        STUB_PRESENT_IDS="istota-browser:v0=sha256:old", STUB_BUILD_NEW_ID="sha256:new")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "image rm sha256:old" in fx.docker_calls()
+
+    def test_the_status_asks_google_nothing(self, fx):
+        _status(fx, STUB_CHROME_STABLE="157.0.8103.38", STUB_CHROME_LABEL="156.0.8078.79")
+        assert not Path(f"{fx.calls}.curl").exists()
 
 
 class TestTheWrapperPassesStdin:

@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Group members can change their group's files.** Every current member can upload, create folders, edit text files and delete files and empty folders in the group's folder from Files, and upload from the group's Shared files card, which also lists recent changes. Existing group folders became member-writable with this change, and members who joined earlier were not told; the All users folder stays admin-only, and `GROUP.md` and `memories` at the top of the folder cannot be changed from Files. See docs/features/groups.md.
+- Recent searches in the search dialog are a list you can move through with the arrow keys and open with Enter, instead of a row of buttons with no space between them.
 
 - The feeds poll no longer queues a task every five minutes for each user. The scheduler checks the user's feeds first and queues the poll only when a feed is due, so the admin task list and the daemon log carry far fewer empty runs.
 
@@ -23,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The browser image installs Google's current stable Chrome on every `istota-stack update`. Before, Docker's build cache kept the Chrome from an earlier build until something else in the browser image changed, so Chrome could fall weeks behind. `istota doctor` now reports the running Chrome and warns when a newer stable release has been out for more than a week.
 - Files no longer says your tasks can read and change the All users folder from your private chat. Tasks reach it only from a room linked to All users, and its note in Files now says so.
 - The P&L and P&L % columns of the Money overview's holdings are green and red again. An amount under a cent now shows no sign or colour, and a zero P&L % no longer shows a "+".
 - The daily database backup no longer downloads the previous day's snapshots back from the Nextcloud mount. Each snapshot is now taken and checked on local disk, compared against the row counts the last run recorded in a `manifest.json` beside the snapshots, and uploaded once. The first backup after the upgrade still reads each prior snapshot once, since no manifest exists yet. The server needs free local disk beside its databases for the largest one.

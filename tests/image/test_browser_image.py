@@ -466,10 +466,25 @@ def browser_base(pytestconfig):
 
 
 @pytest.fixture(scope="session")
-def browser_chrome_layer(browser_base):
+def chrome_stable() -> str:
+    """Google's stable Chrome, as istota-stack passes it (#930); "" when Google
+    cannot be asked, which builds as before."""
+    from istota.browser import chrome_release
+
+    try:
+        newest, _ = chrome_release.trailing((0,), chrome_release.fetch_stable_releases())
+    except chrome_release.HistoryUnavailable:
+        return ""
+    return newest.text if newest else ""
+
+
+@pytest.fixture(scope="session")
+def browser_chrome_layer(browser_base, chrome_stable):
+    args = {"BROWSER_BASE": browser_base.tag}
+    if chrome_stable:
+        args["CHROME_VERSION"] = chrome_stable
     return build_image(BROWSER_DOCKERFILE, BROWSER_DOCKERFILE.parent,
-                       prefix="browser-chrome-layer", target="chrome",
-                       build_args={"BROWSER_BASE": browser_base.tag})
+                       prefix="browser-chrome-layer", target="chrome", build_args=args)
 
 
 def _layers(image: BuiltImage) -> list[str]:
@@ -499,10 +514,31 @@ def test_the_chrome_layer_is_one_layer_on_the_base(browser_base, browser_chrome_
     assert len(layered) == len(base) + 1
 
 
-def test_chrome_runs_in_the_layer(browser_chrome_layer):
+def test_chrome_runs_in_the_layer(browser_chrome_layer, chrome_stable):
     result = run_in(browser_chrome_layer, ["-c", "google-chrome --version && apt-get check"])
     assert_ok(result, "Chrome in the local layer")
     assert "Google Chrome" in result.stdout
+    if not chrome_stable:
+        pytest.skip("Google's version history did not answer, so nothing was asked of the build")
+    assert result.stdout.split()[2] == chrome_stable
+    label = subprocess.run(
+        ["docker", "image", "inspect", "-f", '{{index .Config.Labels "org.istota.chrome-version"}}',
+         browser_chrome_layer.tag], capture_output=True, text=True, timeout=60, check=True,
+    )
+    assert label.stdout.strip() == chrome_stable
+
+
+def test_a_chrome_that_is_not_the_version_asked_for_fails_the_build(browser_base):
+    """The other side of the key (#930): a .deb that is not CHROME_VERSION is
+    refused rather than cached under that version's name."""
+    result = subprocess.run(
+        ["docker", "build", "-f", str(BROWSER_DOCKERFILE), "--target", "chrome",
+         "--build-arg", f"BROWSER_BASE={browser_base.tag}", "--build-arg", "CHROME_VERSION=1.0.0.1",
+         str(BROWSER_DOCKERFILE.parent)],
+        capture_output=True, text=True, timeout=1800,
+    )
+    assert result.returncode != 0
+    assert "not stable 1.0.0.1" in result.stdout + result.stderr
 
 
 def test_the_browser_service_starts_on_the_layer(browser_chrome_layer, tmp_path):
