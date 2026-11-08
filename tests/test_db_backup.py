@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import stat
 import sys
@@ -303,6 +304,220 @@ class TestCollapseGuard:
         results = db_backup.backup_databases(cfg, today="2026-07-12")
         loc = next(r for r in results if r["label"] == "location:alice")
         assert loc["status"] == "ok"
+
+
+def _empty_places(path: Path) -> None:
+    conn = sqlite3.connect(path)
+    conn.execute("DELETE FROM places")
+    conn.commit()
+    conn.close()
+
+
+class TestStagedSnapshotAndManifest:
+    """ISSUE-935: each snapshot is taken on local disk and checked there against
+    the row counts an earlier run recorded, then uploaded once. Reading the
+    prior snapshot back meant downloading it in full from the rclone mount."""
+
+    def _seeded(self, tmp_path):
+        cfg = _config(tmp_path)
+        db.init_db(cfg.db_path)
+        path = _seed_module_db(cfg, "alice", "location")
+        _add_place(path)
+        return cfg, path
+
+    def test_the_guard_reads_the_manifest_not_the_prior_file(self, tmp_path):
+        cfg, path = self._seeded(tmp_path)
+        db_backup.backup_databases(cfg, today="2026-07-11")
+        # A prior snapshot that cannot be read counts -1, which a file-reading
+        # guard takes as "no data" and lets an empty snapshot through.
+        (_root(tmp_path) / "2026-07-11" / "alice" / "location.db").write_bytes(b"not a database")
+        _empty_places(path)
+
+        results = db_backup.backup_databases(cfg, today="2026-07-12")
+        loc = next(r for r in results if r["label"] == "location:alice")
+        assert loc["status"] == "suspect"
+        assert loc["prior_rows"] == 1
+        assert loc["new_rows"] == 0
+        dated = _root(tmp_path) / "2026-07-12" / "alice"
+        assert (dated / "location.db.suspect").exists()
+        assert not (dated / "location.db").exists()
+
+    def test_no_snapshot_under_the_backup_root_is_opened(self, tmp_path, monkeypatch):
+        cfg, path = self._seeded(tmp_path)
+        db_backup.backup_databases(cfg, today="2026-07-11")
+        _empty_places(path)
+        opened: list[Path] = []
+        real_count = db_backup._data_row_count
+
+        def _spy(p):
+            opened.append(Path(p))
+            return real_count(p)
+
+        monkeypatch.setattr(db_backup, "_data_row_count", _spy)
+        results = db_backup.backup_databases(cfg, today="2026-07-12")
+
+        assert next(r for r in results if r["label"] == "location:alice")["status"] == "suspect"
+        root = _root(tmp_path).resolve()
+        assert opened
+        assert not [p for p in opened if p.resolve().is_relative_to(root)]
+
+    def test_without_a_manifest_the_prior_snapshot_is_read_once(self, tmp_path, monkeypatch):
+        """The transition: a dated dir from before the manifest existed is read
+        on the first run after the upgrade, and the next run reads nothing."""
+        cfg, path = self._seeded(tmp_path)
+        db_backup.backup_databases(cfg, today="2026-07-11")
+        (_root(tmp_path) / "2026-07-11" / "manifest.json").unlink()
+        opened: list[Path] = []
+        real_count = db_backup._data_row_count
+
+        def _spy(p):
+            opened.append(Path(p).resolve())
+            return real_count(p)
+
+        monkeypatch.setattr(db_backup, "_data_row_count", _spy)
+        root = _root(tmp_path).resolve()
+
+        db_backup.backup_databases(cfg, today="2026-07-12")
+        assert root / "2026-07-11" / "alice" / "location.db" in opened
+
+        opened.clear()
+        _empty_places(path)
+        results = db_backup.backup_databases(cfg, today="2026-07-13")
+        loc = next(r for r in results if r["label"] == "location:alice")
+        assert loc["status"] == "suspect"
+        assert loc["prior_rows"] == 1
+        assert not [p for p in opened if p.is_relative_to(root)]
+
+    def test_a_newer_copy_without_a_manifest_entry_is_not_skipped(self, tmp_path):
+        """A dir whose manifest write failed still holds the newest good copy.
+        Comparing against an older manifest instead would take its 0 and let
+        a DB that filled up and then emptied through."""
+        cfg = _config(tmp_path)
+        db.init_db(cfg.db_path)
+        path = _seed_module_db(cfg, "alice", "location")
+        db_backup.backup_databases(cfg, today="2026-07-10")  # records 0
+        _add_place(path)
+        db_backup.backup_databases(cfg, today="2026-07-11")
+        (_root(tmp_path) / "2026-07-11" / "manifest.json").unlink()
+        _empty_places(path)
+
+        results = db_backup.backup_databases(cfg, today="2026-07-12")
+        loc = next(r for r in results if r["label"] == "location:alice")
+        assert loc["status"] == "suspect"
+        assert loc["prior_rows"] == 1
+
+    def test_a_failed_quarantine_upload_leaves_the_good_name_empty(self, tmp_path, monkeypatch):
+        cfg, path = self._seeded(tmp_path)
+        db_backup.backup_databases(cfg, today="2026-07-11")
+        _empty_places(path)
+        real_upload = db_backup._upload
+
+        def _suspect_fails(staged, dest):
+            if dest.name.endswith(".suspect"):
+                raise OSError("simulated upload failure")
+            return real_upload(staged, dest)
+
+        monkeypatch.setattr(db_backup, "_upload", _suspect_fails)
+        results = db_backup.backup_databases(cfg, today="2026-07-12")
+
+        loc = next(r for r in results if r["label"] == "location:alice")
+        assert loc["status"] == "suspect"
+        assert not (_root(tmp_path) / "2026-07-12" / "alice").exists() or not any(
+            (_root(tmp_path) / "2026-07-12" / "alice").iterdir())
+        assert (_root(tmp_path) / "2026-07-11" / "alice" / "location.db").exists()
+
+    def test_a_same_day_collapse_replaces_the_mornings_copy(self, tmp_path):
+        cfg, path = self._seeded(tmp_path)
+        db_backup.backup_databases(cfg, today="2026-07-11")
+        db_backup.backup_databases(cfg, today="2026-07-12")
+        _empty_places(path)
+
+        results = db_backup.backup_databases(cfg, today="2026-07-12")
+        loc = next(r for r in results if r["label"] == "location:alice")
+        assert loc["status"] == "suspect"
+        dated = _root(tmp_path) / "2026-07-12"
+        assert (dated / "alice" / "location.db.suspect").exists()
+        assert not (dated / "alice" / "location.db").exists()
+        counts = json.loads((dated / "manifest.json").read_text())["rows"]
+        assert "alice/location.db" not in counts
+
+    def test_a_good_run_writes_the_manifest_and_leaves_nothing_staged(self, tmp_path):
+        cfg, _path = self._seeded(tmp_path)
+        with db.get_db(cfg.db_path) as conn:
+            db.create_task(conn, prompt="hi", user_id="alice")
+
+        db_backup.backup_databases(cfg, today=FIXED_DAY)
+
+        dated = _root(tmp_path) / FIXED_DAY
+        manifest = dated / "manifest.json"
+        assert stat.S_IMODE(manifest.stat().st_mode) == 0o600
+        counts = json.loads(manifest.read_text())["rows"]
+        assert counts["alice/location.db"] == 1
+        assert counts["framework/istota.db"] == db_backup._data_row_count(
+            dated / "framework" / "istota.db")
+        assert "alice/money.db" not in counts
+        names = {p.name for p in dated.rglob("*")}
+        assert names == {"manifest.json", "framework", "istota.db", "alice", "location.db"}
+        staging = cfg.db_path.parent / ".backup-staging"
+        assert not staging.exists() or not any(staging.rglob("*"))
+
+    def test_a_suspect_snapshot_is_not_in_the_manifest(self, tmp_path):
+        cfg, path = self._seeded(tmp_path)
+        db_backup.backup_databases(cfg, today="2026-07-11")
+        _empty_places(path)
+        db_backup.backup_databases(cfg, today="2026-07-12")
+
+        counts = json.loads((_root(tmp_path) / "2026-07-12" / "manifest.json").read_text())["rows"]
+        assert "alice/location.db" not in counts
+
+        # The next day still compares against the last good count.
+        results = db_backup.backup_databases(cfg, today="2026-07-13")
+        loc = next(r for r in results if r["label"] == "location:alice")
+        assert loc["status"] == "suspect"
+        assert loc["prior_rows"] == 1
+
+    def test_a_failed_upload_leaves_no_snapshot_and_no_staged_file(self, tmp_path, monkeypatch):
+        cfg, _path = self._seeded(tmp_path)
+        real_copy = db_backup.shutil.copyfileobj
+
+        def _boom(src, dst, *a, **kw):
+            real_copy(src, dst, *a, **kw)
+            raise OSError("simulated upload failure")
+
+        monkeypatch.setattr(db_backup.shutil, "copyfileobj", _boom)
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY)
+
+        loc = next(r for r in results if r["label"] == "location:alice")
+        assert loc["status"] == "error"
+        dated = _root(tmp_path) / FIXED_DAY
+        assert not [p for p in dated.rglob("*") if p.is_file()]
+        staging = cfg.db_path.parent / ".backup-staging"
+        assert not staging.exists() or not any(staging.rglob("*"))
+        assert db_backup.last_backup_time(cfg) == 0.0
+
+    def test_a_same_day_rerun_keeps_what_it_did_not_retake(self, tmp_path, monkeypatch):
+        cfg, _path = self._seeded(tmp_path)
+        db_backup.backup_databases(cfg, today=FIXED_DAY)
+        real_snapshot = db_backup._snapshot_one
+
+        def _framework_fails(src, dest, label):
+            if label == "framework":
+                raise OSError("simulated")
+            return real_snapshot(src, dest, label)
+
+        monkeypatch.setattr(db_backup, "_snapshot_one", _framework_fails)
+        db_backup.backup_databases(cfg, today=FIXED_DAY)
+
+        counts = json.loads((_root(tmp_path) / FIXED_DAY / "manifest.json").read_text())["rows"]
+        assert set(counts) == {"framework/istota.db", "alice/location.db"}
+
+    def test_a_manifest_and_a_partial_upload_do_not_read_as_snapshots(self, tmp_path):
+        cfg, _path = self._seeded(tmp_path)
+        db_backup.backup_databases(cfg, today=FIXED_DAY)
+        dated = _root(tmp_path) / FIXED_DAY
+        (dated / "alice" / ".location.db.abc123").write_bytes(b"partial")
+
+        assert db_backup._good_db_relpaths(dated) == {"framework/istota.db", "alice/location.db"}
 
 
 class TestRetentionProtectsNewestGood:
@@ -822,7 +1037,7 @@ class TestVanishedModuleDb:
         assert loc["status"] == "vanished"
 
     def test_a_suspect_prior_does_not_count_as_coverage(self, tmp_path):
-        """``_prior_good_snapshot`` skips quarantined copies, so a DB whose only
+        """``_prior_good_dir`` skips quarantined copies, so a DB whose only
         prior snapshot was quarantined and which then disappears reports
         ``skip_missing`` — the alert for it already fired as ``suspect``."""
         cfg = _config(tmp_path)

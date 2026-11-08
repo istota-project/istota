@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Files no longer says your tasks can read and change the All users folder from your private chat. Tasks reach it only from a room linked to All users, and its note in Files now says so.
 - The P&L and P&L % columns of the Money overview's holdings are green and red again. An amount under a cent now shows no sign or colour, and a zero P&L % no longer shows a "+".
+- The daily database backup no longer downloads the previous day's snapshots back from the Nextcloud mount. Each snapshot is now taken and checked on local disk, compared against the row counts the last run recorded in a `manifest.json` beside the snapshots, and uploaded once. The first backup after the upgrade still reads each prior snapshot once, since no manifest exists yet. The server needs free local disk beside its databases for the largest one.
 
 ## [0.48.0] - 2026-11-02
 
