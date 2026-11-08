@@ -28,11 +28,11 @@ A large directory shows at most 2,000 entries and a notice. This is a slice of t
 
 ## Adding files
 
-In My files, use Upload or drop files onto the listing. Files upload one at a time, with progress and any error beside each file. Uploads keep existing files: a repeated name gets a number. The default size limit is 100 MB per file. New folder creates a folder in the location shown in the dialog. Room folders, group folders, linked folders and Drive have no upload or new-folder controls.
+In My files, use Upload or drop files onto the listing. Files upload one at a time, with progress and any error beside each file. Uploads keep existing files: a repeated name gets a number. The default size limit is 100 MB per file. New folder creates a folder in the location shown in the dialog. Group folders work the same way for every current member, except the All users folder, which only admins can change (see [Group files](groups.md#group-files)). Room folders, linked folders and Drive have no upload or new-folder controls.
 
 ## Editing text files
 
-A text file in My files has Edit in its row menu, including a file made in the host folder on the Mac or uploaded. A file counts as text by the viewer's rule: valid UTF-8 with no NUL bytes, and at most 1 MB. Binary files, larger files and links stay view-only. Room folders, group folders, linked folders and Drive are not editable here.
+A text file in My files has Edit in its row menu, including a file made in the host folder on the Mac or uploaded. A file counts as text by the viewer's rule: valid UTF-8 with no NUL bytes, and at most 1 MB. Binary files, larger files and links stay view-only. Text files in a group folder are editable by every current member, under the same rules; `GROUP.md` and `memories` at the top of the folder are not, and the notebook is edited on the Groups page. Room folders, linked folders and Drive are not editable here.
 
 If the file changed since you opened it, in the host folder or by a task, the save is refused and your text stays in the editor. A file's permissions are kept, so a script stays executable, and a file written with Windows line endings is saved with them. Files in the bot's config folder open in the [configuration editor](#configuration-files) instead, which checks them before saving.
 

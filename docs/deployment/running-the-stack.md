@@ -428,6 +428,8 @@ What differs from a server:
 
 Istota backs up nothing but its databases. On a timer it snapshots them to `[scheduler] db_backup_dir`, by default `Backups/db/snapshots` under the workspace. In full Nextcloud integration that is on the mount, so the snapshots leave the VM, beside copies of `config.toml` and the admins file in `Backups/config/<date>/`; `istota-stack update`, `setup` and `apply` copy `.env` and `host.env` there too, neither of which holds a credential. In local storage mode it is `/data/workspace/Backups/db/snapshots`, in the same `/srv/app/istota/data` as the databases themselves: a snapshot there gets you back from a corrupted database file, not from losing the VM's disk. `istota doctor` reports this as a warning under `backups.off_volume`, and `runtime.workspace_disk` warns when the disk runs low on space.
 
+Each snapshot is taken and checked on local disk first, in `.backup-staging/` beside the framework database, then copied to the destination once. The row counts of each run go in a `manifest.json` in its dated directory, and the next run compares against those instead of reading the previous snapshots back, which on the mount would download them. So the state directory needs free space for the largest database while a backup runs.
+
 The workspace and the state directory as a whole are yours to back up. Either back up `/srv/app/istota/data` with whatever backs up the VM's disk, or stop the stack and archive it:
 
 ```bash
