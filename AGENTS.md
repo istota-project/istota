@@ -274,8 +274,9 @@ Alongside `src/`: `host/` (the dedicated VM: `provision.sh`, `istota-stack`, the
 ### Prompt Layers
 
 1. **Emissaries** (`config/emissaries.md`) — constitutional principles, global only.
-2. **Persona** (the operator's `PERSONA.md` at the file root, synced from `config/persona.md` unless edited) — character, one for every user and every room. Per-user preferences go in `USER.md`.
-3. **Custom system prompt** (`config/system-prompt.md`, opt-in) — replaces CC default.
+2. **Worldview** (`{root}/WORLDVIEW.md`, optional, nothing shipped; `worldview_enabled`) — the positions the agent judges from, deployment-wide, skipped with the persona; read only when the bot account owns the file.
+3. **Persona** (the operator's `PERSONA.md` at the file root, synced from `config/persona.md` unless edited) — character, one for every user and every room. Per-user preferences go in `USER.md`.
+4. **Custom system prompt** (`config/system-prompt.md`, opt-in) — replaces CC default.
 
 **A task prompt is two halves, split by authority** (`executor.ComposedPrompt`). Standing instructions — identity, execution constraints, emissaries, persona, workspace layout, tool descriptions, rules, response guidelines, skills changelog, eager skill bodies — are the `system` half. Retrieved memory, knowledge facts, playbooks, conversation and confirmation history, the request and its attachments are the `user` half, which is what a compaction summary carries forward. The handoff is a file in `{temp_dir}/.control/{user_id}/task_{id}/`, a directory no task can write and only this task can read. Two rules are held by tests: no line in the system half may point at material in the user half, and every scalar interpolated into a system header goes through `_one_line()`. Full rules in `.claude/rules/prompts.md`.
 
