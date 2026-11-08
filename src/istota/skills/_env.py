@@ -30,6 +30,24 @@ class EnvContext:
     discovered_calendars: list = field(default_factory=list)
 
 
+def needs_discovered_calendars(
+    skill_names: list[str], skill_index: dict[str, SkillMeta],
+) -> bool:
+    """Whether any named skill has a spec behind ``gate_has_discovered_calendars``.
+
+    Lets a caller skip CalDAV discovery, about a dozen PROPFINDs, for a task
+    whose skill never reads what it finds (ISSUE-931).
+    """
+    for skill_name in skill_names:
+        meta = skill_index.get(skill_name)
+        if meta is None:
+            continue
+        for spec in meta.env_specs:
+            if spec.gate_has_discovered_calendars:
+                return True
+    return False
+
+
 def _resolve_config_path(config: object, dotted_path: str) -> object:
     """Resolve a dotted path like 'browser.api_url' against a Config object."""
     obj = config

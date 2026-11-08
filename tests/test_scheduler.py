@@ -6085,7 +6085,7 @@ class TestExecuteSkillTask:
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
         (tmp_path / "temp").mkdir(exist_ok=True)
-        task = self._task(skill="feeds", skill_args='["--help"]')
+        task = self._task(skill="calendar", skill_args='["--help"]')
         captured = {}
 
         def _fake_run(cmd, **kwargs):
@@ -6103,6 +6103,58 @@ class TestExecuteSkillTask:
         assert env["CALDAV_URL"] == "https://nc.example.com/remote.php/dav"
         assert env["CALDAV_USERNAME"] == "ncuser"
         assert env["CALDAV_PASSWORD"] == "ncpass"
+
+    def _caldav_config(self, db_path, tmp_path):
+        (tmp_path / "mount").mkdir(exist_ok=True)
+        (tmp_path / "temp").mkdir(exist_ok=True)
+        return Config(
+            db_path=db_path,
+            nextcloud=NextcloudConfig(
+                url="https://nc.example.com",
+                username="ncuser",
+                app_password="ncpass",
+            ),
+            workspace_path=tmp_path / "mount",
+            temp_dir=tmp_path / "temp",
+            scheduler=SchedulerConfig(task_timeout_minutes=1),
+            users={"alice": UserConfig()},
+        )
+
+    def _discovery_calls(self, task, config):
+        captured = {}
+
+        def _fake_run(cmd, **kwargs):
+            captured["env"] = kwargs.get("env", {})
+            return MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with patch("istota.scheduler._run_capture", side_effect=_fake_run):
+            with patch(
+                "istota.scheduler.discover_calendars_for_task",
+                return_value=[("primary", "https://cal.example.com/p", True)],
+            ) as discover:
+                _execute_skill_task(task, config)
+        return discover.call_count, captured["env"]
+
+    def test_a_feeds_tick_runs_no_caldav_discovery(self, db_path, tmp_path):
+        """ISSUE-931: the feeds module's `run-scheduled` tick reads no
+        calendar, so it must not cost a CalDAV discovery (about eleven
+        PROPFINDs) on every tick."""
+        config = self._caldav_config(db_path, tmp_path)
+        task = self._task(skill="feeds", skill_args='["run-scheduled"]')
+        calls, env = self._discovery_calls(task, config)
+        assert calls == 0
+        assert "CALDAV_URL" not in env
+        assert "CALDAV_PASSWORD" not in env
+
+    @pytest.mark.parametrize("skill", ["calendar", "location"])
+    def test_a_calendar_reading_skill_task_still_discovers(
+        self, db_path, tmp_path, skill,
+    ):
+        config = self._caldav_config(db_path, tmp_path)
+        task = self._task(skill=skill, skill_args='["--help"]')
+        calls, env = self._discovery_calls(task, config)
+        assert calls == 1
+        assert env["CALDAV_URL"] == "https://nc.example.com/remote.php/dav"
 
     def test_caldav_env_omitted_when_no_calendars_discovered(
         self, db_path, tmp_path,

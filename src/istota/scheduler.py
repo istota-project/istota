@@ -2638,7 +2638,9 @@ def _execute_skill_task(
         process_cli_auth,
         strip_model_credentials,
     )
-    from .skills._env import EnvContext, build_skill_env, dispatch_setup_env_hooks
+    from .skills._env import (
+        EnvContext, build_skill_env, dispatch_setup_env_hooks, needs_discovered_calendars,
+    )
     from .skills._loader import load_skill_index
 
     skill_name = task.skill or ""
@@ -2704,6 +2706,12 @@ def _execute_skill_task(
             user_resources = db.get_user_resources(conn, task.user_id)
     user_cfg = config.get_user(task.user_id)
 
+    # The env below is built from the whole index, but only the gated CALDAV_*
+    # specs read this list, and only the calendar and location CLIs read those.
+    discovered_calendars = []
+    if not reach.public and needs_discovered_calendars([skill_name], skill_index):
+        discovered_calendars = discover_calendars_for_task(task, config)
+
     ctx = EnvContext(
         config=config,
         task=task,
@@ -2711,7 +2719,7 @@ def _execute_skill_task(
         user_config=user_cfg,
         user_temp_dir=user_temp_dir,
         is_admin=config.is_admin(task.user_id),
-        discovered_calendars=[] if reach.public else discover_calendars_for_task(task, config),
+        discovered_calendars=discovered_calendars,
     )
 
     env = build_clean_env(config)

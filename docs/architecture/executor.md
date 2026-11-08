@@ -73,7 +73,7 @@ One pre-resolution gate filters out specs that shouldn't fire:
 
 - `gate_has_discovered_calendars: true` — only resolve when CalDAV discovery returned at least one calendar
 
-CalDAV discovery is itself a best-effort step: `discover_calendars_for_task(task, config)` returns `[]` when CalDAV is unconfigured / unreachable / the user owns no calendars. The same helper is reused by the scheduler's two subprocess paths (`_execute_skill_task`, `_execute_command_task`) so the gate fires consistently across LLM, skill-task, and command-task dispatch.
+CalDAV discovery is itself a best-effort step: `discover_calendars_for_task(task, config)` returns `[]` when CalDAV is unconfigured / unreachable / the user owns no calendars. The same helper is reused by the scheduler's two subprocess paths (`_execute_skill_task`, `_execute_command_task`) so the gate fires consistently across LLM, skill-task, and command-task dispatch. A skill task runs it only when the skill it names declares a gated spec (`skills._env.needs_discovered_calendars`), so a `feeds` or `money` tick costs no PROPFINDs (ISSUE-931).
 
 See [environment variables reference](../reference/environment-variables.md) for the full mapping and [credentials](../configuration/credentials.md) for the two-tier credential architecture (global vs per-user).
 

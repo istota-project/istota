@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The feeds poll no longer queues a task every five minutes for each user. The scheduler checks the user's feeds first and queues the poll only when a feed is due, so the admin task list and the daemon log carry far fewer empty runs.
 
+- Scheduled skill jobs no longer look up the user's calendars on Nextcloud before every run. Only the calendar and location skills read that list, so the other module jobs, such as the feeds and money polls, now make no CalDAV requests.
+
 ### Fixed
 
 - Files no longer says your tasks can read and change the All users folder from your private chat. Tasks reach it only from a room linked to All users, and its note in Files now says so.
