@@ -274,7 +274,7 @@ Alongside `src/`: `host/` (the dedicated VM: `provision.sh`, `istota-stack`, the
 ### Prompt Layers
 
 1. **Emissaries** (`config/emissaries.md`) — constitutional principles, global only.
-2. **Worldview** (`{root}/WORLDVIEW.md`, optional, nothing shipped; `worldview_enabled`) — the positions the agent judges from, deployment-wide, skipped with the persona; read only when the bot account owns the file.
+2. **Worldview** (`config/worldview.md`, `worldview_enabled`) — the positions the agent judges from, after Common Task; global only, skipped with the persona.
 3. **Persona** (the operator's `PERSONA.md` at the file root, synced from `config/persona.md` unless edited) — character, one for every user and every room. Per-user preferences go in `USER.md`.
 4. **Custom system prompt** (`config/system-prompt.md`, opt-in) — replaces CC default.
 

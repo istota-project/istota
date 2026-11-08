@@ -7,7 +7,6 @@ from . import db
 from .config import Config
 from istota.nextcloud.compat import webdav_get_owner
 from istota.prompts.persona import PERSONA_FILENAME, SHIPPED_SUFFIX
-from istota.prompts.worldview import WORLDVIEW_FILENAME
 from .skills.files import list_files, path_exists, move_file
 from .storage import get_user_shared_path, ensure_user_directories_v2
 
@@ -18,15 +17,12 @@ _WATCH_KEY = "shared-files"
 # Bot-managed directories at the root, skipped whoever owns them.
 _ROOT_SKIP = frozenset({"users"})
 
-# The operator files' names. Skipped only when the bot account owns the
+# The operator persona's names. Skipped only when the bot account owns the
 # item: a user who shares a file under one of these names into the root is
 # sharing their own file, and left there it would become every user's persona.
-# The worldview's reader also checks the owner, since a share whose owner is
-# not a configured user is never moved.
 _BOT_OWNED_SKIP = frozenset({
     PERSONA_FILENAME.lower(),
     (PERSONA_FILENAME + SHIPPED_SUFFIX).lower(),
-    WORLDVIEW_FILENAME.lower(),
 })
 
 

@@ -321,7 +321,7 @@ def _write_skills(bundled: Path, extra_skills: dict | None = None) -> None:
 
 EMISSARIES = "EMISSARIES TEXT\n\nThe constitutional layer.\n"
 PERSONA = "PERSONA TEXT for {BOT_NAME}.\n"
-WORLDVIEW = "WORLDVIEW TEXT for {BOT_NAME}.\n"
+WORLDVIEW = "WORLDVIEW TEXT.\n"
 GUIDELINES = {
     "talk": "TALK GUIDELINES for {user_id}.",
     "email": "EMAIL GUIDELINES for {user_id}.",
@@ -479,8 +479,8 @@ class Case:
     #: user's own.
     correspondent: bool = False
     pins: bool = False
-    #: Writes `{root}/WORLDVIEW.md`, the optional layer between emissaries and
-    #: persona (#929).
+    #: Writes `config/worldview.md`, the layer between emissaries and persona
+    #: (#929). Off elsewhere so the other goldens stay small.
     worldview: bool = False
     #: Seeds one ICS feed for the user (open-protocol sharing) and puts a
     #: `calendar` skill in the catalogue, which the feeds line is gated on.
@@ -521,9 +521,7 @@ CASES: tuple[Case, ...] = (
     Case("nonadmin", admin=False),
     # The constitutional layer, present and absent.
     Case("emissaries_off", emissaries=False),
-    # Local storage: on Nextcloud storage the loader asks the server who owns
-    # the file, which `tests/test_executor.py::TestWorldview` covers.
-    Case("worldview", backend="local", worldview=True),
+    Case("worldview", worldview=True),
     # source_type: cli is the base; the other four each pull their own
     # channel guidelines and their own output target.
     Case("source_talk", source_type="talk", conversation_token="room-token"),
@@ -742,6 +740,8 @@ def _build_config(case: Case, tmp_path: Path) -> Config:
     if case.emissaries:
         (config_dir / "emissaries.md").write_text(EMISSARIES)
     (config_dir / "persona.md").write_text(PERSONA)
+    if case.worldview:
+        (config_dir / "worldview.md").write_text(WORLDVIEW)
     guidelines = config_dir / "guidelines"
     guidelines.mkdir(exist_ok=True)
     for source_type, text in GUIDELINES.items():
@@ -749,8 +749,6 @@ def _build_config(case: Case, tmp_path: Path) -> Config:
 
     mount = tmp_path / "mount"
     mount.mkdir(exist_ok=True)
-    if case.worldview:
-        (mount / "WORLDVIEW.md").write_text(WORLDVIEW)
 
     db.init_db(tmp_path / "framework.db")
 

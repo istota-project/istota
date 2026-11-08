@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **An optional worldview layer.** A `WORLDVIEW.md` at the bot's file root is loaded between emissaries and the persona for every task, and skipped for briefings like the persona. Nothing is shipped, so a deployment without the file gets no section; `worldview_enabled = false` switches it off without deleting the file. With Nextcloud storage only a file the bot account owns is read, so a file someone shares with the bot under that name is ignored. See docs/configuration/persona.md.
+- **A worldview layer.** Istota now ships the positions it judges from, taken from the Common Task manifesto, and loads them between emissaries and the persona for every task except briefings. It is on by default; `worldview_enabled = false` turns it off. See docs/configuration/persona.md.
 
 ### Changed
 

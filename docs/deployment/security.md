@@ -61,7 +61,7 @@ A mask hides rather than revokes: `kernel.unprivileged_userns_clone` is on (bwra
 
 **Also hidden from everyone**: other users' directories and the config directory.
 
-The config directory is not bound — it holds `config.toml`. `emissaries.md`, `persona.md`, `guidelines/*.md` and the skill bodies reach the model as content the daemon read and put in the prompt, so they never needed to be there. `system-prompt.md` is no exception: under `custom_system_prompt = true` the native brain reads it in the daemon, and the `claude` CLI, which opens the path itself, runs outside the sandbox.
+The config directory is not bound — it holds `config.toml`. `emissaries.md`, `worldview.md`, `persona.md`, `guidelines/*.md` and the skill bodies reach the model as content the daemon read and put in the prompt, so they never needed to be there. `system-prompt.md` is no exception: under `custom_system_prompt = true` the native brain reads it in the daemon, and the `claude` CLI, which opens the path itself, runs outside the sandbox.
 
 **Admin users additionally see**: their own developer repositories, when the developer skill is enabled. The workspace bind is the same for an admin as for anyone else: only their own `Users/<id>/` subtree, never the whole workspace or another admin's repositories.
 

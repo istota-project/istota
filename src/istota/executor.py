@@ -54,7 +54,6 @@ from .config import (
     servarr_key_variable,
 )
 from istota.prompts import persona as operator_persona
-from istota.prompts import worldview
 from istota.sandbox.plan import (
     Mount,
     SandboxProfile,  # noqa: F401  — re-exported; heartbeat, commands and doctor import it from here
@@ -78,7 +77,6 @@ from .storage import (
     read_channel_memory,
     read_dated_memories,
     read_group_memory,
-    read_regular_file,
     read_room_notes,
     read_user_memory_v2,
 )
@@ -6407,32 +6405,13 @@ def load_emissaries(config: Config) -> str | None:
 
 
 def load_worldview(config: Config) -> str | None:
-    """The deployment's worldview, ``{root}/WORLDVIEW.md``, or None (#929).
-
-    Optional and deployment-wide, like the persona: no shipped copy, no
-    per-user file, no last good copy. A missing, empty or refused file, one
-    the bot account does not own (``prompts.worldview.bot_owns``), a
-    deployment with no file root, or ``worldview_enabled = false`` all mean no
-    section. Same hardened leaf read as ``PERSONA.md``. Never raises.
-    """
+    """Load the shipped worldview, read like emissaries (global only, not user-overridable, #929)."""
     if not config.worldview_enabled:
         return None
-    path = worldview.worldview_path(config)
-    if path is None:
-        return None
-    try:
-        text, refusal = read_regular_file(path, max_bytes=worldview.WORLDVIEW_MAX_BYTES)
-        if refusal is not None:
-            logger.debug("worldview refused (%s)", refusal)
-            return None
-        if not text or not text.strip():
-            return None
-        if not worldview.bot_owns(config, path, len(text.encode("utf-8"))):
-            return None
-    except Exception as exc:  # noqa: BLE001 - an optional layer, never fatal
-        logger.debug("worldview unread: %s", type(exc).__name__)
-        return None
-    return _apply_bot_name(text.strip(), config)
+    worldview_path = config.skills_dir.parent / "worldview.md"
+    if worldview_path.exists():
+        return worldview_path.read_text().strip() or None
+    return None
 
 
 def load_persona(config: Config) -> str | None:

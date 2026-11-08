@@ -2645,7 +2645,7 @@ class PushConfig:
 class Config:
     bot_name: str = "Istota"  # User-facing name (used in chat, emails, folder names)
     emissaries_enabled: bool = True  # Include config/emissaries.md in system prompt (`istota setup` writes false for local installs)
-    worldview_enabled: bool = True  # Include {root}/WORLDVIEW.md when it exists (#929); false switches it off without deleting it
+    worldview_enabled: bool = True  # Include config/worldview.md in system prompt, between emissaries and persona (#929)
     # DEPRECATED (ISSUE-418): these were the *claude_code* brain's defaults
     # living at the root, where they read as deployment-wide and were applied to
     # every brain — shadowing each other brain's own configured default. They

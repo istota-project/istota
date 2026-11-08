@@ -154,7 +154,7 @@ class TestDiscoverAndOrganize:
         result = discover_and_organize_shared_files(config)
         assert len(result) == 0
 
-    @pytest.mark.parametrize("name", ["PERSONA.md", "PERSONA.md.shipped", "persona.md", "WORLDVIEW.md"])
+    @pytest.mark.parametrize("name", ["PERSONA.md", "PERSONA.md.shipped", "persona.md"])
     @patch("istota.shared_file_organizer.ensure_user_directories_v2")
     @patch("istota.shared_file_organizer.move_file", return_value=True)
     @patch("istota.shared_file_organizer.path_exists", return_value=False)
@@ -172,7 +172,7 @@ class TestDiscoverAndOrganize:
         assert discover_and_organize_shared_files(config) == []
         mock_move.assert_not_called()
 
-    @pytest.mark.parametrize("name", ["PERSONA.md", "PERSONA.md.shipped", "WORLDVIEW.md"])
+    @pytest.mark.parametrize("name", ["PERSONA.md", "PERSONA.md.shipped"])
     @patch("istota.shared_file_organizer.ensure_user_directories_v2")
     @patch("istota.shared_file_organizer.move_file", return_value=True)
     @patch("istota.shared_file_organizer.path_exists", return_value=False)

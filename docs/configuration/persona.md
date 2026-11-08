@@ -1,6 +1,6 @@
 # Persona and emissaries
 
-Istota's behavior is shaped by three layers: emissaries (constitutional principles), persona (character), and guidelines (channel-specific formatting). An optional worldview sits between emissaries and the persona.
+Istota's behavior is shaped by three layers: emissaries (constitutional principles), persona (character), and guidelines (channel-specific formatting). A worldview (the positions the agent judges from) sits between emissaries and the persona.
 
 ## Emissaries
 
@@ -24,20 +24,13 @@ Controlled by `emissaries_enabled` (default `true`). Skipped for briefings.
 
 ## Worldview
 
-Emissaries says the agent has its own perspective and should push back in private, but not what that perspective is. A worldview fills that in: the positions the agent judges from. It is optional and belongs to the deployment. Nothing is shipped.
+Emissaries says the agent has its own perspective and should push back in private, but not what that perspective is. The worldview fills that in: the positions the agent judges from, taken from the [Common Task](https://commontask.org/) manifesto. Istota is not neutral, and this layer says where it stands.
 
-Put it in `WORLDVIEW.md` at the bot's file root, beside `PERSONA.md`. It is loaded after emissaries and before the persona, for every task, in every room and for every user, the same as the persona. A user's own views belong in their `USER.md` as facts about them, not here.
+Defined in `config/worldview.md` and loaded after emissaries and before the persona, for every task, in every room and for every user. Like emissaries it is global only: not user-overridable and not copied to the file root. A user's own views belong in their `USER.md` as facts about them, not here.
 
-- **No file, or an empty one**: no worldview section.
-- **`worldview_enabled = false`**: no worldview section, with the file left in place. Use it to compare answers with and without the layer.
-- **Refused**: a symlink, a pipe, a file that is not UTF-8 or a file over 64 KiB is skipped, and the task runs without the layer. There is no last good copy, so a mount outage also drops it for the tasks that run during it.
-- **Not the bot account's file**: with Nextcloud storage, a file another account shares with the bot lands at the same root, so the file is read only when Nextcloud says the bot account owns it. Write it as the bot account (through the mount, or signed in as that account). The owner is asked once each time the file changes; if Nextcloud cannot be reached at that moment, the layer is left out until it answers.
+The file states its own precedence: emissaries first, then the worldview, then the persona. Where a position would conflict with an emissaries obligation (no manipulation, honesty), emissaries wins. It also says when a position comes up (when it would change a recommendation, not whenever its subject is mentioned) and how much of it shows in each setting: full voice in private, one flag when working for someone, nothing when acting on someone's behalf.
 
-Skipped wherever the persona is skipped, so briefings and other neutral output never carry it.
-
-State the precedence in the file itself: emissaries first, then the worldview, then the persona. Where a position in the worldview would conflict with an emissaries obligation (no manipulation, honesty), emissaries wins. The file is also where to say when a position should come up (when it would change a recommendation, not whenever its subject is mentioned) and how much of it shows in each setting: full voice in private, one flag when working for someone, nothing when acting on someone's behalf.
-
-`{BOT_NAME}` and `{BOT_DIR}` are substituted as in the persona.
+Controlled by `worldview_enabled` (default `true`). Skipped wherever the persona is skipped, so briefings and other neutral output never carry it.
 
 ## Persona
 
