@@ -81,6 +81,10 @@ EXEMPT: dict[str, str] = {
         "No section to write. Its one field is set from a heartbeat grant in "
         "[private_hosts], which the example documents."
     ),
+    "egress": (
+        "No section to write, the heartbeat reason. Its one field is set from an "
+        "egress grant in [private_hosts], which the example documents."
+    ),
 }
 
 
