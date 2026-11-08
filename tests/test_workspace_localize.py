@@ -126,6 +126,7 @@ def mount(tmp_path) -> Path:
     _put(root, "Channels/room1/CHANNEL.md", "room notes\n")
     _put(root, "Groups/g1/GROUP.md", "group notes\n")
     _put(root, "PERSONA.md", "persona\n")
+    _put(root, "WORLDVIEW.md", "worldview\n")
     _put(root, "Talk/shared.png", "a Talk file")
     _put(root, "Backups/db/snapshots/x.db", "a snapshot")
     _put(root, "shared-by-carol/doc.md", "a folder a user shared")
@@ -151,6 +152,7 @@ class TestCopy:
             "Channels/room1/CHANNEL.md": "room notes\n",
             "Groups/g1/GROUP.md": "group notes\n",
             "PERSONA.md": "persona\n",
+            "WORLDVIEW.md": "worldview\n",
         }
         assert report.entries["Users"].files == 3
         assert report.entries["PERSONA.md"].bytes == len("persona\n")

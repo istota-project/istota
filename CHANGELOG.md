@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **An optional worldview layer.** A `WORLDVIEW.md` at the bot's file root is loaded between emissaries and the persona for every task, and skipped for briefings like the persona. Nothing is shipped, so a deployment without the file gets no section; `worldview_enabled = false` switches it off without deleting the file. With Nextcloud storage only a file the bot account owns is read, so a file someone shares with the bot under that name is ignored. See docs/configuration/persona.md.
+
 ### Changed
 
 - **Group members can change their group's files.** Every current member can upload, create folders, edit text files and delete files and empty folders in the group's folder from Files, and upload from the group's Shared files card, which also lists recent changes. Existing group folders became member-writable with this change, and members who joined earlier were not told; the All users folder stays admin-only, and `GROUP.md` and `memories` at the top of the folder cannot be changed from Files. See docs/features/groups.md.
