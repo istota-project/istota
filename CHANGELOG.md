@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Scheduled skill jobs no longer look up the user's calendars on Nextcloud before every run. Only the calendar and location skills read that list, so the other module jobs, such as the feeds and money polls, now make no CalDAV requests.
 
+- The daemon no longer rewrites `status.json` on Nextcloud every minute. It writes the file when the worker or queue counts change, and otherwise every five minutes, so a status that has not changed now has an `updated_at` up to five minutes old instead of one minute. A reader that treats an older `updated_at` as a stopped daemon needs a threshold above five minutes.
+
 ### Fixed
 
 - Files no longer says your tasks can read and change the All users folder from your private chat. Tasks reach it only from a room linked to All users, and its note in Files now says so.

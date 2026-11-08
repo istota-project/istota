@@ -36,7 +36,7 @@ while not shutdown_requested:
     discover_and_organize_shared_files()  # every shared_file_check_interval (120s)
     poll_all_tasks_files()      # every tasks_file_poll_interval (30s)
     run_cleanup_checks()        # every briefing_check_interval
-    write_status()              # every 60s
+    write_status()              # checked every 60s; PUTs on change, else every 300s
     check_db_health()           # off-thread; every db_health_check_interval (24h)
     check_doctor()              # off-thread; every doctor_check_interval (1h)
     check_worktree_reap()       # off-thread; every worktree_reap_interval (6h)
