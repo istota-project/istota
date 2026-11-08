@@ -4448,6 +4448,70 @@ def check_browser_api_token(config: "Config", probe: bool) -> CheckResult:
     return CheckResult(name, OK, "browser API accepts this process's token")
 
 
+#: Days a browser's Chrome may trail the stable release before doctor warns: an
+#: update cadence of days and Google's staged rollout are normal.
+CHROME_TRAIL_WARN_DAYS = 7
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def check_browser_chrome_version(config: "Config", probe: bool) -> CheckResult:
+    """Which Chrome the browser runs, and how long it has trailed stable (#930).
+
+    Nothing inside the container updates Chrome, so the image is the only path,
+    and an image Docker kept from its cache keeps the Chrome it was built with.
+    The browser reports its version only to a token holder.
+    """
+    name = "browser.chrome_version"
+    if not config.browser.enabled:
+        return CheckResult(name, SKIP, "browser is disabled")
+    if not probe:
+        return CheckResult(name, SKIP, "browser Chrome version was not probed")
+    import httpx
+
+    from istota.browser import chrome_release
+    from istota.browser.admission import browser_api_auth
+
+    try:
+        response = httpx.get(config.browser.api_url.rstrip("/") + "/health",
+                             headers=browser_api_auth(), timeout=5.0, follow_redirects=False)
+        data = response.json() if response.status_code == 200 else None
+    except (httpx.HTTPError, ValueError):
+        data = None
+    if not isinstance(data, dict):
+        return CheckResult(name, SKIP, "browser API did not answer")
+    # /health answers a peer without the token too, with the public subset only,
+    # which never carries cdp_last_error.
+    if "cdp_last_error" not in data:
+        return CheckResult(name, SKIP, "browser API did not take this process's token; see browser.api_token")
+    running_text = data.get("chrome_version")
+    running = chrome_release.parse_version(running_text) if isinstance(running_text, str) else None
+    if running is None:
+        return CheckResult(
+            name, WARN, "the browser does not report its Chrome version",
+            remedy="Run `istota-stack update` to build a browser image that reports it.",
+        )
+    running_text = ".".join(str(part) for part in running)
+    try:
+        releases = chrome_release.fetch_stable_releases()
+    except chrome_release.HistoryUnavailable as exc:
+        return CheckResult(name, OK, f"Chrome {running_text}; Google's stable releases could not be read ({exc})")
+    newest, since = chrome_release.trailing(running, releases)
+    if newest is None or since is None:
+        return CheckResult(name, OK, f"Chrome {running_text} is the current stable release")
+    days = int((_utcnow() - since).total_seconds() // 86400)
+    detail = (f"Chrome {running_text} is behind stable {newest.text}; "
+              f"a newer release has been out for {days} days")
+    if days > CHROME_TRAIL_WARN_DAYS:
+        return CheckResult(
+            name, WARN, detail,
+            remedy="Run `istota-stack update`: a build after a new stable release installs it.",
+        )
+    return CheckResult(name, OK, detail)
+
+
 def check_room_scope_confinement(config: "Config", probe: bool) -> CheckResult:
     """Whether a guest's turn is kept out of the host's files on disk.
 
@@ -11052,6 +11116,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("security.egress_open_jobs", check_egress_open_jobs),
     ("security.room_scope_confinement", check_room_scope_confinement),
     ("browser.api_token", check_browser_api_token),
+    ("browser.chrome_version", check_browser_chrome_version),
     ("security.credential_backup", check_credential_backup),
     ("security.signup_tags", check_signup_tags),
     ("security.inline_credentials", check_inline_credentials),
@@ -11202,6 +11267,7 @@ CHECK_SCOPES: dict[str, str] = {
     # Deployment: a room policy and a sandbox are properties of an install.
     "security.room_scope_confinement": DEPLOYMENT,
     "browser.api_token": DEPLOYMENT,
+    "browser.chrome_version": DEPLOYMENT,
     "security.credential_backup": DEPLOYMENT,
     "security.signup_tags": DEPLOYMENT,
     "security.inline_credentials": DEPLOYMENT,

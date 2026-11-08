@@ -11,6 +11,7 @@ from contextlib import contextmanager
 import logging
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import threading
@@ -424,12 +425,38 @@ def _install_dialog_guards(context):
         _guard(page)
 
 
+def _chrome_path():
+    return os.environ.get("CHROME_EXECUTABLE", "/usr/bin/google-chrome-stable")
+
+
+_installed_version = None
+
+
+def installed_version():
+    """The Chrome binary's version, such as "157.0.8103.38", or "" when unreadable.
+
+    Read once: nothing in the container updates Chrome, so the binary cannot
+    change under a running API (#930). A failed read is asked again next time.
+    """
+    global _installed_version
+    if _installed_version:
+        return _installed_version
+    try:
+        result = subprocess.run([_chrome_path(), "--version"], capture_output=True,
+                                text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    match = re.search(r"\b\d+\.\d+\.\d+\.\d+\b", result.stdout) if result.returncode == 0 else None
+    if match is None:
+        return ""
+    _installed_version = match.group(0)
+    return _installed_version
+
+
 def launch_chrome(inst):
     """Launch Chrome directly with debugging port and stealth extension."""
 
-    chrome_path = os.environ.get(
-        "CHROME_EXECUTABLE", "/usr/bin/google-chrome-stable",
-    )
+    chrome_path = _chrome_path()
     screen_w = int(os.environ.get("SCREEN_WIDTH", "1440"))
     screen_h = int(os.environ.get("SCREEN_HEIGHT", "900"))
 
