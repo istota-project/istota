@@ -108,7 +108,7 @@ Admin-only: `describe`, `wanted`, `indexers` (with or without `--test`), adding 
 
 The room narrows the tier:
 
-- A task with restricted reach gets nothing: a guest's turn in a [shared room](shared-rooms.md#what-a-task-can-reach), or a task nobody asked for there. A limited job needs a `skill:servarr` grant in Settings, Network access. The skill is also `shared_room: private`, so a guest's turn never has it.
+- A task with restricted reach gets nothing: a guest's turn in a [shared room](shared-rooms.md#what-a-task-can-reach), or a task nobody asked for there. A limited job needs a `skill:servarr` grant on its Network access card, under Settings, Scheduled jobs (or Settings, Assignments for an assignment wake). The skill is also `shared_room: private`, so a guest's turn never has it.
 - An email thread gets the requester tier at most, and `--confirmed` is refused there whatever the tier (`confirmation_not_allowed_here`). An admitted correspondent's mail runs as the host, so "the user agreed" could be the correspondent agreeing.
 
 An operator's `disabled_skills`, or a per-user disable, refuses the CLI too.
