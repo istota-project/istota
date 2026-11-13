@@ -66,7 +66,8 @@
 # What `create` was given is kept in ~/.config/istota-stack/<instance>.env,
 # so a re-run needs no arguments and `open` and `status` know the port and
 # folder. So is the tag the VM last deployed (DEPLOYED_TAG, DEPLOYED_UNSIGNED),
-# read back from the VM after every `create`, `update` and `rollback`: a new VM made by a
+# read back from the VM after every `create` and `update`, and before a
+# release is chosen (a forwarded rollback changes it): a new VM made by a
 # later `create` or `restore` installs that, not the release it bootstraps
 # from, since an older image refuses a newer database. Not ~/.config/istota/: that is the standalone install's directory
 # (config.toml, istota.env with its master key, install.json), and with the
@@ -399,6 +400,30 @@ record_deployed() {
     state_set "DEPLOYED_TAG=${tag}" "DEPLOYED_UNSIGNED=$(probe_value "$1" unsigned)"
 }
 
+# What a running VM has deployed, into the state before a release is chosen:
+# a forwarded rollback changes it with nothing on the Mac watching. APPLIANCE
+# follows to that tag's directory beside the recorded one. 0 when the state
+# changed, else 1; a stopped VM or a failed probe changes nothing.
+sync_deployed() {
+    local probe tag appliance changed=1
+    [ "$(instance_status)" = Running ] || return 1
+    probe="$(vm sh -c "$VM_PROBE" </dev/null 2>/dev/null)" || return 1
+    tag="$(probe_value "$probe" tag)"
+    [ -n "$tag" ] || return 1
+    if [ "$tag" != "$(state_get DEPLOYED_TAG)" ]; then
+        record_deployed "$probe"
+        changed=0
+    fi
+    # Compared with the directory, not DEPLOYED_TAG: create's own read-back on
+    # a VM it started records the tag without moving APPLIANCE.
+    appliance="$(state_get APPLIANCE)"
+    if [ -n "$appliance" ] && [ "$(basename "$appliance")" != "$tag" ]; then
+        state_set "APPLIANCE=$(dirname "$appliance")/${tag}"
+        changed=0
+    fi
+    return "$changed"
+}
+
 workspace_or_default() {
     local folder
     folder="$(state_get WORKSPACE)"
@@ -592,8 +617,9 @@ refuse_older_release() {
     fi
 }
 
-# create's --appliance (or the recorded one): the release directory checked,
-# its tag the source's, and not older than the release deployed.
+# create's --appliance (or the recorded one): the release directory checked
+# and its tag the source's. refuse_older_release follows once sync_deployed
+# has read a running VM.
 appliance_settings() {
     local tag_option="$1"
     check_release_dir "$CREATE_APPLIANCE"
@@ -603,7 +629,6 @@ appliance_settings() {
     fi
     CREATE_TAG="$RELEASE_TAG"
     refuse_release_root "$(dirname "$CREATE_APPLIANCE")"
-    refuse_older_release "$CREATE_TAG" "$CREATE_APPLIANCE"
 }
 
 # The release's manifest checked here, before its disk is booted: signed by
@@ -959,6 +984,12 @@ cmd_create() {
         fi
     fi
     require_limactl
+    # The recorded release moves with a running VM; one given now does not.
+    if sync_deployed && [ "$source" = appliance ] && [ -z "$CREATE_SOURCE_GIVEN" ]; then
+        appliance="$(state_get APPLIANCE)"
+        tag="$(basename "$appliance")"
+    fi
+    [ "$source" != appliance ] || refuse_older_release "$tag" "$appliance"
 
     local status
     status="$(instance_status)"
@@ -1383,6 +1414,7 @@ cmd_update() {
         # The VM sees only the releases directory it was made with.
         [ "$(dirname "$appliance")" = "$(dirname "$recorded")" ] \
             || fail "$EX_CONFIG" "${INSTANCE} mounts $(dirname "$recorded"), and ${appliance} is not in it. Unpack the release there."
+        sync_deployed || true
         refuse_older_release "$RELEASE_TAG" "$appliance"
         update=(update "$RELEASE_TAG" --bundle "${RELEASE_MOUNT}/${RELEASE_TAG}/istota-${RELEASE_TAG}.bundle"
             --images "${RELEASE_MOUNT}/${RELEASE_TAG}")
@@ -1401,25 +1433,6 @@ cmd_update() {
         log "WARNING: could not read the deployed tag back from the VM; until a create or update records it, a new VM made from this Mac installs the tag recorded before this update"
     fi
     refresh_scripts
-}
-
-# Read back even after a failure: a rollback that fails after switching has switched.
-cmd_rollback() {
-    local rc=0 probe tag before appliance
-    require_running
-    before="$(state_get DEPLOYED_TAG)"
-    vm_stack rollback "$@" || rc=$?
-    if probe="$(vm sh -c "$VM_PROBE" </dev/null)"; then
-        record_deployed "$probe"
-        tag="$(probe_value "$probe" tag)"
-        appliance="$(state_get APPLIANCE)"
-        if [ -n "$tag" ] && [ "$tag" != "$before" ] && [ -n "$appliance" ]; then
-            state_set "APPLIANCE=$(dirname "$appliance")/${tag}"
-        fi
-    else
-        log "WARNING: could not read the deployed tag back from the VM; until a create or update records it, a new VM made from this Mac installs the tag recorded before this rollback"
-    fi
-    exit "$rc"
 }
 
 cmd_destroy() {
@@ -1607,8 +1620,13 @@ cmd_restore() {
     key="$(keychain_value || true)"
     valid_key "$key" \
         || fail "$EX_CONFIG" "the Keychain item ${KEYCHAIN_SERVICE} / ${KEYCHAIN_ACCOUNT} does not hold a usable master key. Nothing was changed."
-    require_new_vm_inputs
     require_limactl
+    # The release is chosen again from what the VM runs, before it is deleted.
+    if sync_deployed; then
+        create_settings ${create_args[@]+"${create_args[@]}"} --workspace "$folder" --no-setup
+    fi
+    require_new_vm_inputs
+    [ "$CREATE_SOURCE" != appliance ] || refuse_older_release "$CREATE_TAG" "$CREATE_APPLIANCE"
 
     local status rc=0
     status="$(instance_status)"
@@ -1983,7 +2001,6 @@ main() {
         deny-host-port) cmd_host_port deny "$@" ;;
         setup) cmd_setup "$@" ;;
         update) cmd_update "$@" ;;
-        rollback) cmd_rollback "$@" ;;
         destroy) cmd_destroy "$@" ;;
         apply|import-bare-metal) cmd_with_path "$command" "$@" ;;
         restore) cmd_restore "$@" ;;
