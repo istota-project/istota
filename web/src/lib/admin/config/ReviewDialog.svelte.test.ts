@@ -228,6 +228,51 @@ describe('applying', () => {
   });
 });
 
+describe('a caller that previews and submits for itself', () => {
+  function mountCustom(props: Record<string, unknown> = {}) {
+    const all = {
+      initialPreview: configPreview({ risky_keys: ['web.auth'] }),
+      onPreview: vi.fn(async () => configPreview({ diff: ['+checked = "again"'] })),
+      onSubmit: vi.fn(async () => ({ id: 44 })),
+      onClose: vi.fn(),
+      onSubmitted: vi.fn(),
+      onConflict: vi.fn(),
+      onRequestOpen: vi.fn(),
+      ...props,
+    };
+    render(ReviewDialog, { props: all });
+    return all;
+  }
+
+  it('hands the proof and the confirmed keys to the callback, not to the change routes', async () => {
+    const props = mountCustom();
+    await fireEvent.click(await screen.findByRole('button', { name: 'Apply…' }));
+    await fireEvent.input(screen.getByLabelText('Type to confirm'), { target: { value: 'apply' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await enterCode();
+    await waitFor(() => expect(props.onSubmitted).toHaveBeenCalledWith(44));
+    expect(props.onSubmit).toHaveBeenCalledWith({ request_id: 'step-1', code: '123456' }, [
+      'web.auth',
+    ]);
+    expect(api.submitConfigChange).not.toHaveBeenCalled();
+    expect(api.previewConfigChange).not.toHaveBeenCalled();
+  });
+
+  it('checks again through its own preview', async () => {
+    const props = mountCustom();
+    await fireEvent.click(await screen.findByRole('button', { name: 'Check again' }));
+    expect(await screen.findByText(/\+checked = "again"/)).toBeInTheDocument();
+    expect(props.onPreview).toHaveBeenCalledTimes(1);
+    expect(api.previewConfigChange).not.toHaveBeenCalled();
+  });
+
+  it('shows why Apply is unavailable and withholds it', async () => {
+    mountCustom({ applyBlockedReason: 'Changes are made on the host.' });
+    expect(await screen.findByText('Changes are made on the host.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Apply…' })).toBeDisabled();
+  });
+});
+
 describe('a preview already in hand', () => {
   it('shows it and its note without asking again, and asks on Check again', async () => {
     const restored = configPreview({
