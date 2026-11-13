@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { get } from 'svelte/store';
 import { startPushOpenHandling } from './pushOpen';
+import {
+  notificationPanelRequested,
+  takeNotificationPanelRequest,
+} from '$lib/stores/notifications';
 vi.mock('$app/paths', () => ({ base: '/istota' }));
 const goto = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock('$app/navigation', () => ({ goto }));
@@ -7,6 +12,7 @@ let pending: unknown = null;
 let stop = () => {};
 beforeEach(() => {
   vi.clearAllMocks();
+  takeNotificationPanelRequest();
   Object.defineProperty(navigator, 'userAgent', { value: 'IstotaApp/0.11.0', configurable: true });
   vi.stubGlobal('Capacitor', {
     Plugins: {
@@ -65,10 +71,22 @@ it.each([
   '/chat%2flogout',
   '/chat?room=1',
   '/chat\n',
-])('falls back for unsafe links: %s', async (link) => {
-  pending = { kind: 'notification', link };
-  stop = startPushOpenHandling();
-  await vi.waitFor(() => expect(goto).toHaveBeenCalledWith('/istota/chat'));
+])('opens the inbox panel, not the link, for an unsafe link: %s', async (link) => {
+  pending = { kind: 'notification', notification_id: 7, link };
+  const navigate = vi.fn();
+  stop = startPushOpenHandling(navigate);
+  await vi.waitFor(() => expect(get(notificationPanelRequested)).toBe(true));
+  expect(goto).not.toHaveBeenCalled();
+  expect(navigate).not.toHaveBeenCalled();
+});
+it('opens the inbox panel for a notification with no link', async () => {
+  // A task alert or an admin change row carries no link, so dispatch sends none.
+  pending = { kind: 'notification', notification_id: 7 };
+  const navigate = vi.fn();
+  stop = startPushOpenHandling(navigate);
+  await vi.waitFor(() => expect(get(notificationPanelRequested)).toBe(true));
+  expect(goto).not.toHaveBeenCalled();
+  expect(navigate).not.toHaveBeenCalled();
 });
 it('opens a validated notification route under the deployment base', async () => {
   pending = { kind: 'notification', link: '/settings/notifications' };
@@ -81,6 +99,16 @@ it('uses full navigation for server redirect routes', async () => {
   stop = startPushOpenHandling(navigate);
   await vi.waitFor(() => expect(navigate).toHaveBeenCalledWith('/istota/chat/r/room-one'));
   expect(goto).not.toHaveBeenCalled();
+});
+it('opens the notifications panel in place for an inbox tap', async () => {
+  // The app hands over `{kind: "inbox"}` for an envelope that failed a check or
+  // whose target is the sealer's inbox fallback (#949).
+  pending = { kind: 'inbox' };
+  const navigate = vi.fn();
+  stop = startPushOpenHandling(navigate);
+  await vi.waitFor(() => expect(get(notificationPanelRequested)).toBe(true));
+  expect(goto).not.toHaveBeenCalled();
+  expect(navigate).not.toHaveBeenCalled();
 });
 it('does not navigate after teardown while consume is pending', async () => {
   let resolve!: (value: unknown) => void;

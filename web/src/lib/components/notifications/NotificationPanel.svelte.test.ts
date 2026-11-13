@@ -43,7 +43,9 @@ import {
   notificationsError,
   notificationsLoading,
   refreshItems,
+  requestNotificationPanel,
   runAction,
+  takeNotificationPanelRequest,
 } from '$lib/stores/notifications';
 import NotificationBell from './NotificationBell.svelte';
 
@@ -147,6 +149,43 @@ describe('opening', () => {
     set(notificationItems, [row(3)]);
     await openPanel();
     expect(markPanelSeen).toHaveBeenCalledWith([{ id: 3, updated_at: '2026-08-03T00:00:00.000Z' }]);
+  });
+});
+
+describe('opening on request', () => {
+  // A push tap routed to the inbox opens the panel from outside the bell (#949).
+  afterEach(() => {
+    takeNotificationPanelRequest();
+  });
+
+  it('opens on a request made while the bell is mounted', async () => {
+    set(notificationItems, [row(1)]);
+    render(NotificationBell);
+    expect(screen.queryByText('Question 1')).not.toBeInTheDocument();
+    requestNotificationPanel();
+    expect(await screen.findByText('Question 1')).toBeInTheDocument();
+    expect(refreshItems).toHaveBeenCalledWith('all');
+    expect(takeNotificationPanelRequest()).toBe(false);
+  });
+
+  it('closes an open detail rather than drawing the panel over it', async () => {
+    set(notificationItems, [row(4)]);
+    await openPanel();
+    await fireEvent.click(await screen.findByText('Question 4'));
+    expect(await screen.findByRole('dialog', { name: 'Question 4' })).toBeInTheDocument();
+    requestNotificationPanel();
+    await vi.waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Question 4' })).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText('Question 4')).toBeInTheDocument();
+  });
+
+  it('opens on mount for a request made before the bell rendered', async () => {
+    set(notificationItems, [row(2)]);
+    requestNotificationPanel();
+    render(NotificationBell);
+    expect(await screen.findByText('Question 2')).toBeInTheDocument();
+    expect(refreshItems).toHaveBeenCalledWith('all');
   });
 });
 

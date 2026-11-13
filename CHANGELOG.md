@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Back up and restore the configuration from Admin → Configuration.** Download the saved `config.toml`, or a KeePass file that also holds the installation's credentials, confirmed with your password or an emailed code, and restore either through the usual review, choosing which credentials come back. See docs/configuration/web-editor.md.
 - **`istota-stack restore --no-start` on a Mac** rebuilds a lost VM and leaves the stack stopped, so you can block its network and check it before it runs. See docs/deployment/running-the-stack.md, "Recovering a lost installation".
 
+### Fixed
+
+- **Tapping a push for the inbox opens the notifications panel.** That covers a notification with no link, such as a task alert, and a tap the iPhone app 0.15.0 routes to the inbox when a private notification fails a check. These taps used to land on Chat. (#949)
+
 ## [0.49.0] - 2026-11-13
 
 Group members can now change their group's files: upload, make folders, edit text files and delete from Files or the group's Shared files card, which also lists recent changes. iPhone push notifications can keep their content from Apple, with the phone decrypting the preview itself. Istota also ships a worldview, the positions it judges from, as an optional prompt layer that is on by default.
