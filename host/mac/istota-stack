@@ -66,7 +66,7 @@
 # What `create` was given is kept in ~/.config/istota-stack/<instance>.env,
 # so a re-run needs no arguments and `open` and `status` know the port and
 # folder. So is the tag the VM last deployed (DEPLOYED_TAG, DEPLOYED_UNSIGNED),
-# read back from the VM after every `create` and `update`: a new VM made by a
+# read back from the VM after every `create`, `update` and `rollback`: a new VM made by a
 # later `create` or `restore` installs that, not the release it bootstraps
 # from, since an older image refuses a newer database. Not ~/.config/istota/: that is the standalone install's directory
 # (config.toml, istota.env with its master key, install.json), and with the
@@ -1393,6 +1393,25 @@ cmd_update() {
     refresh_scripts
 }
 
+# Read back even after a failure: a rollback that fails after switching has switched.
+cmd_rollback() {
+    local rc=0 probe tag before appliance
+    require_running
+    before="$(state_get DEPLOYED_TAG)"
+    vm_stack rollback "$@" || rc=$?
+    if probe="$(vm sh -c "$VM_PROBE" </dev/null)"; then
+        record_deployed "$probe"
+        tag="$(probe_value "$probe" tag)"
+        appliance="$(state_get APPLIANCE)"
+        if [ -n "$tag" ] && [ "$tag" != "$before" ] && [ -n "$appliance" ]; then
+            state_set "APPLIANCE=$(dirname "$appliance")/${tag}"
+        fi
+    else
+        log "WARNING: could not read the deployed tag back from the VM; until a create or update records it, a new VM made from this Mac installs the tag recorded before this rollback"
+    fi
+    exit "$rc"
+}
+
 cmd_destroy() {
     local force="" purge=""
     while [ "$#" -gt 0 ]; do
@@ -1954,6 +1973,7 @@ main() {
         deny-host-port) cmd_host_port deny "$@" ;;
         setup) cmd_setup "$@" ;;
         update) cmd_update "$@" ;;
+        rollback) cmd_rollback "$@" ;;
         destroy) cmd_destroy "$@" ;;
         apply|import-bare-metal) cmd_with_path "$command" "$@" ;;
         restore) cmd_restore "$@" ;;
