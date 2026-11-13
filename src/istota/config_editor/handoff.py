@@ -69,9 +69,10 @@ def needs_claude_code(document: dict) -> bool:
     return any(isinstance(kind, str) and kind in _CLAUDE_CODE_KINDS for kind in kinds)
 
 
-def _secret_file_text(label: str, name: str, value: Any) -> str:
-    """A moved value as its secret file holds it: a table (the native brain's
-    headers) as the JSON object its variable is read as."""
+def secret_file_text(label: str, name: str, value: Any) -> str:
+    """An inline value as its secret file holds it: a table (the native brain's
+    headers) as the JSON object its variable is read as. Used for a move and
+    for an installation backup's inline-origin file credential."""
     if isinstance(value, str):
         return value
     if isinstance(value, dict) and all(
@@ -116,7 +117,7 @@ def _moved_secrets(
             raise HandoffError(
                 f"{label} holds no value in config.toml any more, so there is nothing to move to {name}"
             )
-        found[name] = _secret_file_text(label, name, secrets.lookup(current, path)[1])
+        found[name] = secret_file_text(label, name, secrets.lookup(current, path)[1])
     return found
 
 

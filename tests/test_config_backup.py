@@ -102,9 +102,27 @@ class TestSourcePrecedence:
         assert _files(bundle) == {"istota_whatsapp_access_token": ("inline", "wa-token-value")}
         assert bundle.inline_credentials == []
 
-    def test_a_non_string_mapped_inline_value_refuses(self, install):
+    def test_an_inline_header_table_is_exported_as_its_secret_files_json(self, install):
+        bundle = _gather(install, '[brain.native.extra_headers]\nX-Key = "header-value-38"\n')
+        name = "istota_brain_native_extra_headers"
+        assert _files(bundle) == {name: ("inline", json.dumps({"X-Key": "header-value-38"}))}
+        assert bundle.inline_credentials == []
+        assert "header-value-38" not in bundle.config_toml
+
+        change_set, warnings = backup.restore_change_set(
+            bundle, "", restore_config=True, selected=[f"file:{name}"], base_digest="d" * 64,
+        )
+        assert change_set["secrets"] == {name: json.dumps({"X-Key": "header-value-38"})}
+        assert "header-value-38" not in change_set["raw"]
+        assert not any("stays unset" in item["message"] for item in warnings)
+        found = _preview("", change_set)
+        assert not found.blocked, (found.errors, found.blocking)
+        assert found.file_secrets == change_set["secrets"]
+        assert found.inline_secrets == {}
+
+    def test_a_header_table_with_a_non_string_value_refuses(self, install):
         with pytest.raises(BackupError) as caught:
-            _gather(install, '[brain.native.extra_headers]\nX-Key = "header-value-38"\n')
+            _gather(install, '[brain.native.extra_headers]\nX-Key = "header-value-38"\nX-Count = 3\n')
         assert caught.value.code == "invalid_saved_credential"
         assert "header-value-38" not in str(caught.value)
 

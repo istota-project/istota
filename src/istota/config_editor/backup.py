@@ -422,12 +422,17 @@ def _build(
                 ))
             continue
         if holds_inline:
-            if not isinstance(inline, str):
+            from istota.config_editor.handoff import HandoffError, secret_file_text
+
+            try:
+                value = secret_file_text(secrets.label(path), name, inline)
+            except HandoffError:
                 raise BackupError(
                     "invalid_saved_credential",
-                    f"The saved credential at {secrets.label(path)} is not a string.",
-                )
-            file_credentials.append(FileCredential(target=name, source="inline", value=inline))
+                    f"The saved credential at {secrets.label(path)} is not a value its "
+                    f"secret file {name} can hold.",
+                ) from None
+            file_credentials.append(FileCredential(target=name, source="inline", value=value))
             continue
         if environ.get(name.upper(), "").strip():
             omissions.append(Omission("environment", name, "supplied outside the saved configuration"))
@@ -546,7 +551,7 @@ def restore_change_set(
     credential whose value equals `current_files` is left out, since
     `edits.preview` counts every supplied file credential as a change.
     """
-    from istota.config_editor import schema
+    from istota.config_editor import edits, schema
     from istota.config_editor.edits import UNREADABLE_CONFIG, ChangeError
 
     try:
@@ -578,6 +583,12 @@ def restore_change_set(
         credential.target: credential for credential in chosen if isinstance(credential, FileCredential)
     }
     document, dropped = secrets.drop_missing_sentinels(document, current)
+    # Dropping every header of an inline `extra_headers` table leaves `{}` at a
+    # mapped path, which `edits.check_file_credentials` reads as a new value.
+    for mapped in _mapped_paths():
+        found, value = secrets.lookup(document, mapped)
+        if found and value in ({}, []) and secrets.lookup(current, mapped) != (True, value):
+            edits._unset_at(document, mapped)
     warnings: list[dict] = []
     for name in dropped:
         path = secrets.parse_label(name)
