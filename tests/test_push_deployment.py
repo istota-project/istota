@@ -115,3 +115,75 @@ def test_refuses_a_conflicting_environment_path(deployment, monkeypatch):
     with pytest.raises(ValueError):
         module.configure(config, settings, key)
     assert not (config.parent / "apns").exists()
+
+
+def test_private_content_gets_a_signing_key_once(deployment):
+    module, config, _, _, key, settings = deployment
+    settings["content"] = "private"
+    target = config.parent / "push/signing.pem"
+    assert module.configure(config, settings, key) == 2
+    assert tomllib.loads(config.read_text())["push"]["signing_key_path"] == str(target)
+    signing_key = serialization.load_pem_private_key(target.read_bytes(), password=None)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert stat.S_IMODE(target.parent.stat().st_mode) == 0o700
+    assert (config.parent / "push/signing.pem.pub").read_text().strip()
+    original = target.read_bytes()
+    assert module.configure(config, settings, key) == 0
+    assert target.read_bytes() == original
+    assert signing_key is not None
+
+
+def test_an_existing_signing_key_is_never_replaced(deployment):
+    module, config, _, _, key, settings = deployment
+    target = config.parent / "keys/signing.pem"
+    settings.update(content="private", signing_key_path=str(target))
+    assert module.configure(config, settings, key) == 2
+    original = target.read_bytes(), (config.parent / "keys/signing.pem.pub").read_bytes()
+    settings["chat_delay_seconds"] = 40
+    assert module.configure(config, settings, key) == 2
+    assert (target.read_bytes(), (config.parent / "keys/signing.pem.pub").read_bytes()) == original
+
+
+def test_legacy_content_writes_no_signing_key(deployment):
+    module, config, _, _, key, settings = deployment
+    assert module.configure(config, settings, key) == 2
+    assert "signing_key_path" not in tomllib.loads(config.read_text())["push"]
+    assert not (config.parent / "push").exists()
+
+
+def test_a_broken_signing_key_pair_is_refused_not_replaced(deployment):
+    module, config, _, _, key, settings = deployment
+    settings["content"] = "private"
+    target = config.parent / "push/signing.pem"
+    target.parent.mkdir(mode=0o700)
+    target.write_bytes(b"half written")
+    original = config.read_bytes()
+    with pytest.raises(ValueError):
+        module.configure(config, settings, key)
+    assert target.read_bytes() == b"half written"
+    assert config.read_bytes() == original
+
+
+@pytest.mark.parametrize("variable,value", [
+    ("ISTOTA_PUSH_SIGNING_KEY_PATH", "/other/signing.pem"),
+])
+def test_refuses_a_conflicting_signing_key_environment_path(deployment, monkeypatch, variable, value):
+    module, config, _, _, key, settings = deployment
+    settings["content"] = "private"
+    monkeypatch.setenv(variable, value)
+    original = config.read_bytes()
+    with pytest.raises(ValueError):
+        module.configure(config, settings, key)
+    assert config.read_bytes() == original
+    assert not (config.parent / "push").exists()
+
+
+def test_a_symlinked_signing_key_destination_is_refused(deployment, tmp_path):
+    module, config, _, _, key, settings = deployment
+    settings["content"] = "private"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (config.parent / "push").symlink_to(elsewhere)
+    with pytest.raises(ValueError):
+        module.configure(config, settings, key)
+    assert list(elsewhere.iterdir()) == []
