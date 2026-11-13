@@ -14,7 +14,9 @@
   import DiffBlock from './DiffBlock.svelte';
 
   interface Props {
-    changeSet: ConfigChangeSet;
+    /** The change to preview and submit through the editor's own routes.
+     *  Left out by a caller that passes `onPreview` and `onSubmit`. */
+    changeSet?: ConfigChangeSet;
     onClose: () => void;
     onSubmitted: (id: number) => void;
     /** config.toml changed under the page: reload the view, keep the draft. */
@@ -26,6 +28,13 @@
     initialPreview?: ConfigPreview | null;
     /** A line shown above the preview, such as what a restore brings back. */
     note?: string;
+    /** Previews in place of `previewConfigChange` (Check again). */
+    onPreview?: () => Promise<ConfigPreview>;
+    /** Submits in place of `submitConfigChange`, with the step-up proof and
+     *  the risky keys the admin confirmed. A restore's upload goes this way. */
+    onSubmit?: (proof: StepUpProof, confirmed: string[]) => Promise<{ id: number }>;
+    /** Why this installation cannot apply the change; the review still shows. */
+    applyBlockedReason?: string | null;
   }
 
   let {
@@ -36,6 +45,9 @@
     onRequestOpen,
     initialPreview = null,
     note = '',
+    onPreview,
+    onSubmit,
+    applyBlockedReason = null,
   }: Props = $props();
 
   /** The phrase a risky change is confirmed with. */
@@ -50,7 +62,7 @@
   let blocked = $derived(
     !preview || preview.errors.length > 0 || preview.problems.blocking.length > 0,
   );
-  let canApply = $derived(!!preview && !blocked && preview.changed);
+  let canApply = $derived(!!preview && !blocked && preview.changed && !applyBlockedReason);
 
   function label(problem: ConfigProblem): string {
     return problem.path.length ? problem.path.join('.') : 'config.toml';
@@ -86,7 +98,7 @@
     refusal = '';
     refusalErrors = [];
     try {
-      preview = await previewConfigChange(changeSet);
+      preview = onPreview ? await onPreview() : await previewConfigChange(changeSet!);
     } catch (e) {
       preview = null;
       showRefusal(e);
@@ -102,11 +114,10 @@
 
   async function submit(proof: StepUpProof) {
     try {
-      const { id } = await submitConfigChange({
-        ...changeSet,
-        confirm: preview?.risky_keys ?? [],
-        step_up: proof,
-      });
+      const confirmed = preview?.risky_keys ?? [];
+      const { id } = onSubmit
+        ? await onSubmit(proof, confirmed)
+        : await submitConfigChange({ ...changeSet!, confirm: confirmed, step_up: proof });
       onSubmitted(id);
     } catch (e) {
       // A refused code or password stays in the step-up dialog, which reads `reason`.
@@ -215,6 +226,10 @@
           These change who can sign in or how tasks are confined, and need a typed confirmation:
           <code>{preview.risky_keys.join(', ')}</code>
         </p>
+      {/if}
+
+      {#if applyBlockedReason}
+        <p class="caption">{applyBlockedReason}</p>
       {/if}
 
       {#if preview.changed}

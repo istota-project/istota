@@ -825,6 +825,34 @@ export interface AdminConfigView {
   model_catalogue?: ConfigModelCatalogue | null;
   /** `candidates`: every user with a live sign-in identity, who may be picked. */
   admins: { users: string[]; candidates?: string[]; read_only_reason: string | null };
+  /** The server's limit on a backup's configuration, in UTF-8 bytes counting
+   *  `config_preamble`, which heads the plain download. Absent from an older
+   *  server, and then the plain download is not offered. */
+  backup_limits?: { config_bytes: number; config_preamble: string } | null;
+  /** Whether this server can write the encrypted backup (the vault extra). */
+  backup_encrypted_available?: boolean;
+}
+
+/** A credential the encrypted backup does not hold, and why; never a value. */
+export interface ConfigBackupOmission {
+  category: string;
+  name: string;
+  reason: string;
+}
+
+export interface ConfigBackupExport {
+  filename: string;
+  /** Base64 of the encrypted KDBX file. */
+  file: string;
+  /** The generated password that opens it, shown once. */
+  password: string;
+  summary: {
+    file_credentials: number;
+    inline_credentials: number;
+    omissions: ConfigBackupOmission[];
+    /** False when this installation has no deployment secret files to read. */
+    secrets_dir_available: boolean;
+  };
 }
 
 export type ConfigOp =
@@ -920,7 +948,7 @@ export class ConfigChangeError extends Error {
 
 /** Outside `apiFetch` because a refusal's code and its extras have to reach
  *  the review dialog, and `apiFetch` keeps only the message. */
-async function configChangeWrite<T>(path: string, body: unknown): Promise<T> {
+async function configChangeWrite<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
   let resp: Response;
   try {
     resp = await fetch(`${base}/api/admin/config${path}`, {
@@ -928,8 +956,11 @@ async function configChangeWrite<T>(path: string, body: unknown): Promise<T> {
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal,
     });
-  } catch {
+  } catch (e) {
+    // A request the caller withdrew says nothing about the connection.
+    if (signal?.aborted) throw e;
     noteTransport(false, 'unreachable');
     throw new ConfigChangeError('Istota could not be reached. Nothing was sent.', 0, null);
   }
@@ -989,6 +1020,81 @@ export interface ConfigRestore {
 
 export function restoreConfigRequest(id: number): Promise<ConfigRestore> {
   return configChangeWrite<ConfigRestore>(`/requests/${id}/restore`, {});
+}
+
+/** The saved configuration and installation credentials as an encrypted
+ *  KDBX file. `keyfile` is base64 of a KeePass XML key file, or null. Needs
+ *  step-up action `admin_config_backup`; nothing is kept on the server. */
+export function exportConfigBackup(
+  keyfile: string | null,
+  step_up: StepUpProof,
+  signal?: AbortSignal,
+): Promise<ConfigBackupExport> {
+  return configChangeWrite<ConfigBackupExport>('/backup', { keyfile, step_up }, signal);
+}
+
+export type ConfigRestoreStatus = 'new' | 'changed' | 'unchanged' | 'host_only';
+
+/** A credential an uploaded backup holds, compared with this installation.
+ *  Never a value. Only a `selectable` one (`new` or `changed`) can be restored. */
+export interface ConfigRestoreCredential {
+  /** The destination, which `selected` names. */
+  id: string;
+  kind: 'file' | 'inline';
+  name: string;
+  /** Where the backed-up value was saved: a secret file or config.toml. */
+  source: 'file' | 'inline';
+  status: ConfigRestoreStatus;
+  /** Why a `host_only` credential is not restored from here. */
+  reason: string | null;
+  selectable: boolean;
+}
+
+/** An uploaded backup and what to restore from it. `file` and `keyfile` are
+ *  base64. A plain (`toml`) backup takes no password, key file or selection. */
+export interface ConfigRestoreUpload {
+  format: 'toml' | 'kdbx';
+  file: string;
+  password: string | null;
+  keyfile: string | null;
+  base_digest: string;
+  restore_config: boolean;
+  selected: string[];
+}
+
+export interface ConfigRestorePreview {
+  preview: ConfigPreview;
+  /** What the preview was made from; a submit sends both digests back. */
+  input_digest: string;
+  preview_digest: string;
+  credentials: ConfigRestoreCredential[];
+  note: string;
+}
+
+export interface ConfigRestoreSubmit extends ConfigRestoreUpload {
+  input_digest: string;
+  preview_digest: string;
+  confirm: string[];
+  step_up: StepUpProof;
+}
+
+/** What restoring an uploaded backup would do. Stores nothing, needs no
+ *  step-up, and returns no credential value. */
+export function previewConfigRestore(
+  upload: ConfigRestoreUpload,
+  signal?: AbortSignal,
+): Promise<ConfigRestorePreview> {
+  return configChangeWrite<ConfigRestorePreview>('/restore/preview', upload, signal);
+}
+
+/** Queue a reviewed restore as a config change request. The server opens the
+ *  upload again and refuses with `preview_changed` when it no longer matches
+ *  the preview. Needs step-up action `admin_config_change`. */
+export function submitConfigRestore(
+  body: ConfigRestoreSubmit,
+  signal?: AbortSignal,
+): Promise<{ id: number }> {
+  return configChangeWrite<{ id: number }>('/restore/requests', body, signal);
 }
 
 /** Withdraw a request the host has not taken yet. */
@@ -6084,6 +6190,7 @@ export type StepUpAction =
   | 'history_restore'
   | 'history_purge'
   | 'admin_config_change'
+  | 'admin_config_backup'
   | 'admin_briefing_delete'
   | 'admin_cron_delete'
   | 'admin_browser_console';

@@ -83,6 +83,18 @@ class TestAcquisition:
         with exclusive_lock(anchor, timeout_seconds=1):
             pass
 
+    def test_it_yields_the_held_descriptor(self, tmp_path):
+        import os
+        import stat
+
+        anchor = tmp_path / ".decrypt.lock"
+        with exclusive_lock(anchor, timeout_seconds=0, nofollow=True) as fd:
+            assert isinstance(fd, int)
+            assert os.fstat(fd).st_ino == os.stat(anchor).st_ino
+            assert stat.S_ISREG(os.fstat(fd).st_mode)
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
     def test_the_anchor_is_left_in_place(self, tmp_path):
         anchor = tmp_path / ".ledger.lock"
         with exclusive_lock(anchor, timeout_seconds=1):

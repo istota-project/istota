@@ -5064,6 +5064,39 @@ function mockAdminConfig() {
       candidates: ['alice', 'bob', 'carol', 'dave'],
       read_only_reason: null,
     },
+    backup_limits: {
+      config_bytes: 256 * 1024,
+      config_preamble:
+        '# Istota configuration backup.\n' +
+        '# Credentials are replaced by "<unchanged>"; database-backed settings and\n' +
+        '# environment overrides are not in this file.\n\n',
+    },
+    backup_encrypted_available: true,
+  };
+}
+
+/** Stand-in bytes: the mock has no KDBX writer, only the response's shape. */
+function mockConfigBackup() {
+  const stamp = new Date()
+    .toISOString()
+    .replace(/\.\d{3}Z$/, 'Z')
+    .replace(/[-:]/g, '');
+  return {
+    filename: `istota-config-${stamp}.kdbx`,
+    file: btoa('mock encrypted backup'),
+    password: 'mock-backup-password-correct-horse',
+    summary: {
+      file_credentials: 3,
+      inline_credentials: 1,
+      omissions: [
+        {
+          category: 'environment',
+          name: 'istota_brave_api_key',
+          reason: 'supplied outside the saved configuration',
+        },
+      ],
+      secrets_dir_available: true,
+    },
   };
 }
 
@@ -5301,6 +5334,106 @@ function mockConfigRestore(id: number) {
       'Restoring brings back the configuration only; credentials and the admin list stay as ' +
       'they are now.',
   };
+}
+
+/** What the mock's encrypted backup holds: names and statuses, never values. */
+const MOCK_RESTORE_CREDENTIALS = [
+  { id: 'istota_email_password', name: 'Email password', status: 'changed' },
+  { id: 'istota_brave_api_key', name: 'Brave API key', status: 'new' },
+  { id: 'claude_code_oauth_token', name: 'Claude Code token', status: 'unchanged' },
+  {
+    id: 'istota_nextcloud_app_password',
+    name: 'Nextcloud app password',
+    status: 'host_only',
+    reason: 'Changed on the host with the mount it belongs to.',
+  },
+].map((row) => ({
+  kind: 'file',
+  source: 'file',
+  reason: null,
+  ...row,
+  selectable: row.status === 'new' || row.status === 'changed',
+}));
+
+/**
+ * `POST /admin/config/restore/preview`. The mock has no KDBX reader: an
+ * encrypted file (by its signature) opens with any password and restores the
+ * current file unchanged plus the selected credentials; a plain one is
+ * previewed as raw TOML.
+ */
+function mockConfigRestorePreview(body: any) {
+  const refuse = (status: number, error: string, detail: string) => ({
+    __status: status,
+    error,
+    detail,
+  });
+  if (!body || body.base_digest !== mockConfigEditor.digest) {
+    return refuse(409, 'config_changed', 'config.toml changed since the page loaded.');
+  }
+  let text: string;
+  try {
+    text = atob(String(body.file ?? ''));
+  } catch {
+    return refuse(400, 'invalid_body', 'file is not strict base64.');
+  }
+  const encrypted = text.startsWith('\x03\xd9\xa2\x9a');
+  if (encrypted !== (body.format === 'kdbx')) {
+    return refuse(400, 'invalid_backup', 'The file is not the kind of backup it was sent as.');
+  }
+  const selected: string[] = Array.isArray(body.selected) ? [...body.selected].sort() : [];
+  const credentials = encrypted ? MOCK_RESTORE_CREDENTIALS : [];
+  if (encrypted && !body.password && !body.keyfile) {
+    return refuse(400, 'backup_locked', 'Wrong password or key file.');
+  }
+  const selectable = new Set(credentials.filter((c) => c.selectable).map((c) => c.id));
+  if (selected.some((id) => !selectable.has(id))) {
+    return refuse(
+      400,
+      'invalid_selection',
+      'The selection names a credential this restore cannot write; preview again.',
+    );
+  }
+  const raw = encrypted ? (mockAdminConfig().raw_toml ?? '') : text;
+  const secrets = Object.fromEntries(selected.map((id) => [id, 'restored']));
+  const changeSet = {
+    base_digest: mockConfigEditor.digest,
+    ops: [],
+    raw: encrypted && !body.restore_config ? null : raw,
+    secrets,
+  };
+  const preview = mockConfigPreview(changeSet) as any;
+  if (preview.__status) return preview;
+  const key = `${body.format}:${body.restore_config}:${selected.join(',')}:${text.length}`;
+  return {
+    preview,
+    input_digest: `mock-input-${key}`,
+    preview_digest: `mock-preview-${key}`,
+    credentials,
+    note: encrypted
+      ? 'Restoring the configuration replaces the whole file, so a setting the backup does not ' +
+        'hold returns to its default. Credentials you do not select stay as they are now.'
+      : 'A plain backup restores the configuration only. It replaces the whole file, so a ' +
+        'setting it does not hold returns to its default; credentials stay as they are now.',
+    __changeSet: changeSet,
+  };
+}
+
+/** `POST /admin/config/restore/requests`: rebuilt and checked against the
+ *  digests the preview returned, then queued like any other change. */
+function mockConfigRestoreSubmit(body: any) {
+  const rebuilt = mockConfigRestorePreview(body) as any;
+  if (rebuilt.__status) return rebuilt;
+  if (
+    body.input_digest !== rebuilt.input_digest ||
+    body.preview_digest !== rebuilt.preview_digest
+  ) {
+    return {
+      __status: 409,
+      error: 'preview_changed',
+      detail: 'The restore differs from the one reviewed. Preview it again.',
+    };
+  }
+  return mockConfigSubmit({ ...rebuilt.__changeSet, confirm: body.confirm, step_up: body.step_up });
 }
 
 /**
@@ -5578,6 +5711,15 @@ function configEditorHandler({ url, method, body }: MockReq): unknown | undefine
   if (url === '/istota/api/admin/config' && method === 'GET') return mockAdminConfig();
   if (url === '/istota/api/admin/config/preview' && method === 'POST') {
     return mockConfigPreview(body);
+  }
+  if (url === '/istota/api/admin/config/backup' && method === 'POST') return mockConfigBackup();
+  if (url === '/istota/api/admin/config/restore/preview' && method === 'POST') {
+    const { __changeSet, ...preview } = mockConfigRestorePreview(body) as any;
+    void __changeSet;
+    return preview;
+  }
+  if (url === '/istota/api/admin/config/restore/requests' && method === 'POST') {
+    return mockConfigRestoreSubmit(body);
   }
   if (url === '/istota/api/admin/config/requests' && method === 'POST') {
     return mockConfigSubmit(body);

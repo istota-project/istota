@@ -23,6 +23,7 @@ With full Nextcloud integration the daemon now reads your files only after they 
 
 - **Private push notifications.** With `[push] content = "private"`, Apple sees only a fixed alert and the badge count, and an iOS 17 phone on app 0.15.0 decrypts the preview itself. Notifications settings shows each device's mode. See docs/features/notifications.md.
 - **A worldview layer.** Istota ships the positions it judges from, taken from the Common Task manifesto, loaded between emissaries and the persona for every task except briefings. `worldview_enabled = false` turns it off. See docs/configuration/persona.md.
+- **Back up and restore the configuration from Admin → Configuration.** Download the saved `config.toml`, or a KeePass file that also holds the installation's credentials, and restore either through the usual review, choosing which credentials come back. See docs/configuration/web-editor.md, and docs/deployment/running-the-stack.md for rebuilding a lost installation.
 
 ### Changed
 

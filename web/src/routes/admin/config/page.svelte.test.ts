@@ -1258,3 +1258,160 @@ describe('the [models.aliases] editor', () => {
     ]);
   });
 });
+
+describe('backup', () => {
+  function stubDownloads() {
+    const names: string[] = [];
+    const blobs: Blob[] = [];
+    let blob: Blob | null = null;
+    // jsdom has no object URLs.
+    vi.stubGlobal(
+      'URL',
+      Object.assign(URL, {
+        createObjectURL: vi.fn((b: Blob) => {
+          blob = b;
+          return 'blob:fixture';
+        }),
+        revokeObjectURL: vi.fn(),
+      }),
+    );
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      names.push(this.download);
+      blobs.push(blob!);
+    });
+    return { names, blobs };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('downloads the saved file, not the edits the page holds', async () => {
+    const downloads = stubDownloads();
+    const saved = configView([imapHost], { raw_toml: '[email]\nimap_host = "old"\n' });
+    mount(saved);
+    await fireEvent.input(await screen.findByLabelText('imap_host'), {
+      target: { value: 'new' },
+    });
+    api.getAdminConfig.mockResolvedValue(
+      configView([imapHost], { raw_toml: '[email]\nimap_host = "saved-since"\n' }),
+    );
+    await fireEvent.click(screen.getByRole('button', { name: 'Back up configuration' }));
+    expect(await screen.findByText(/Unsaved changes are not included/)).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: 'Download' }));
+    await waitFor(() => expect(downloads.names).toHaveLength(1));
+    expect(downloads.names[0]).toMatch(/\.toml$/);
+    const text = await downloads.blobs[0].text();
+    expect(text).toContain('imap_host = "saved-since"');
+    expect(text).not.toContain('"new"');
+    expect(text.startsWith(saved.backup_limits!.config_preamble)).toBe(true);
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(screen.getByText('1 change')).toBeInTheDocument();
+  });
+
+  it('is offered on a read-only installation, and refuses secrets while a change is open', async () => {
+    api.getConfigRequest.mockResolvedValue(configRequest({ id: 21, status: 'taken' }));
+    mount(
+      configView([imapHost], {
+        editable: false,
+        applier: { kind: 'none', available: false, reason: 'No applier.' },
+      }),
+      [configRequest({ id: 21, status: 'taken' })],
+    );
+    await screen.findByText('Change #21');
+    await fireEvent.click(screen.getByRole('button', { name: 'Back up configuration' }));
+    const box = screen.getByLabelText('Include installation secrets', {
+      exact: false,
+      selector: 'input',
+    });
+    expect(box).toBeDisabled();
+    expect(screen.getByText(/waiting for the host/)).toBeInTheDocument();
+    expect(screen.queryByText(/Unsaved changes/)).toBeNull();
+  });
+
+  it('withholds the plain download when the view carries no limit', async () => {
+    mount(configView([imapHost], { backup_limits: null }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Back up configuration' }));
+    expect(screen.getByRole('button', { name: 'Download' })).toBeDisabled();
+  });
+});
+
+describe('restore from a file', () => {
+  const plain = '[email]\nimap_host = "restored"\n';
+  const restorePreview = (preview = configPreview()) => ({
+    preview,
+    input_digest: 'input-1',
+    preview_digest: 'preview-1',
+    credentials: [],
+    note: 'A plain backup restores the configuration only.',
+  });
+
+  async function previewPlain() {
+    await fireEvent.click(await screen.findByRole('button', { name: 'Restore configuration' }));
+    await fireEvent.change(screen.getByLabelText('Backup file', { selector: 'input' }), {
+      target: { files: [new File([plain], 'istota-config.toml')] },
+    });
+    await fireEvent.click(await screen.findByRole('button', { name: 'Preview' }));
+  }
+
+  it('is held back while edits are pending or a change is open', async () => {
+    mount(configView([imapHost]));
+    const button = await screen.findByRole('button', { name: 'Restore configuration' });
+    expect(button).toBeEnabled();
+    await fireEvent.input(screen.getByLabelText('imap_host'), { target: { value: 'new' } });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute('title', expect.stringMatching(/pending changes/));
+    cleanup();
+
+    api.getConfigRequest.mockResolvedValue(configRequest({ id: 21, status: 'taken' }));
+    mount(configView([imapHost]), [configRequest({ id: 21, status: 'taken' })]);
+    await screen.findByText('Change #21');
+    expect(screen.getByRole('button', { name: 'Restore configuration' })).toBeDisabled();
+  });
+
+  it('reviews an uploaded file and follows the request it creates', async () => {
+    api.previewConfigRestore.mockResolvedValue(
+      restorePreview(configPreview({ diff: ['+imap_host = "restored"'] })),
+    );
+    api.submitConfigRestore.mockResolvedValue({ id: 40 });
+    api.getConfigRequest.mockResolvedValue(configRequest({ id: 40, status: 'pending' }));
+    api.startStepUp.mockResolvedValue({
+      request_id: 'step-1',
+      method: 'email' as const,
+      email_hint: 'a•••@example.com',
+      expires_at: 'later',
+    });
+    mount(configView([imapHost]));
+    await previewPlain();
+    expect(await screen.findByText(/\+imap_host = "restored"/)).toBeInTheDocument();
+    expect(api.previewConfigRestore.mock.calls[0][0]).toMatchObject({
+      format: 'toml',
+      base_digest: 'digest-1',
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Apply…' }));
+    await screen.findByText(/a•••@example.com/);
+    await fireEvent.input(screen.getByLabelText('Confirmation code'), {
+      target: { value: '123456' },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByText('Change #40')).toBeInTheDocument();
+    await waitFor(() => expect(api.getConfigRequest).toHaveBeenCalledWith(40));
+    expect(screen.getByRole('button', { name: 'Restore configuration' })).toBeDisabled();
+  });
+
+  it('can be inspected on a read-only installation, without Apply', async () => {
+    api.previewConfigRestore.mockResolvedValue(restorePreview());
+    mount(
+      configView([imapHost], {
+        editable: false,
+        applier: { kind: 'none', available: false, reason: 'No host applier here.' },
+      }),
+    );
+    await previewPlain();
+    expect(await screen.findAllByText('No host applier here.')).not.toHaveLength(0);
+    expect(screen.getByRole('button', { name: 'Apply…' })).toBeDisabled();
+  });
+});

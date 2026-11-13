@@ -442,6 +442,61 @@ istota-stack up
 
 Unless a secrets file supplies it, the archive holds `/data/.secret_key` beside the databases it decrypts, so keep it somewhere at least as private as the VM (see `docs/deployment/security.md`). To keep the database snapshots off the VM's disk without archiving the directory, set `db_backup_dir` to a directory on another disk mounted into the stack.
 
+## Recovering a lost installation
+
+Admin → Configuration can download a backup of the saved configuration, as plain TOML or as an encrypted KeePass file with the installation's credentials ([Backing up and restoring the configuration](../configuration/web-editor.md#backing-up-and-restoring-the-configuration)). That backup is one part of rebuilding an installation. This section says what each kind of backup gets back, what to keep outside the installation, and how to rebuild before the web UI runs.
+
+### What each backup gets back
+
+| What you kept | What you get back |
+|---|---|
+| The plain `.toml` backup | The saved settings without credentials, checked again against the new install. It is a new installation: enter the credentials again. No users, rooms, history or stored credentials come back. |
+| The `.kdbx` backup, its password, and its key file if it has one | The saved settings and the installation credentials in the file. Still a new installation, unless the databases and workspace come back too. |
+| The `.kdbx`, the database snapshots and config copies from the workspace's `Backups/`, and the original master key | The old installation's state, through `istota-stack restore`. Note any module database, external file or provider session that did not come back. |
+
+The `.kdbx` password opens the backup file. It is not the master key (`ISTOTA_SECRET_KEY`, kept at `/data/.secret_key`), which decrypts the credentials stored in the database: users' Settings → Credentials, connected services and Google tokens. The installation credentials in the `.kdbx` cannot rebuild those. Without the master key the databases still restore, but the credentials stored in them cannot be read. A database and a key can both look valid and still not belong together, so check that a stored credential decrypts (below) before you call a recovery done.
+
+### What to keep outside the installation
+
+Keep each of these somewhere that survives losing both the VM and the machine it runs on. A key file saved only on the lost machine, or a backup password kept only in Istota's own credentials, is not there when you need it. A successful download is not a complete recovery kit.
+
+- **The `.kdbx` backup**, its password and its key file.
+- **The master key**, in a backup of its own. On a Mac the local VM copies it into the login Keychain (service `istota.local`, account `secret-key-<instance>`), which covers losing the VM but not losing the Mac. A server needs its own copy off the machine. The web backup never includes it.
+- **The database snapshots** (`Backups/db/snapshots/<date>/`) and the workspace's files. A workspace on the lost VM's own disk is lost with it unless something copied it off ([Backing up a local install](#backing-up-a-local-install)). A Nextcloud or Mac workspace that survived helps only as far as its files and backups survived.
+- **The config copies** in `Backups/config/<date>/`: `config.toml`, `admins`, `stack.env` and `host.env`, which the stack writes only where the workspace is a mount. On a server also keep `rclone.conf` for a Nextcloud workspace and whatever you gave `provision.sh` and setup. The `.kdbx` holds none of these files and no admin list.
+- **The rest of the deployment**: the release you ran, the storage mode and where the workspace lives, the hostname and DNS, the release signing key you trust, and how to get back into each outside account (model provider, mail, Nextcloud). The `.kdbx` records the application version, which does not say which database schema a snapshot needs.
+- **A way back into an admin account** without the old browser session or working mail. A restored database keeps the login identities, and the restored admins file keeps the list; `istota auth reset <user> --print-link` prints a password link on the host where `[web] auth` includes `email`. On a fresh database, setup makes the first admin.
+
+The web session signing key needs no backup: a new one signs everyone out. The web token key (`ISTOTA_WEB_TOKEN_KEY`) is different: without the old one, the Nextcloud tokens the web stored for users cannot be read, and each user connects again. Paired WhatsApp sessions, browser profiles and TLS certificates are in none of these backups and are set up again.
+
+### With the configuration backup alone
+
+1. Install a new stack as usual (`provision.sh`, `istota-stack update`, setup) and sign in as its admin.
+2. Where setup needs a credential, such as the model key or the Nextcloud app password, open the `.kdbx` in KeePassXC on a trusted machine and copy it from there. Do not upload the backup to the broken installation first.
+3. In Admin → Configuration, Restore configuration takes the backup file. Review the restored settings, and select the credentials to restore. Settings that stay a host action, such as the Nextcloud app password and the site hostname, are listed but not applied from the page; change those with `istota-stack setup --force` or write a credential with `istota-stack put-files`.
+
+### With the databases and the master key
+
+Start from a new, stopped stack, and do not run setup against it: setup makes a different master key and config, and the restore then refuses to replace them.
+
+- **On a Mac**, run `istota-stack restore` ([Backups and recovery](../getting-started/local-install.md#backups-and-recovery)). It makes a VM without setup, writes the key from the Keychain, the config copies and the databases, and then starts the stack.
+- **On a server**, run `provision.sh` with the `host.env` settings of the old install, `istota-stack update <tag>` with the release it ran, and set up the workspace mount (for Nextcloud, `rclone.conf`, with the app password from the `.kdbx`). Check that the workspace shows the old `Backups/`, stop the stack (`systemctl stop istota-stack`), then pass the master key on stdin: `istota-stack restore < key-file`. It puts back the key, `config.toml`, `admins`, the `.env` and `host.env` copies and the databases, and may run `provision.sh`, which can start the stack. Where the copies in `Backups/config/` are missing, `restore` refuses, and it does not take a `.kdbx` in their place. The steps are then manual, with the stack stopped: write `config.toml` and `admins` from your own copies (or `config.toml` from the configuration backup), the master key to `/data/.secret_key` (mode 0600, owned by uid 10001), and restore the snapshots with `python -m istota.maintenance.db_restore --all`. That command follows the users `config.toml` names, so a user known only to the database gets no module databases back.
+
+`restore` does not copy `secrets/`. Write the deployment credentials from the `.kdbx` with `istota-stack put-files`, which reads JSON on stdin, so no value goes on a command line: open the backup only while you build that JSON, and delete the file afterwards. The Nextcloud app password also has to match the mount's `rclone.conf`. Then restart the stack.
+
+Both restore paths start the stack, and there is no option to restore without starting it. A restored stack polls mail, runs scheduled jobs and sends messages with whatever credentials work. To keep it quiet until you have checked it, block the VM's outbound network from outside the guest (the host's firewall or the provider's network rules) before you restore, check from inside the VM that an outside address does not answer, and lift the block only after the checks below. Removing credentials is not enough, since the restored database holds working ones.
+
+### Before you let it out
+
+- Record which dates you restored: the configuration backup, the database snapshot and the credentials. They are separate stores, not one point in time; prefer a set taken together, and note any fallback or module that did not restore.
+- Use the release the old install ran, or a supported upgrade from it. Never select an older release to suit an older snapshot; `restore` refuses a snapshot newer than the image's schema.
+- Check the storage paths, mount mode, hostname, callback URLs and anything a management plan owned. A new hostname needs new OAuth callbacks, webhooks and TLS even when every credential is right.
+- Run `istota doctor`, sign in as an admin, and open a module's data. Check that stored credentials decrypt without showing them: `istota secret export --user <user> --out <file>` for a user who has some decrypts each one to build the file and fails when the key does not match. Delete the file afterwards.
+- Look at enabled scheduled jobs, pending tasks and outgoing mail before you lift the network block. A snapshot can put a job back to before something it already did, and nothing replays or skips that work for you.
+- Keep the original backups unchanged, so a failed attempt can be repeated on another clean VM.
+
+This procedure has not yet been rehearsed end to end on an isolated VM.
+
 ## Container logs
 
 On the VM every service logs to the systemd journal, under the container's name: `journalctl CONTAINER_NAME=istota-daemon-1` reads the daemon, and anything that ships the host's journal ships the stack's output with it. `docker logs` and `istota-stack compose logs` still work. The journal's size cap from `provision.sh` (500 MB) bounds it. Devbox containers are the exception: they keep their own rotated `json-file` logs, because build and test output would push the host's own lines out of the journal.

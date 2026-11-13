@@ -154,3 +154,14 @@ def test_spent_markers_export_and_import(database, cheap, tmp_path):  # noqa: F8
     with db.get_db(target) as conn:
         assert generated.read_recovery(conn, "alice", "generated_account") == "abcd1234\nefgh5678"
         assert generated.recovery_state(conn, "alice", "generated_account") == {"format": "codes", "spent": [0], "total": 2, "remaining": 1}
+
+
+def test_the_shared_helpers_set_the_requested_cost(cheap):  # noqa: F811
+    from pykeepass import PyKeePass
+
+    kp = cheap.new_database(password=PASSWORD, keyfile=None, options=cheap.ExportOptions(96, 2, 1))
+    kp.add_entry(kp.root_group, "probe", "", "probe-value")
+    data = cheap.serialize(kp)
+    params = PyKeePass(io.BytesIO(data), password=PASSWORD).kdbx.header.value.dynamic_header.kdf_parameters.data.dict
+    assert params["$UUID"].value == bytes.fromhex("9e298b1956db4773b23dfc3ec6f0a1e6")
+    assert (params["M"].value, params["I"].value, params["P"].value) == (96 * 1024, 2, 1)

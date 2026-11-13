@@ -159,6 +159,7 @@ src/istota/
 │   ├── store.py          # Encrypted credential store (Fernet via scrypt-derived key)
 │   ├── names.py          # Credential names, password generation and isolation
 │   ├── kdbx_import.py, kdbx_export.py  # Selected import and fresh in-memory export
+│   ├── kdbx_worker.py    # An untrusted KeePass file opened in a disposable child, behind one installation-wide decrypt slot whose lock the child holds until it exits → sandbox.md
 │   ├── vault_retire.py   # One-time legacy file import; remove after the next release
 │   ├── generated.py      # Credentials Istota generates: stored in the table, exported on request, retired only by the user → sandbox.md
 │   ├── schema.py         # Shared service/key schema for `istota secret` CLI + web UI
