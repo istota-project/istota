@@ -24,12 +24,15 @@ import yaml
 
 from istota.config import DevboxConfig
 from istota.lib.rclone_conf import render_webdav_remote
+from tests.support.host_stubs import install_nft_stub
 
 REPO = Path(__file__).resolve().parent.parent
 HOST = REPO / "host"
 EGRESS_SH = HOST / "istota-devbox-egress.sh"
 EGRESS_UNIT = HOST / "istota-devbox-egress.service"
 WATCHDOG_SH = HOST / "istota-browser-watchdog.sh"
+HOLD_SH = HOST / "istota-egress-hold.sh"
+HOLD_UNIT = HOST / "istota-egress-hold.service"
 WATCHDOG_UNIT = HOST / "istota-browser-watchdog.service"
 WATCHDOG_TIMER = HOST / "istota-browser-watchdog.timer"
 
@@ -52,7 +55,7 @@ def _stub(bindir: Path, name: str, body: str) -> None:
     path.chmod(0o755)
 
 
-@pytest.mark.parametrize("script", [EGRESS_SH, WATCHDOG_SH])
+@pytest.mark.parametrize("script", [EGRESS_SH, WATCHDOG_SH, HOLD_SH])
 def test_the_scripts_parse_and_are_executable(script):
     assert os.access(script, os.X_OK), f"{script.name} is not executable"
     result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
@@ -123,6 +126,135 @@ class TestTheEgressRules:
         assert unit["Service"]["ExecStart"].endswith("istota-devbox-egress")
         assert unit["Service"]["EnvironmentFile"] == "-/srv/app/istota/host.env"
         assert unit["Install"]["WantedBy"] == "multi-user.target"
+
+
+class TestTheEgressHold:
+    """#946: the hold is an nft table of its own, in before dockerd starts the
+    containers its restart policy brings back at boot, so the stack cannot reach
+    out between a reboot and anyone adding a rule by hand."""
+
+    def _run(self, tmp_path: Path, *args: str, state: str | None, table: bool = False,
+             nft: bool = True, **env: str) -> tuple[subprocess.CompletedProcess, Path, Path]:
+        stack = tmp_path / "stack"
+        stack.mkdir(exist_ok=True)
+        hold = stack / ".egress-hold"
+        if state is None:
+            hold.unlink(missing_ok=True)
+        else:
+            hold.write_text(state)
+        bindir = tmp_path / "bin"
+        bindir.mkdir(exist_ok=True)
+        if nft:
+            install_nft_stub(bindir)
+        nft_state = tmp_path / "nft-table"
+        if table:
+            nft_state.write_text("old\n")
+        calls = tmp_path / "nft-calls"
+        calls.unlink(missing_ok=True)
+        # The stubs and the system's own tools only, so a missing nft is missing.
+        run_env = {"PATH": f"{bindir}:/usr/bin:/bin", "ISTOTA_STACK_DIR": str(stack),
+                   "ISTOTA_MOUNT_DIR": str(tmp_path / "mount"),
+                   "NFT_STATE": str(nft_state), "NFT_CALLS": str(calls), **env}
+        result = subprocess.run(["bash", str(HOLD_SH), *args], capture_output=True, text=True,
+                                env=run_env, timeout=30)
+        return result, nft_state, calls
+
+    @staticmethod
+    def _calls(calls: Path) -> list[str]:
+        return calls.read_text().splitlines() if calls.exists() else []
+
+    def test_a_held_stack_gets_the_table_in_one_transaction(self, tmp_path):
+        result, table, calls = self._run(tmp_path, state="1\n")
+        assert result.returncode == 0, result.stderr
+        assert self._calls(calls) == ["-f -"]
+        rules = table.read_text()
+        lines = [line.strip() for line in rules.splitlines() if line.strip()]
+        # Declared, deleted and written again in one `nft -f`: no gap on a re-run.
+        assert lines[:3] == ["table inet istota_egress_hold", "delete table inet istota_egress_hold",
+                             "table inet istota_egress_hold {"]
+        assert "type filter hook forward priority filter - 10; policy accept;" in lines
+        drops = [line for line in lines if " drop" in line]
+        assert len(drops) == 2, rules
+        for line in drops:
+            assert line.startswith('iifname "br-*" oifname != "br-*" '), line
+        assert any(" ct direction original " in line for line in drops)
+        assert any(" ct state invalid,untracked " in line for line in drops)
+
+    def test_a_re_run_replaces_the_table_rather_than_deleting_it_first(self, tmp_path):
+        result, table, calls = self._run(tmp_path, state="1\n", table=True)
+        assert result.returncode == 0, result.stderr
+        assert self._calls(calls) == ["-f -"]
+        assert "hook forward" in table.read_text()
+
+    @pytest.mark.parametrize("state", ["", "0\n", " \n"])
+    def test_empty_or_0_is_not_held_and_lifts_a_table_left_in(self, tmp_path, state):
+        result, table, calls = self._run(tmp_path, state=state, table=True)
+        assert result.returncode == 0, result.stderr
+        assert not table.exists()
+        assert "delete table inet istota_egress_hold" in self._calls(calls)
+
+    def test_no_state_file_and_no_table_writes_nothing(self, tmp_path):
+        result, _, calls = self._run(tmp_path, state=None)
+        assert result.returncode == 0, result.stderr
+        assert self._calls(calls) == ["list table inet istota_egress_hold"]
+
+    def test_not_held_needs_no_nft(self, tmp_path):
+        """docker.service requires the unit: an install that is not held must
+        never fail it."""
+        result, _, _ = self._run(tmp_path, state=None, nft=False)
+        assert result.returncode == 0, result.stderr
+
+    def test_held_without_nft_fails(self, tmp_path):
+        result, _, _ = self._run(tmp_path, state="1\n", nft=False)
+        assert result.returncode == 1
+        assert "no nft" in result.stderr
+
+    def test_a_refused_table_fails(self, tmp_path):
+        result, table, _ = self._run(tmp_path, state="1\n", NFT_REFUSE="1")
+        assert result.returncode == 1
+        assert not table.exists()
+
+    def test_held_and_present_answer_by_exit_status(self, tmp_path):
+        assert self._run(tmp_path, "held", state="1\n")[0].returncode == 0
+        assert self._run(tmp_path, "held", state="0\n")[0].returncode == 1
+        assert self._run(tmp_path, "held", state=None)[0].returncode == 1
+        assert self._run(tmp_path, "present", state=None, table=True)[0].returncode == 0
+        (tmp_path / "nft-table").unlink()
+        assert self._run(tmp_path, "present", state=None)[0].returncode == 1
+
+    def test_the_unit_is_in_before_dockerd_and_required_by_it(self):
+        unit = _unit(HOLD_UNIT)
+        assert "docker.service" in unit["Unit"]["Before"].split()
+        assert "nftables.service" in unit["Unit"]["After"].split()
+        assert unit["Unit"]["RequiresMountsFor"] == "/srv/app/istota"
+        assert unit["Unit"]["DefaultDependencies"] == "no"
+        assert unit["Install"]["RequiredBy"] == "docker.service"
+        assert unit["Service"]["Type"] == "oneshot"
+        assert unit["Service"]["RemainAfterExit"] == "yes"
+        assert unit["Service"]["ExecStart"] == "/usr/local/sbin/istota-egress-hold apply"
+
+    def test_provision_runs_the_script_and_never_restarts_the_unit(self):
+        """Restarting a unit docker.service requires restarts dockerd."""
+        text = PROVISION.read_text()
+        assert " nftables " in re.search(r"^apt_install ca-certificates .*$", text, re.M).group(0)
+        assert 'install -m 0755 "${HERE}/istota-egress-hold.sh" /usr/local/sbin/istota-egress-hold' in text
+        assert "systemctl enable istota-egress-hold.service" in text
+        assert not re.search(r"systemctl (re|try-re|reload-or-re)start[^\n]*istota-egress-hold", text)
+        # Before the egress unit's restart, so a held stack is held throughout.
+        assert text.index("/usr/local/sbin/istota-egress-hold apply") \
+            < text.index("systemctl restart istota-devbox-egress.service")
+
+    def test_only_istota_stack_writes_the_state_file(self):
+        """Not host.env, which the management role writes key by key and the
+        backups copy: the role, provision.sh and the Mac CLI never name it."""
+        paths = [PROVISION, HOST / "mac" / "istota-stack", *sorted((REPO / "ansible").rglob("*"))]
+        for path in paths:
+            if path.is_file():
+                assert ".egress-hold" not in path.read_text(errors="replace"), path
+
+    def test_the_stack_unit_says_it_is_the_unit(self):
+        stack = _unit(HOST / "istota-stack.service")
+        assert stack["Service"]["Environment"] == "ISTOTA_STACK_UNIT=1"
 
 
 class TestTheBrowserWatchdog:
@@ -788,14 +920,15 @@ class TestProvision:
 
     def test_it_installs_every_host_file(self):
         for name in ("istota-stack.service", "istota-devbox-egress.service",
-                     "istota-browser-grants.service", "istota-browser-grants.timer",
+                     "istota-egress-hold.service", "istota-browser-grants.service", "istota-browser-grants.timer",
                      "istota-browser-watchdog.service", "istota-browser-watchdog.timer",
                      "istota-certbot.service", "istota-certbot.timer", "mount-nextcloud.service",
                      "istota-config-apply.service", "istota-config-apply.path",
                      "istota-config-apply.timer", "istota-setup.service"):
             assert (HOST / name).is_file(), name
             assert name in self.TEXT, name
-        for script in ("istota-stack", "istota-devbox-egress.sh", "istota-browser-watchdog.sh",
+        for script in ("istota-stack", "istota-devbox-egress.sh", "istota-egress-hold.sh",
+                       "istota-browser-watchdog.sh",
                        "istota-certbot", '"${HERE}/istota"'):
             assert script in self.TEXT, script
 

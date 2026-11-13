@@ -45,9 +45,10 @@
 #                               apply's or one an earlier `--no-restart` apply left owed
 #   istota-stack import-bare-metal <dir> [args]
 #                               import a bare-metal export, with the stack down
-#   istota-stack restore [--date YYYY-MM-DD] [--force]
+#   istota-stack restore [--date YYYY-MM-DD] [--force] [--hold]
 #                               the master key (on stdin), the config and the databases
-#                               from the workspace's backups, onto a stack never set up
+#                               from the workspace's backups, onto a stack never set up;
+#                               --hold keeps its containers off the network (see hold)
 #   istota-stack import-standalone <dir> --hostname HOST [--dry-run]
 #                               a standalone install the Mac staged in <dir>, its istota.env
 #                               on stdin, onto a stack never set up
@@ -62,6 +63,8 @@
 #   istota-stack config-apply   apply what the web config editor requested (istota-config-apply.service)
 #   istota-stack check-image    exit 2 when the image lacks what config.toml needs (Claude Code)
 #   istota-stack up | down      start or stop the stack (istota-stack.service)
+#   istota-stack hold [on|off]  whether the stack's containers are kept off the network,
+#                               across reboots, until `hold off`; or put that on or lift it
 #   istota-stack exec <cmd...>  run a command in the daemon container as uid 10001
 #   istota-stack compose <...>  docker compose, with this stack's files and settings
 #   istota-stack host-env KEY | KEY=VALUE...
@@ -154,6 +157,10 @@ DATA_MODE=0711
 DEVBOX_COMPOSE="${STACK}/compose.devbox.yml"
 # A restart `apply --no-restart` left to the next apply; root's, beside .env.
 RESTART_OWED="${STACK}/.restart-owed"
+# The egress hold's state, root's, beside .env and outside host.env (#946);
+# istota-egress-hold reads it, and is the one place its rule lives.
+EGRESS_HOLD_FILE="${STACK}/.egress-hold"
+EGRESS_HOLD_BIN="${ISTOTA_EGRESS_HOLD_BIN:-/usr/local/sbin/istota-egress-hold}"
 # `setup --web`'s own files: the code, the certificate and the instructions,
 # root's alone, so everything it prints comes from a file uid 10001 cannot write.
 SETUP_DIR="${STACK}/.setup"
@@ -338,6 +345,65 @@ release_stack_lock() {
     exec 9>&-
 }
 
+# --- the egress hold ---------------------------------------------------------
+
+# Held when the state file says so. A state file with no istota-egress-hold to
+# read it counts as held, so the stack is refused rather than started.
+egress_held() {
+    [ -e "$EGRESS_HOLD_FILE" ] || [ -L "$EGRESS_HOLD_FILE" ] || return 1
+    [ -x "$EGRESS_HOLD_BIN" ] || return 0
+    ISTOTA_STACK_DIR="$STACK" "$EGRESS_HOLD_BIN" held
+}
+
+egress_hold_table_present() {
+    [ -x "$EGRESS_HOLD_BIN" ] && ISTOTA_STACK_DIR="$STACK" "$EGRESS_HOLD_BIN" present
+}
+
+HELD_WITHOUT_TABLE="the hold's table is not in, so the stack was not started: \`istota-stack hold on\` puts it in, \`istota-stack hold off\` lifts the hold."
+
+# The state file first and the table second: a failure between the two leaves
+# a hold that stack_up refuses to start, never a stack that runs unheld.
+egress_hold_on() {
+    printf '1\n' > "${EGRESS_HOLD_FILE}.tmp"
+    chmod 0644 "${EGRESS_HOLD_FILE}.tmp"
+    mv -f "${EGRESS_HOLD_FILE}.tmp" "$EGRESS_HOLD_FILE"
+    [ -x "$EGRESS_HOLD_BIN" ] \
+        || die "no ${EGRESS_HOLD_BIN}: run ${SRC}/host/provision.sh, which installs it. The state file says held, so the stack will not start until it is there."
+    ISTOTA_STACK_DIR="$STACK" "$EGRESS_HOLD_BIN" apply \
+        || die "the hold's table did not go in. The state file says held, so the stack will not start until \`istota-stack hold on\` succeeds."
+}
+
+# `hold` alone reads; `on` and `off` write, under the lock. A running stack is
+# brought up again so the daemon's ISTOTA_EGRESS_HOLD, which doctor reads,
+# says what is now true.
+cmd_hold() {
+    case "${1:-}" in
+        "")
+            if ! egress_held; then
+                echo "not held"
+            elif egress_hold_table_present; then
+                echo "held: the stack's containers reach nothing outside their own networks"
+            else
+                echo "held, but the table is not in: the stack will not start until \`istota-stack hold on\`"
+            fi
+            return 0 ;;
+        on)
+            egress_hold_on
+            log "held until \`istota-stack hold off\`, across reboots; doctor reports name resolution failing while it is on" ;;
+        off)
+            rm -f "$EGRESS_HOLD_FILE"
+            if [ -x "$EGRESS_HOLD_BIN" ]; then
+                ISTOTA_STACK_DIR="$STACK" "$EGRESS_HOLD_BIN" apply \
+                    || die "the state file is gone but the table is still in: \`nft delete table inet istota_egress_hold\` removes it."
+            fi
+            log "the hold is lifted" ;;
+        *) usage >&2; exit 64 ;;
+    esac
+    if [ -n "$(compose ps -q 2>/dev/null)" ]; then
+        stack_up || die "the stack did not come up again with the changed hold."
+    fi
+}
+
 # --- compose -----------------------------------------------------------------
 
 # Refuse a file this script would act on as root unless it is a regular file
@@ -407,6 +473,9 @@ compose() {
         nextcloud) fstype=fuse.rclone ;;
         host-folder) fstype=virtiofs; marker=1 ;;
     esac
+    # For doctor, which cannot see the host's nft tables.
+    local hold=""
+    if egress_held; then hold=1; fi
     (
         # Only a pin that is set: compose passes an empty variable as an empty
         # build arg, which overrides the Dockerfile's default and fails the build.
@@ -442,6 +511,7 @@ compose() {
         ISTOTA_MOUNT_DIR="$MOUNT_DIR" \
         ISTOTA_WORKSPACE_FSTYPE="$fstype" \
         ISTOTA_WORKSPACE_MARKER_REQUIRED="$marker" \
+        ISTOTA_EGRESS_HOLD="$hold" \
         ISTOTA_HOST_ENV="$HOST_ENV" \
         CERTS_DIR="$certs" \
         ACME_WEBROOT="${STACK}/acme" \
@@ -750,6 +820,9 @@ refuse_older_checkout_on_pinned_browser_network() {
 # apply) are left alone.
 stack_up() {
     local active id service tag missing up_args=(up -d --remove-orphans)
+    if egress_held && ! egress_hold_table_present; then
+        die "the stack is held (${EGRESS_HOLD_FILE}), but ${HELD_WITHOUT_TABLE}"
+    fi
     ensure_data_dir
     # A restore or an import can reach here with the generated secret empty.
     ensure_secret_files || { log "could not create the secret files compose declares in ${SECRETS_DIR}"; return 1; }
@@ -2627,13 +2700,24 @@ cmd_import_bare_metal() {
 # old VM's images and stay this VM's, as host.env's ISTOTA_DESKTOP_APP does. Then what the restored config and
 # profiles need is built and the host provisioned; the caller starts the stack.
 cmd_restore() {
-    local running owner=() tag rc=0 key saved=() desktop
+    local running owner=() tag rc=0 key saved=() desktop hold="" arg args=()
+    for arg in "$@"; do
+        if [ "$arg" = --hold ]; then hold=1; else args+=("$arg"); fi
+    done
+    set -- ${args[@]+"${args[@]}"}
     tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
     desktop="$(env_get "$HOST_ENV" ISTOTA_DESKTOP_APP)"
     [ -n "$tag" ] || die "no image yet: run \`istota-stack update <tag>\` first."
     running="$(compose ps -q)" || die "could not ask docker compose whether the stack is running; nothing was restored."
     if [ -n "$running" ]; then
         die "the stack is running. Stop it first (\`systemctl stop istota-stack\`); a restore replaces its database."
+    fi
+    # Before anything is restored, so a restore that fails part-way (a build,
+    # provision.sh) leaves its credentials held. Builds use docker0, which the
+    # hold leaves open.
+    if [ -n "$hold" ]; then
+        egress_hold_on
+        log "held: the restored stack's containers reach nothing outside their own networks until \`istota-stack hold off\`"
     fi
     # Compose would make a missing bind source root's.
     if [ "$(id -u)" -eq 0 ]; then owner=(-o "$ISTOTA_UID" -g "$ISTOTA_UID"); fi
@@ -3385,6 +3469,28 @@ config_apply_one() (
     exit 0
 )
 
+# The `up` verb. While the stack is held it starts through
+# istota-stack.service when that unit is not already active, so the unit's
+# ExecStop downs the stack at a clean shutdown and the containers' restart
+# policy does not bring it back at the next boot. The unit sets
+# ISTOTA_STACK_UNIT. An `up` that inherited its caller's lock (update and
+# rollback, through release_stack_up) starts directly: the unit's `up` would
+# wait on that lock. So do internal callers of cmd_up.
+cmd_up_verb() {
+    if [ -z "${ISTOTA_STACK_UNIT:-}" ] && [ -z "${ISTOTA_STACK_LOCK_INHERITED:-}" ] \
+            && egress_held && command -v systemctl >/dev/null 2>&1 \
+            && ! systemctl is-active --quiet istota-stack.service; then
+        [ -f "${CONFIG_DIR}/config.toml" ] || die "no ${CONFIG_DIR}/config.toml yet: set istota up first."
+        egress_hold_table_present || die "the stack is held (${EGRESS_HOLD_FILE}), but ${HELD_WITHOUT_TABLE}"
+        log "held: starting the stack through istota-stack.service, so a shutdown stops it"
+        # The unit's `up` takes the lock this process holds.
+        release_stack_lock
+        systemctl start istota-stack.service
+        return
+    fi
+    cmd_up
+}
+
 cmd_up() {
     # Without a config the entrypoint refuses, and the restart policy would
     # loop on it; say what to do instead.
@@ -3813,6 +3919,8 @@ main() {
             case " $* " in
                 *=*) take_stack_lock host-env ;;
             esac ;;
+        hold)
+            [ "$#" -eq 0 ] || take_stack_lock hold ;;
     esac
     case "$command" in
         update) cmd_update "$@" ;;
@@ -3833,7 +3941,8 @@ main() {
         check-image) cmd_check_image "$@" ;;
         latest-tag) cmd_latest_tag "$@" ;;
         browser-grant-addresses) cmd_browser_grant_addresses "$@" ;;
-        up) cmd_up ;;
+        up) cmd_up_verb ;;
+        hold) cmd_hold "$@" ;;
         down) compose down ;;
         exec) [ "$#" -gt 0 ] || { usage >&2; exit 64; }; stack_exec "$@" ;;
         compose) compose "$@" ;;

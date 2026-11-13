@@ -1693,6 +1693,33 @@ def check_workspace_mode(config: "Config", probe: bool) -> CheckResult:
     )
 
 
+EGRESS_HOLD_ENV = "ISTOTA_EGRESS_HOLD"
+
+
+def check_egress_hold(config: "Config", probe: bool) -> CheckResult:
+    """Whether `istota-stack hold` keeps the stack's containers off the network.
+
+    The hold is a host nft table this process cannot see, so `istota-stack`
+    says it through ``ISTOTA_EGRESS_HOLD`` when it starts the daemon. WARN
+    while it is on, because every check that reaches out (name resolution, the
+    model, mail, Nextcloud) fails for that reason and not its own.
+    """
+    name = "runtime.egress_hold"
+    if os.environ.get(EGRESS_HOLD_ENV, "").strip() != "1":
+        return CheckResult(name, OK, "the stack is not held off the network", scope=DEPLOYMENT)
+    return CheckResult(
+        name, WARN,
+        "the stack is held off the network (istota-stack hold): its containers "
+        "reach nothing outside their own networks, so name resolution and every "
+        "outside connection fail",
+        remedy=(
+            "Finish the checks after a restore (docs/deployment/running-the-stack.md, "
+            "\"Before you let it out\"), then run `istota-stack hold off` on the VM."
+        ),
+        scope=DEPLOYMENT,
+    )
+
+
 def _device_of(path: Path) -> int | None:
     """``st_dev`` of `path`, or of its nearest existing ancestor.
 
@@ -11195,6 +11222,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("nextcloud.rclone_rc", check_rclone_rc),
     ("runtime.workspace_xattr", check_workspace_xattr),
     ("runtime.workspace_mode", check_workspace_mode),
+    ("runtime.egress_hold", check_egress_hold),
     ("runtime.workspace_disk", check_workspace_disk),
     ("runtime.data_disk", check_data_disk),
     ("backups.off_volume", check_backups_off_volume),
@@ -11318,6 +11346,7 @@ CHECK_SCOPES: dict[str, str] = {
     "nextcloud.rclone_rc": DEPLOYMENT,
     "runtime.workspace_xattr": DEPLOYMENT,
     "runtime.workspace_mode": DEPLOYMENT,
+    "runtime.egress_hold": DEPLOYMENT,
     "runtime.workspace_disk": DEPLOYMENT,
     "runtime.data_disk": DEPLOYMENT,
     "backups.off_volume": DEPLOYMENT,

@@ -37,6 +37,27 @@ while True:
 """
 
 
+# `nft` for host/istota-egress-hold.sh: the hold's table exists while $NFT_STATE
+# does. `-f -` writes the script it was handed there (NFT_REFUSE fails it, as
+# nft refuses a whole transaction), `delete table` removes it. Calls go to
+# $NFT_CALLS.
+NFT_STUB = """#!/bin/bash
+echo "$*" >> "$NFT_CALLS"
+case "$*" in
+  "list table inet istota_egress_hold") [ -e "$NFT_STATE" ] ;;
+  "-f -") cat > "$NFT_STATE"; [ -z "${NFT_REFUSE:-}" ] || { rm -f "$NFT_STATE"; exit 1; } ;;
+  "delete table inet istota_egress_hold") rm -f "$NFT_STATE" ;;
+  *) exit 2 ;;
+esac
+"""
+
+
+def install_nft_stub(bindir: Path) -> None:
+    path = bindir / "nft"
+    path.write_text(NFT_STUB)
+    path.chmod(0o755)
+
+
 def install_flock(bindir: Path) -> None:
     path = bindir / "flock"
     path.write_text(FLOCK_STUB)

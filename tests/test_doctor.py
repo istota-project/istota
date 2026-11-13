@@ -2245,6 +2245,33 @@ class TestWorkspaceXattr:
         assert calls == []
 
 
+class TestEgressHold:
+    """`runtime.egress_hold`: `istota-stack hold`'s table is on the host, so the
+    daemon learns of it from ISTOTA_EGRESS_HOLD (#946)."""
+
+    def test_held_warns_and_names_the_way_out(self, make_config, monkeypatch):
+        monkeypatch.setenv("ISTOTA_EGRESS_HOLD", "1")
+        result = run_checks(make_config(), only=("runtime.egress_hold",))[0]
+        assert result.status == WARN
+        assert "name resolution" in result.detail
+        assert "istota-stack hold off" in result.remedy
+
+    @pytest.mark.parametrize("value", [None, "", "0"])
+    def test_not_held_is_ok(self, make_config, monkeypatch, value):
+        if value is None:
+            monkeypatch.delenv("ISTOTA_EGRESS_HOLD", raising=False)
+        else:
+            monkeypatch.setenv("ISTOTA_EGRESS_HOLD", value)
+        assert run_checks(make_config(), only=("runtime.egress_hold",))[0].status == OK
+
+    def test_the_daemon_is_told(self):
+        """The compose file passes the variable istota-stack exports."""
+        import yaml
+
+        doc = yaml.safe_load((Path(__file__).resolve().parent.parent / "docker" / "docker-compose.yml").read_text())
+        assert doc["services"]["daemon"]["environment"]["ISTOTA_EGRESS_HOLD"] == "${ISTOTA_EGRESS_HOLD:-}"
+
+
 class TestWorkspaceMode:
     """`runtime.workspace_mode`: the config's storage mode against the mount
     the workspace is actually on, read from a fake `mountinfo`."""

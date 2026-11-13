@@ -16,6 +16,9 @@ RemainAfterExit=yes
 TimeoutStartSec=15min
 # `down` waits up to 600 s for the stack lock; past that it fails naming the holder.
 TimeoutStopSec=11min
+# How `istota-stack up` tells it is this unit's start, not an operator's: a
+# held stack started by hand goes through this unit, so ExecStop downs it.
+Environment=ISTOTA_STACK_UNIT=1
 ExecStart=/usr/local/sbin/istota-stack up
 ExecStop=/usr/local/sbin/istota-stack down
 

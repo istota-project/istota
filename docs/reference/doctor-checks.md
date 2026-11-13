@@ -23,6 +23,7 @@ A `skip` is not a pass. The forge checks skip when no forge token is configured,
 | `runtime.mount_liveness` | A configured workspace mount is mounted, and a host folder carries its `.istota-workspace` marker |
 | `runtime.workspace_xattr` | Extended-attribute calls on a workspace file fail cleanly rather than with `EIO` |
 | `runtime.workspace_mode` | The configured storage mode agrees with the mount the workspace is on |
+| `runtime.egress_hold` | Whether `istota-stack hold` keeps the stack's containers off the network; warns while it does |
 | `runtime.workspace_disk` | The local workspace's disk has room left: warns under 10% or 2 GiB free, fails under 2% |
 | `runtime.data_disk` | The disk holding the databases (on a VM, also Docker's images and volumes) has room left. The remedy names `istota-stack reclaim` |
 | `runtime.session_log_dir` | Where native-brain transcripts are written, and that no task can read them |

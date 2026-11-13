@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Back up and restore the configuration from Admin → Configuration.** Download the saved `config.toml`, or a KeePass file that also holds the installation's credentials, confirmed with your password or an emailed code, and restore either through the usual review, choosing which credentials come back. See docs/configuration/web-editor.md.
-- **`istota-stack restore --no-start` on a Mac** rebuilds a lost VM and leaves the stack stopped, so you can block its network and check it before it runs. See docs/deployment/running-the-stack.md, "Recovering a lost installation".
+- **`istota-stack restore --no-start` on a Mac** rebuilds a lost VM, leaves the stack stopped and keeps its containers off the network, across reboots, until `istota-stack hold off`, so you can check it before it sends anything. A server's restore takes `--hold` for the same. See docs/deployment/running-the-stack.md, "Recovering a lost installation".
 
 ## [0.49.0] - 2026-11-13
 
