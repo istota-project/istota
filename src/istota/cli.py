@@ -1,6 +1,7 @@
 """CLI interface for local testing and administration."""
 
 import argparse
+import errno
 import importlib.metadata
 import json
 import math
@@ -3731,6 +3732,11 @@ def cmd_push_keygen(args):
         print(f"A push signing key already exists at {path}; pass --force to replace it.", file=sys.stderr)
         return 1
     except OSError as exc:
+        if exc.errno == errno.EROFS:
+            print("Could not write the push signing key: the config directory is read-only here, as it is in "
+                  "the stack's daemon container. On the stack, the management role's `istota_push` task "
+                  "creates a missing key.", file=sys.stderr)
+            return 1
         print(f"Could not write the push signing key ({type(exc).__name__}).", file=sys.stderr)
         return 1
     print(f"Wrote the push signing key to {path} and its public half to {envelope.public_key_path(path)}.")

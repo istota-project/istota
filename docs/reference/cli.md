@@ -565,7 +565,7 @@ istota push keygen [--force]                    # Write the private push signing
 
 `push test` exits 1 when `[push]` is disabled, the user has no registered device, or a send fails. See [push notifications](../features/notifications.md#push-notifications).
 
-`push keygen` writes a new Ed25519 key to `signing_key_path` (mode 0600, its directory created 0700 if missing) and the public half to `<signing_key_path>.pub` (0644), and prints the key ID. It never prints the key. It exits 1 when `signing_key_path` is not set or a key already exists there. `--force` replaces the key, and every enrolled device then has to enroll again before it shows private previews. Startup never creates or replaces the key. See [private push v1](private-push-v1.md).
+`push keygen` writes a new Ed25519 key to `signing_key_path` (mode 0600, its directory created 0700 if missing) and the public half to `<signing_key_path>.pub` (0644), and prints the key ID. It never prints the key. It exits 1 when `signing_key_path` is not set or a key already exists there. `--force` replaces the key, and every enrolled device then has to enroll again before it shows private previews. Startup never creates or replaces the key. On the stack the daemon container mounts the config directory read-only, so `push keygen` cannot write there and says so; the management role's `istota_push` task creates a missing key instead (`ansible/README.md`). See [private push v1](private-push-v1.md).
 
 ### Config plans
 

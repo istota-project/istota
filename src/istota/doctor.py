@@ -11147,7 +11147,8 @@ def check_push_signing_key(config: "Config", probe: bool) -> CheckResult:
         return CheckResult(name, SKIP, "Push notifications are disabled")
     if push.content != "private":
         return CheckResult(name, SKIP, "Private push is off ([push] content is legacy)")
-    keygen = "Run `istota push keygen` (with --force to replace a broken key; devices must then re-enroll)."
+    keygen = ("Run `istota push keygen` (with --force to replace a broken key; devices must then re-enroll). "
+              "On the stack, rerun the management role's `istota_push` task, which creates a missing key.")
     path = Path(push.signing_key_path)
     try:
         metadata = path.stat()

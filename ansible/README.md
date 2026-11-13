@@ -119,6 +119,8 @@ istota_push_config:
   apns_topic: com.example.app
 ```
 
+For private push, add `content: private` to `istota_push_config`. When no signing key is there yet, the task creates one: at `signing_key_path` if the config sets it, otherwise at `/data/config/push/signing.pem`, which it writes into `[push]`. It is an Ed25519 key, mode 0600 and owned by the service account, with its public half beside it as `signing.pem.pub`. A rerun leaves an existing key alone. A key that does not parse or does not match its `.pub` refuses the change rather than being replaced, because a new key makes every enrolled phone enroll again; replacing one is `istota push keygen --force`, run where the config directory is writable. A conflicting `ISTOTA_PUSH_SIGNING_KEY_PATH` override refuses the change.
+
 Keep the `.p8` source vault-encrypted. The role stages it with `no_log` and diff output disabled, then uses the installed stack's container privilege drop to write `config/apns/AuthKey.p8` as the service account, mode 0600. The configured path inside the container is `/data/config/apns/AuthKey.p8`. A conflicting `ISTOTA_APNS_KEY_PATH` override refuses the change. The key's P-256 format is checked locally; matching its key ID and Apple authorization still needs an APNs send.
 
 ```sh

@@ -210,3 +210,18 @@ def test_doctor_fails_a_key_of_another_type(private_config):
     )
     key.write_bytes(pem)
     assert doctor.check_push_signing_key(config, False).status == doctor.FAIL
+
+
+def test_keygen_on_a_read_only_config_names_the_deployment_route(key_config, monkeypatch, capsys):
+    import errno
+
+    config_path, _ = key_config
+
+    def read_only(*args, **kwargs):
+        raise OSError(errno.EROFS, "Read-only file system")
+
+    monkeypatch.setattr(envelope, "write_signing_key", read_only)
+    assert run_cli(monkeypatch, config_path) == 1
+    err = capsys.readouterr().err
+    assert "read-only" in err
+    assert "istota_push" in err

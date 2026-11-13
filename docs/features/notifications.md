@@ -126,7 +126,7 @@ Operators must enable Push Notifications on the app's Apple App ID, provision th
 
 ### Private push
 
-With `[push] content = "private"` and a signing key from `istota push keygen`, no notification the installation sends puts its text or routing where Apple can read it. What each device receives depends on how it enrolled:
+With `[push] content = "private"` and a signing key (from `istota push keygen`, or on the stack from the management role's `istota_push` task), no notification the installation sends puts its text or routing where Apple can read it. What each device receives depends on how it enrolled:
 
 - **Private previews:** a device that enrolled a device key (iOS 17 or newer, on a shell that supports it) gets the title, body and tap target encrypted to that key and signed by the installation. The phone decrypts the preview itself, with no network request. Apple delivers the fixed alert described in the next item, and the phone replaces it with the decrypted preview.
 - **Private, no preview:** every other device gets a fixed alert, the bot's name and "You have new activity.", with no preview and no tap target. That covers iOS 15 and 16, older shells, and a device enrolled before the signing key was replaced, until it enrolls again. A private installation never falls back to a plaintext preview.
