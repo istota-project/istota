@@ -3602,7 +3602,7 @@ reclaim_volume_refusal() {
         echo "could not read the compose files"
         return 0
     fi
-    if printf '%s\n' "$declared" | grep -qxF "$volume"; then
+    if grep -qxF -- "$volume" <<<"$declared"; then
         echo "a compose file names it"
     fi
 }
