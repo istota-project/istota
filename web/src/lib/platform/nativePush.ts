@@ -7,7 +7,7 @@ export interface PushRegistration {
   environment: 'production' | 'sandbox';
 }
 export interface PushOpen {
-  kind: 'chat' | 'notification';
+  kind: 'chat' | 'notification' | 'inbox';
   room_token?: string;
   room_id?: number;
   link?: string;

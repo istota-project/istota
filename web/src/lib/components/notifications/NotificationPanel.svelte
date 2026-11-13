@@ -34,12 +34,14 @@
     dismissNotification,
     markPanelSeen,
     notificationItems,
+    notificationPanelRequested,
     notificationTotalOpen,
     notificationsError,
     notificationsLoading,
     refreshItems,
     runAction,
     seenPairs,
+    takeNotificationPanelRequest,
     type NotificationFilter,
   } from '$lib/stores/notifications';
   import { Alert, EmptyState, ToggleGroup } from '@minot/ui';
@@ -101,8 +103,17 @@
     // action" once would never render that class again, so it would never be
     // seen, never resolve, and climb until the 14-day sweep caught it: exactly
     // the unbounded case the "All" default exists to close.
-    if (next) void load('all');
+    if (!next) return;
+    // A request from outside the bell can arrive with a detail open; the panel
+    // would sit above the modal (see `openDetail`), so the detail gives way.
+    detailItem = null;
+    void load('all');
   }
+
+  // A push tap routed to the inbox opens the panel through the same path as the bell.
+  $effect(() => {
+    if ($notificationPanelRequested && takeNotificationPanelRequest()) onOpenChange(true);
+  });
 
   function openDetail(item: ResolvedNotification) {
     detailItem = item;
