@@ -174,6 +174,7 @@ These env vars override TOML config values (for use with systemd `EnvironmentFil
 | `ISTOTA_SERVARR_PROWLARR_API_KEY` | `servarr.apps.prowlarr.api_key` |
 | `ISTOTA_WEB_OAUTH2_CLIENT_SECRET` | `web.oauth2_client_secret` |
 | `ISTOTA_WEB_SESSION_SECRET_KEY` | `web.session_secret_key` |
+| `ISTOTA_WEB_TOKEN_STORAGE` | `web.token_storage`. An unknown value is warned about and ignored |
 | `ISTOTA_PROVIDER_<ID>_API_KEY` | `providers.<id>.api_key`, for every provider, built in or your own |
 | `ISTOTA_PROVIDER_<ID>_EXTRA_HEADERS` | `providers.<id>.extra_headers`, as a JSON object of header name to string value. Replaces the table whole; a value that is not such an object is ignored with a warning |
 | `ISTOTA_BRAIN_NATIVE_API_KEY` | Legacy, read for one release as native's provider's key; the provider's own variable wins |
@@ -189,6 +190,8 @@ These env vars override TOML config values (for use with systemd `EnvironmentFil
 | `ISTOTA_WHATSAPP_ACCESS_TOKEN` | `whatsapp.cloud.access_token` |
 | `ISTOTA_WHATSAPP_APP_SECRET` | `whatsapp.cloud.app_secret` |
 | `ISTOTA_WHATSAPP_VERIFY_TOKEN` | `whatsapp.cloud.verify_token` |
+
+Three more override settings that are not credentials: `ISTOTA_WEB_AUTH` (`web.auth`, a comma-separated list of methods), `ISTOTA_APNS_KEY_PATH` (`push.apns_key_path`, for a key mounted into a container) and `ISTOTA_DEFAULT_LOG_FILE`. The last is a default rather than an override: the image sets it to `/data/logs/istota.log`, and it applies only when `[logging]` has no `file` key at all, so `file = ""` still turns the file off.
 
 The three WhatsApp names kept their un-nested spelling when the block moved under `cloud`, so an existing environment file keeps working across that upgrade. Each variable is listed in full rather than as a shared prefix and a list of suffixes: this is the page you reach by searching for a variable already sitting in your environment, and a suffix matches nothing.
 
@@ -219,7 +222,7 @@ Two more are set for one command at a time:
 | `ISTOTA_CONFIG_READ_ONLY` | Whether `/data/config` is read-only in the container, `true` by default. `istota-stack` sets `false` for the one-shot containers of `setup`, `apply`, the imports, `restore` and `localize-workspace`, and for nothing that keeps running |
 | `ISTOTA_SETUP_PUBLISH` | Where `istota-stack setup --web` publishes its page: `0.0.0.0:443` by default (`[::]:443` on a machine with only IPv6), `127.0.0.1:<LOCAL_FORWARD_PORT>` with `--local`, the port `host.env` says Lima forwards (8080 when that is empty). Set it to a free address and port when that one is taken |
 
-Inside the `daemon` and `web` containers, compose sets `ISTOTA_CONFIG_PATH=/data/config/config.toml` and `ISTOTA_ADMINS_FILE=/data/config/admins`, and each credential file becomes its uppercase name (`istota_nextcloud_app_password` becomes `ISTOTA_NEXTCLOUD_APP_PASSWORD`, one of the [secret overrides](#secret-overrides) above). Where the VM has the editor's trigger directory, `web` also gets `ISTOTA_CONFIG_APPLIER=host`, which says the host applies config changes and turns the web editor on. `ISTOTA_WEB_INSECURE_COOKIES=1` drops the `Secure` flag from the session cookie; setup writes `1` for `local` ingress, which is plain http on loopback where Safari and the Mac app drop a Secure cookie, and `0` for every other ingress.
+Inside the `daemon` and `web` containers, compose sets `ISTOTA_CONFIG_PATH=/data/config/config.toml` and `ISTOTA_ADMINS_FILE=/data/config/admins`, and each credential file becomes its uppercase name (`istota_nextcloud_app_password` becomes `ISTOTA_NEXTCLOUD_APP_PASSWORD`, one of the [secret overrides](#secret-overrides) above). The entrypoint reads the master key from `ISTOTA_SECRET_KEY`, else from the file `ISTOTA_SECRET_KEY_FILE` names (`/data/.secret_key` by default). The daemon and the browser share `ISTOTA_BROWSER_API_TOKEN`, from the `istota_browser_api_token` secret. In full Nextcloud integration the daemon alone gets `ISTOTA_RCLONE_RC=1` when the mount's control socket is bound in at `/run/istota-rclone/` (see [Storage](../deployment/running-the-stack.md#storage)). The image sets `ISTOTA_WEB_STATIC_DIR` and `ISTOTA_WEB_RENDER_DIR` to its built web bundles. Where the VM has the editor's trigger directory, `web` also gets `ISTOTA_CONFIG_APPLIER=host`, which says the host applies config changes and turns the web editor on. `ISTOTA_WEB_INSECURE_COOKIES=1` drops the `Secure` flag from the session cookie; setup writes `1` for `local` ingress, which is plain http on loopback where Safari and the Mac app drop a Secure cookie, and `0` for every other ingress.
 
 On the Mac, `ISTOTA_LIMA_INSTANCE` names the Lima instance `istota-stack` and `istota` act on (default `istota`), and `ISTOTA_REPO_URL` the repository `create` reads the newest release from and the VM clones (default `https://github.com/istota-project/istota.git`). `RELEASE_SIGNING_KEY` in the Mac's environment is the key `create` uses when `--signing-key` is not given.
 

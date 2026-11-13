@@ -91,7 +91,19 @@ While watching, istota holds an active Talk session in every room it watches, so
 | `dmarc_canary` | `true` | Warns when mail routed on a user's own address arrives without a `dmarc=pass` from the receiving MTA. Monitoring for the assumption above; never blocks mail — see [the DMARC canary](../features/email.md#the-dmarc-canary) |
 | `dmarc_canary_warn_on_missing` | `false`, or `true` when `authserv_id` is set | Also warn when your MTA's stamp carries no DMARC verdict at all. Off by default because a path that stamps nothing would warn on every message. Turn it on once you know your MTA stamps: it is the only way a mailbox moving to a provider that does not evaluate DMARC ever surfaces. Left unset, it follows `authserv_id`, since setting that says your MTA stamps |
 | `thread_disclosure_footer` | `false` | Ends every plain-text mail the bot sends into a multi-person thread with one line naming the bot, the host and the `!<name> off` switch. Off by default, since mail from the bot's address is already from the bot |
+| `imap_security` | `""` | `"tls"` or `"starttls"`. Empty picks by port: 993 is implicit TLS, any other port upgrades with STARTTLS. Certificates are always verified — see [email](../features/email.md) |
+| `smtp_security` | `""` | The same for SMTP: 465 is implicit TLS, any other port STARTTLS |
 | `authserv_id` | `""` | Your receiving MTA's authserv-id — the first field of the `Authentication-Results` header it stamps. Set it and headers from any other authserv-id are discarded rather than read; blank keeps the older topmost-header-only read, which a sender can forge once the MTA stops stamping. Write the single token before the semicolon, without any version number that follows it. Setting it also makes mail arriving without your stamp warn on its own — see [the DMARC canary](../features/email.md#the-dmarc-canary) |
+
+## `[mail_accounts]`
+
+Mail accounts users connect in Settings > Connections or with `istota mail-account`. Separate from `[email]`, which is the bot's own mailbox. A server on a private address needs a `mail_accounts` grant in [`[private_hosts]`](#private_hosts). See [email](../features/email.md).
+
+| Setting | Default | Description |
+|---|---|---|
+| `enabled` | `true` | Off keeps the accounts and makes every one unreachable |
+| `allow_send` | `true` | Off makes every account read-only |
+| `max_per_user` | `10` | Accounts one user may connect |
 
 ## `[sms]`
 
@@ -230,7 +242,7 @@ Whether the bot replies to a turn nobody addressed to it, in a room more than on
 
 | Setting | Default | Description |
 |---|---|---|
-| `poll_interval` | `2` | Seconds between queue checks |
+| `poll_interval` | `5` | Seconds between queue checks |
 | `dispatch_interval` | `0.5` | Sub-tick cadence for `pool.dispatch()` within a poll tick — bounds cold pending-task pickup latency. 0 or ≥ `poll_interval` = legacy one-dispatch-per-tick |
 | `talk_poll_interval` | `10` | Seconds between Talk polls |
 | `talk_poll_timeout` | `30` | Talk long-poll timeout |
@@ -249,8 +261,8 @@ Whether the bot replies to a turn nobody addressed to it, in a room more than on
 | `email_max_attachment_bytes` | `26214400` | Attachment bytes **written to disk and uploaded** per message (25 MiB). Not a bound on the IMAP transfer — the client fetches and decodes the whole message before any part can be inspected. Whole attachments only: one that would cross the budget is skipped rather than truncated, and the prompt names it. 0 = unlimited |
 | `email_max_attachment_bytes_per_poll` | `104857600` | The same budget across one whole poll tick (100 MiB). A per-message cap alone bounds one message and not a batch of fifty. 0 = unlimited |
 | `briefing_check_interval` | `60` | Seconds between briefing/job/cleanup checks |
-| `tasks_file_poll_interval` | `30` | Seconds between TASKS.md polls; `0` turns them off |
-| `shared_file_check_interval` | `120` | Seconds between shared file checks; `0` turns them off |
+| `tasks_file_poll_interval` | `30` | Seconds between TASKS.md polls; `0` turns them off. With full Nextcloud integration a poll reads the mount only after `tree_watch_interval` saw a change, or hourly |
+| `shared_file_check_interval` | `120` | Seconds between shared file checks; `0` turns them off. Gated by the tree watch the same way |
 | `tree_watch_interval` | `30` | Seconds between checks of whether anything under the bot's Nextcloud root changed, with full Nextcloud integration. The TASKS.md poll, the CRON.md sync and the shared-file organizer then read the mount only after a change, or hourly. `0` turns the check off: the three read on their own intervals, and on the VM's rclone mount a change made in Nextcloud then takes up to ten minutes to show |
 | `heartbeat_check_interval` | `60` | Seconds between heartbeat checks; `0` turns them off |
 | `db_health_check_interval` | `86400` | Seconds between SQLite `quick_check` + self-heal `REINDEX` sweeps over framework + per-user DBs (24h) |
@@ -371,6 +383,7 @@ These need a cgroup subtree delegated to the daemon, which the stack's root phas
 | `skill_client_wait_seconds` | `600` | How long the sandboxed `istota-skill` client waits on the proxy socket. The bound every skill budget sits under — the global and every per-skill entry are capped at this minus a 30s margin, so a skill wanting more than 570s needs this raised too. Exported to the client as `ISTOTA_SKILL_CLIENT_WAIT`; the proxy derives its ceiling from this field, never from the export, which lives in the model's environment |
 | `credential_history_days` | `180` | Retain old credential versions for this many days, up to ten per field |
 | `credential_audit_days` | `365` | Retain credential activity records for this many days |
+| `credential_exports_per_day` | `3` | Credential exports one user may make from the web UI in 24 hours. Values below 1 count as 1 |
 | `credential_backup_retention` | `30` | Keep this many scheduled age credential backups |
 | `skill_proxy_max_connections` | `64` | Open connections one task may hold on the skill proxy. A call past it is refused as busy, at once and without a thread |
 | `skill_proxy_max_concurrent` | `8` | Skills one task may run at once. A call past it waits for a slot, up to what remains of `skill_client_wait_seconds` after the skill's own timeout and the 30s margin, then is refused as busy |
@@ -379,6 +392,10 @@ These need a cgroup subtree delegated to the daemon, which the stack's root phas
 | `vault_fetch_limit_per_task` | `10` | How many distinct shared credentials (the `vault_entries` namespace a user's [credential store](credentials.md#import-and-export) produces) one task *attempt* may read over the proxy, on the model's socket and a skill's private channel alike. A credential already served in full this attempt can be read again at no cost on the same channel (a value a skill was given privately is charged again when the model asks for it), so a skill that resolves its entry on every call (WordPress, for one) spends one fetch for the session. `1` limits a task to one credential. `0` is unlimited and is the only spelling of unlimited — an absent key is this default, never "off". Enforced by the proxy rather than by the `istota-credential` shim the model calls, since that program sits in a directory the model can overwrite. A request for a name not yet served in full, whether it does not exist or the proxy refuses it, is charged every time, so probing for absent names is not free; listing the namespace is not counted. A skill that reads a whole entry (password, username, URL and custom fields together) spends one fetch for it. This is a bound on how many secrets a task can reach, not on how many calls it makes with them |
 | `allow_unsandboxed_multi_user_vaults` | `false` | Permit credential vaults for multiple configured users without effective sandboxing. This accepts same-uid cross-task credential exposure. Applies to imports, credential writes and task access, including cached credentials. Restart services after changing it. See [credential vault](credentials.md#import-and-export) |
 | `vault_writes_per_task` | `3` | How many `vault_create` requests (`istota-credential new`) one task attempt may make, refusals included. A capability gate rather than a budget: `0` disables model-requested vault writes, and unlike `vault_fetch_limit_per_task` it never means unlimited. See [credential vault](credentials.md#import-and-export) |
+| `scheduled_job_max_unapproved` | `"public"` | The furthest reach a new scheduled job gets with no approval: `limited`, `public` or `full`. Past it the job runs limited and asks its owner. An unknown value falls back to `limited` — see [scheduling](../features/scheduling.md) |
+| `wallet_requests_per_task` | `3` | Purchase requests one task attempt may make — see [wallet](../features/wallet.md) |
+| `wallet_fills_per_purchase` | `3` | Checkout fills one approved purchase may use |
+| `wallet_authorization_minutes` | `30` | How long an approved purchase stays usable |
 | `passthrough_env_vars` | `["LANG", "LC_ALL", "LC_CTYPE", "TZ"]` | Extra env vars for subprocess |
 | `sandbox_ro_paths` | `[]` | Extra RO bind-mounts in the sandbox, for co-located services. Keep entries narrow — a broad path sweeps in whatever lives under it. The DB directories are masked after this list either way |
 | `sandbox_cache_dir` | `""` | **The fallback** root for the package managers' caches, read only where the developer skill is not configured. With `[developer] enabled` and `repos_dir` set, each user's cache is *derived* at `{repos_dir}/{user_id}/.package-caches` and this key is not consulted at all — so setting it on a developer deployment names a path nothing uses while reading like the intended one. Where it is read, each user gets `{root}/{user_id}`, bound RW into their sandbox with `UV_CACHE_DIR`, `XDG_CACHE_HOME` and `npm_config_cache` pointed at it. Empty leaves those caches on bwrap's own root tmpfs — RAM the host cannot attribute, discarded at task exit, so every task downloads again. The derivation exists for the mount rather than for tidiness: uv populates a venv by hardlinking out of its cache and `link(2)` compares *mounts* rather than devices, so a cache outside the bound subtree returns `EXDEV` even on the same filesystem and every worktree pays for a full copy. On this fallback branch nothing binds an ancestor, so that copy is what a venv in the task workspace pays — the same cost as before ISSUE-305 addressed the RAM, not a new one. The root must already exist and be writable. Ignored with one warning when relative, missing, unwritable, under a database directory, or at or above a path the sandbox already mounts, since a bind above an earlier mount would cover it: so not `temp_dir`, `~/.cache`, `~/.local` or `repos_dir` itself |
@@ -561,6 +578,7 @@ The credential is not configured here. It is read — never written, never refre
 | `cron` | `"0 3 * * *"` | Schedule (UTC) |
 | `lookback_hours` | `24` | How far back to gather channel data |
 | `memory_retention_days` | `0` | Prune dated channel files and `channel_memory` chunks older than N days. 0 = unlimited |
+| `extraction_model` | `"general"` | Role used for the nightly extraction call |
 
 ## `[memory_search]`
 
@@ -788,6 +806,12 @@ A user can also store their own CARTO key on the Location settings page, where i
 
 The `web.basemap` doctor check reads the same resolver as the endpoint, so it cannot pass while the map is blank. It opens no socket, deliberately: CARTO returns 200 with a byte-identical body and ETag for a keyless request and a bogus-key one, so a probe would report a working basemap for a defaced one — and tiles are fetched by the browser over a different route, so a proxied deployment would fail a probe for a basemap every browser renders.
 
+### `[web.workspace]`
+
+| Setting | Default | Description |
+|---|---|---|
+| `max_upload_mb` | `100` | Largest file one upload in Files may carry. nginx's body limit bounds what reaches the process at all |
+
 ## `[location]`
 
 | Setting | Default | Description |
@@ -814,6 +838,59 @@ Explicit CalDAV override. When any field is set it wins over the value derived f
 | `password` | `""` | CalDAV password |
 
 Set all three fields or none. Each falls back to `[nextcloud]` on its own rather than as a group, so a half-set block mixes the two: a URL with no password names a foreign host and hands it the Nextcloud app password, and a password with no URL authenticates to Nextcloud's own DAV endpoint with the wrong secret. `istota setup` refuses the first pairing outright. Where there is no Nextcloud, `istota setup` offers this block, writing the URL and username into the config and the password to the stack's `secrets/istota_caldav_password`, which reaches the daemon as `ISTOTA_CALDAV_PASSWORD`.
+
+## `[sharing]`
+
+Calendars and folders shared with Istota over open protocols. See [sharing](../features/sharing.md). A feed or sharing server on a private address or plain http needs a `sharing` grant in [`[private_hosts]`](#private_hosts).
+
+| Setting | Default | Description |
+|---|---|---|
+| `ics_poll_interval` | `900` | Seconds between polls of one ICS feed. Values under 300 are raised to 300 |
+| `ics_max_bytes` | `2097152` | Largest feed body read (2 MiB) |
+| `ics_max_feeds_per_user` | `10` | ICS feeds one user may subscribe Istota to |
+| `events_per_task` | `10` | Writes to Istota's own calendar one task attempt may make. `0` turns those writes off |
+
+### `[sharing.ocm]`
+
+| Setting | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Receive Open Cloud Mesh folder shares on `[site] hostname`, sent to `<user_id>@<hostname>` |
+| `max_pending_per_user` | `20` | Offers waiting for an answer, per user |
+| `pending_days` | `14` | An offer left unanswered this many days after its last send is declined |
+| `max_discovery_fetches_per_minute` | `30` | Discovery requests to sending servers, across all senders |
+
+## `[push]`
+
+Native iOS push through APNs. Install the `push` extra and put the APNs signing key on the server, readable only by the service user. `istota doctor --only push.credentials` checks the key's metadata; `istota push test --user U` sends one.
+
+| Setting | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Master switch |
+| `apns_key_path` | `""` | Path to the `.p8` signing key. `ISTOTA_APNS_KEY_PATH` overrides it |
+| `apns_key_id` / `apns_team_id` | `""` | The key's ID and your Apple team ID |
+| `apns_topic` | `"com.cynium.istota"` | The app's bundle ID |
+| `dispatch_interval_seconds` | `5` | Seconds between push sweeps. `0` turns the sweep off |
+| `chat_delay_seconds` | `15` | How old an unread chat message must be before it is pushed, so a message read in the web UI first is never pushed |
+| `max_age_seconds` | `300` | Chat messages older than this when a sweep reaches them are skipped rather than pushed |
+| `alert_batch_limit` | `200` | Pending notifications read per sweep |
+
+## `[assignments]`
+
+Goals an admin gives the bot to work on across days. See [assignments](../features/assignments.md).
+
+| Setting | Default | Description |
+|---|---|---|
+| `max_workers` | `2` | Assignment wakes running at once, across the instance |
+| `user_max_workers` | `1` | Assignment wakes one user may run at once |
+| `max_active_per_user` | `3` | Assignments past draft and not yet closed, per user |
+| `max_cost_usd_per_assignment` | `50.0` | Ceiling on any charter's cost budget |
+| `max_wakes_per_assignment` | `500` | Ceiling on any charter's wake budget |
+| `min_wake_interval_minutes` | `15` | Shortest time between two wakes of one assignment |
+| `stall_wakes` | `3` | Wakes in a row with no progress before the assignment is paused |
+| `failure_wakes` | `3` | Failed wakes in a row before the assignment is paused |
+| `budget_low_fraction` | `0.75` | Share of the budget spent that raises a budget notice |
+| `scratchpad_prompt_chars` | `24000` | Cap on the scratchpad in a wake's prompt |
+| `history_prompt_chars` | `12000` | Cap on earlier wake summaries in a wake's prompt |
 
 ## `[private_hosts]`
 

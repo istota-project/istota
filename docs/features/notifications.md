@@ -47,7 +47,7 @@ Six are **object-backed**: something outside the table changes and the row close
 
 Three of these are worth spelling out because the obvious reading is wrong.
 
-**A disabled cron job is tracked by its failure counter, not by whether it is enabled.** `CRON.md` is authoritative for the enabled flag and the scheduler re-syncs it every tick, so a job auto-disabled after five failures is switched back on within a tick. A row watching the flag would go stale minutes after it was raised, leaving you a push about something the panel then denied all knowledge of. Every path that really ends the condition — a successful run, `!cron enable`, the module-job rescue — zeroes the counter instead.
+**A suspended cron job is tracked by its suspension, not by whether it is enabled.** `CRON.md` owns the `enabled` flag, and auto-disable after five failures never writes it: the scheduler records the suspension in `auto_disabled_at`, which the file cannot express and the CRON.md sync never touches (see [failure handling](scheduling.md#failure-handling)). The row closes when the suspension is lifted: a successful run, `!cron enable`, or an edit in CRON.md to what the job dispatches. A module job is the exception below.
 
 **A module job (`_module.*`) raises nothing here at all.** Those are re-enabled hourly whether or not anything was fixed, so a row would be raised, marked stale by the rescue, and reopened an hour later — and a reopen delivers. That turns a permanently broken module job into an hourly push with no command to run against it. A module job failing for a reason you can act on has a source of its own: a dead Garmin credential raises `connected_service`.
 
