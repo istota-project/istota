@@ -554,6 +554,28 @@ def _put_at(document: dict, path: tuple[str, ...], value: Any) -> None:
             raise ChangeError(f"{secrets.label(path)} has no place in this configuration")
 
 
+MOVED_ELEMENT_REASON = (
+    "The list entry this credential belongs to is not at the same place in the current "
+    "configuration. Restore the configuration with it, or enter the credential again."
+)
+
+
+def _backup_document(bundle: Bundle) -> dict:
+    try:
+        return tomllib.loads(bundle.config_toml)
+    except tomllib.TOMLDecodeError:
+        raise BackupError("invalid_backup", "The backup's configuration does not parse.") from None
+
+
+def _element_moved(credential: FileCredential | InlineCredential, backup_document: dict, current: dict) -> bool:
+    """Whether an inline credential inside an array would land in a different
+    element of `current` than the one it was backed up from. Recorded by
+    index, so a credentials-only restore must not write it there."""
+    if not isinstance(credential, InlineCredential):
+        return False
+    return not secrets.same_elements(backup_document, current, credential.path)
+
+
 def _warning(path: tuple[str, ...] | None, message: str) -> dict:
     return {
         "kind": "warning", "path": list(path or ()), "message": message,
@@ -594,12 +616,12 @@ def restore_change_set(
         item for item in chosen if isinstance(item, FileCredential)
     ], inline_credentials=[item for item in chosen if isinstance(item, InlineCredential)]))
 
+    backup_document = _backup_document(bundle)
     if restore_config:
-        try:
-            document = tomllib.loads(bundle.config_toml)
-        except tomllib.TOMLDecodeError:
-            raise BackupError("invalid_backup", "The backup's configuration does not parse.") from None
+        document = backup_document
     else:
+        if any(_element_moved(credential, backup_document, current) for credential in chosen):
+            raise ChangeError("the selection names a credential whose list entry is not in this configuration")
         document = secrets.redact_document(current)
     for credential in chosen:
         if isinstance(credential, InlineCredential):
@@ -727,23 +749,35 @@ def _current_value(
 
 
 def credential_statuses(
-    bundle: Bundle, current_text: str, current_files: Mapping[str, str],
+    bundle: Bundle, current_text: str, current_files: Mapping[str, str], *, restore_config: bool,
 ) -> list[dict]:
     """Each credential the backup holds, as a restore preview shows it: its
     destination id, name, kind, source and status (`new`, `changed`,
     `unchanged` or `host_only`). Never a value. Only `new` and `changed`
-    entries are selectable."""
+    entries are selectable.
+
+    An inline credential in an array element that `current` does not hold at
+    the same index is `host_only` for a credentials-only restore, which would
+    write it into whichever element is there now, and `new` when the backup's
+    document is restored with it, since the current value at that index is
+    another element's."""
     from istota.config_editor.edits import UNREADABLE_CONFIG, ChangeError
 
     try:
         current = tomllib.loads(current_text)
     except tomllib.TOMLDecodeError:
         raise ChangeError(UNREADABLE_CONFIG) from None
+    backup_document = _backup_document(bundle)
     rows = []
     for credential in sorted(bundle.credentials, key=lambda item: item.destination):
         reason = host_only_reason(credential)
+        moved = _element_moved(credential, backup_document, current)
         if reason is not None:
             status = "host_only"
+        elif moved and not restore_config:
+            status, reason = "host_only", MOVED_ELEMENT_REASON
+        elif moved:
+            status = "new"
         else:
             now = _current_value(credential, current, current_files)
             if now is None:

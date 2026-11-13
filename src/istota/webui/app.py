@@ -6483,7 +6483,9 @@ async def _build_config_restore(user_id: str, inp: _RestoreInput, text: str, dig
         current_files = await asyncio.to_thread(
             backup.current_secret_files, backup.deployment_secrets_dir(),
         )
-        credentials = backup.credential_statuses(bundle, text, current_files)
+        credentials = backup.credential_statuses(
+            bundle, text, current_files, restore_config=inp.restore_config,
+        )
         selectable = {row["id"] for row in credentials if row["selectable"]}
         if set(inp.selected) - selectable:
             raise _ConfigRefusal(

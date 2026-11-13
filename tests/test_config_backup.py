@@ -857,7 +857,10 @@ class TestPlainUpload:
 class TestCredentialStatuses:
     def _statuses(self, install, current, files=None):
         bundle = _full_bundle(install)
-        return {row["id"]: row for row in backup.credential_statuses(bundle, current, files or {})}
+        return {
+            row["id"]: row
+            for row in backup.credential_statuses(bundle, current, files or {}, restore_config=True)
+        }
 
     def test_new_changed_unchanged_and_host_only(self, install):
         _write_secret(install[1], "istota_nextcloud_app_password", "nc-app-password-41")
@@ -900,6 +903,67 @@ class TestCredentialStatuses:
         with pytest.raises(BackupError) as caught:
             backup.current_secret_files(install[1])
         assert caught.value.code == "unreadable_secret"
+
+
+RESOURCE = "inline:users.alice.resources.0.password"
+RESOURCE_PATH = ("users", "alice", "resources", "0", "password")
+BACKED_UP_KEY = "resource-key-a-43"
+CURRENT_KEY = "resource-key-b-44"
+
+
+def _resource(name, password):
+    return f'[[users.alice.resources]]\ntype = "caldav"\nname = "{name}"\npassword = "{password}"\n'
+
+
+class TestArrayCredentials:
+    """An inline credential inside an array is recorded by index, so it may
+    only be put back where the element at that index is the backed-up one
+    (`secrets.same_elements`), or where the backup's document is restored."""
+
+    def _row(self, bundle, current, *, restore_config):
+        rows = backup.credential_statuses(bundle, current, {}, restore_config=restore_config)
+        return {row["id"]: row for row in rows}[RESOURCE]
+
+    def test_a_different_element_is_not_selectable_for_a_credentials_only_restore(self, install):
+        bundle = _gather(install, _resource("a", BACKED_UP_KEY))
+        current = _resource("b", CURRENT_KEY)
+        row = self._row(bundle, current, restore_config=False)
+        assert row["status"] == "host_only" and not row["selectable"]
+        assert row["reason"]
+        assert BACKED_UP_KEY not in json.dumps(row) and CURRENT_KEY not in json.dumps(row)
+        with pytest.raises(ChangeError):
+            backup.restore_change_set(
+                bundle, current, restore_config=False, selected=[RESOURCE], base_digest="d" * 64,
+            )
+
+    def test_a_different_element_is_new_when_the_configuration_is_restored(self, install):
+        bundle = _gather(install, _resource("a", BACKED_UP_KEY))
+        # The same value at the other element: not "unchanged", which would
+        # have compared it with another element's credential.
+        current = _resource("b", BACKED_UP_KEY)
+        row = self._row(bundle, current, restore_config=True)
+        assert row["status"] == "new" and row["selectable"]
+        change_set, _ = backup.restore_change_set(
+            bundle, current, restore_config=True, selected=[RESOURCE], base_digest="d" * 64,
+        )
+        found = _preview(current, change_set)
+        assert not found.blocked, (found.errors, found.blocking)
+        resource = found.document["users"]["alice"]["resources"][0]
+        assert resource["name"] == "a"
+        assert found.inline_secrets == {"users.alice.resources.0.password": BACKED_UP_KEY}
+
+    def test_the_same_element_restores_into_it(self, install):
+        bundle = _gather(install, _resource("a", BACKED_UP_KEY))
+        current = _resource("a", CURRENT_KEY)
+        row = self._row(bundle, current, restore_config=False)
+        assert row["status"] == "changed" and row["selectable"]
+        change_set, _ = backup.restore_change_set(
+            bundle, current, restore_config=False, selected=[RESOURCE], base_digest="d" * 64,
+        )
+        found = _preview(current, change_set)
+        assert not found.blocked, (found.errors, found.blocking)
+        assert found.document["users"]["alice"]["resources"][0]["name"] == "a"
+        assert found.inline_secrets == {"users.alice.resources.0.password": BACKED_UP_KEY}
 
 
 class TestRestoreDigests:
