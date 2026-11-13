@@ -162,6 +162,21 @@ describe('a plain backup', () => {
     expect(api.submitConfigChange).not.toHaveBeenCalled();
   });
 
+  it('offers another file after its review is closed', async () => {
+    api.previewConfigRestore.mockResolvedValue(restorePreview());
+    mount();
+    await pick(plainText, 'istota-config.toml');
+    await fireEvent.click(await screen.findByRole('button', { name: 'Preview' }));
+    await screen.findByRole('button', { name: 'Apply…' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Choose another file' }));
+    expect(screen.getByLabelText('Backup file', { selector: 'input' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Preview' })).toBeDisabled();
+    await pick(KDBX, 'backup.kdbx');
+    expect(await screen.findByLabelText('Backup password')).toBeEnabled();
+  });
+
   it('forgets a file whose picker was cancelled', async () => {
     mount();
     await pick(plainText, 'istota-config.toml');

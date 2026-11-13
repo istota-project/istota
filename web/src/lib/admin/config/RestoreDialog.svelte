@@ -355,7 +355,7 @@
   {/if}
 
   {#snippet footer()}
-    {#if opened && format === 'kdbx'}
+    {#if opened}
       <Button
         variant="secondary"
         disabled={busy}
