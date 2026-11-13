@@ -6,6 +6,10 @@ import {
   setBadge,
   consumePendingOpen,
   onPushOpen,
+  privatePushAvailable,
+  preparePrivateRegistration,
+  commitPrivateRegistration,
+  cancelPrivateRegistration,
 } from './nativePush';
 
 const plugin = {
@@ -82,4 +86,62 @@ it('preserves denial and actual registration failures', async () => {
   expect(await registerForPush()).toMatchObject({ permission: 'denied', token: null });
   plugin.register.mockRejectedValueOnce(new Error('PUSH_TOKEN_TIMEOUT'));
   await expect(registerForPush()).rejects.toThrow('PUSH_TOKEN_TIMEOUT');
+});
+
+const privatePlugin = {
+  ...plugin,
+  preparePrivateRegistration: vi.fn(),
+  commitPrivateRegistration: vi.fn(),
+  cancelPrivateRegistration: vi.fn(),
+};
+const privateBinding = '0f8e4b0c-2a6d-4c4e-9a43-6d2f1b8e7c51';
+
+it.each(['Mozilla/5.0', 'IstotaApp/0.14.0'])('keeps private enrollment off for %s', async (ua) => {
+  shell(ua);
+  vi.stubGlobal('Capacitor', { Plugins: { IstotaPush: privatePlugin } });
+  expect(privatePushAvailable()).toBe(false);
+  expect(
+    await preparePrivateRegistration({ binding: privateBinding, senderKey: 'k', senderKeyId: 'i' }),
+  ).toBeNull();
+  await commitPrivateRegistration({ binding: privateBinding, generation: 'g', deviceId: 4 });
+  await cancelPrivateRegistration({ binding: privateBinding, generation: 'g' });
+  expect(privatePlugin.preparePrivateRegistration).not.toHaveBeenCalled();
+  expect(privatePlugin.commitPrivateRegistration).not.toHaveBeenCalled();
+  expect(privatePlugin.cancelPrivateRegistration).not.toHaveBeenCalled();
+});
+
+it('keeps private enrollment off on a 0.15.0 shell whose plugin lacks the methods', () => {
+  shell('IstotaApp/0.15.0');
+  expect(pushAvailable()).toBe(true);
+  expect(privatePushAvailable()).toBe(false);
+});
+
+it('passes the three private calls through on a 0.15.0 shell', async () => {
+  shell('IstotaApp/0.15.0');
+  vi.stubGlobal('Capacitor', { Plugins: { IstotaPush: privatePlugin } });
+  const prepared = {
+    content: 'generic',
+    generation: 'A'.repeat(22),
+    token: 'ab'.repeat(32),
+    environment: 'sandbox',
+    versions: [1],
+  };
+  privatePlugin.preparePrivateRegistration.mockResolvedValue(prepared);
+  privatePlugin.commitPrivateRegistration.mockResolvedValue({});
+  privatePlugin.cancelPrivateRegistration.mockResolvedValue({});
+  expect(privatePushAvailable()).toBe(true);
+  const input = { binding: privateBinding, senderKey: 'k', senderKeyId: 'i' };
+  expect(await preparePrivateRegistration(input)).toEqual(prepared);
+  expect(privatePlugin.preparePrivateRegistration).toHaveBeenCalledWith(input);
+  await commitPrivateRegistration({ binding: privateBinding, generation: 'g', deviceId: 4 });
+  expect(privatePlugin.commitPrivateRegistration).toHaveBeenCalledWith({
+    binding: privateBinding,
+    generation: 'g',
+    deviceId: 4,
+  });
+  await cancelPrivateRegistration({ binding: privateBinding, generation: 'g' });
+  expect(privatePlugin.cancelPrivateRegistration).toHaveBeenCalledWith({
+    binding: privateBinding,
+    generation: 'g',
+  });
 });

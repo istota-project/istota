@@ -191,7 +191,7 @@ These env vars override TOML config values (for use with systemd `EnvironmentFil
 | `ISTOTA_WHATSAPP_APP_SECRET` | `whatsapp.cloud.app_secret` |
 | `ISTOTA_WHATSAPP_VERIFY_TOKEN` | `whatsapp.cloud.verify_token` |
 
-Three more override settings that are not credentials: `ISTOTA_WEB_AUTH` (`web.auth`, a comma-separated list of methods), `ISTOTA_APNS_KEY_PATH` (`push.apns_key_path`, for a key mounted into a container) and `ISTOTA_DEFAULT_LOG_FILE`. The last is a default rather than an override: the image sets it to `/data/logs/istota.log`, and it applies only when `[logging]` has no `file` key at all, so `file = ""` still turns the file off.
+Four more override settings that are not credentials: `ISTOTA_WEB_AUTH` (`web.auth`, a comma-separated list of methods), `ISTOTA_APNS_KEY_PATH` (`push.apns_key_path`, for a key mounted into a container), `ISTOTA_PUSH_SIGNING_KEY_PATH` (`push.signing_key_path`, the private push signing key) and `ISTOTA_DEFAULT_LOG_FILE`. The last is a default rather than an override: the image sets it to `/data/logs/istota.log`, and it applies only when `[logging]` has no `file` key at all, so `file = ""` still turns the file off.
 
 The three WhatsApp names kept their un-nested spelling when the block moved under `cloud`, so an existing environment file keeps working across that upgrade. Each variable is listed in full rather than as a shared prefix and a list of suffixes: this is the page you reach by searching for a variable already sitting in your environment, and a suffix matches nothing.
 

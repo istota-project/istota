@@ -69,6 +69,28 @@ def test_preference_upgrade_preserves_profiles_rooms_and_devices(tmp_path):
         assert tuple(row) == (None, None, None, None, None, "ab" * 32)
 
 
+PRIVATE_COLUMNS = ("private_version", "private_content", "encryption_public_key",
+                   "encryption_key_id", "sender_key_id", "push_generation")
+
+
+def test_private_enrollment_columns_are_added_and_legacy_rows_untouched(tmp_path):
+    path = tmp_path / "test.db"
+    db.init_db(path)
+    with db.get_db(path) as conn:
+        conn.execute("INSERT INTO push_devices(user_id,token,environment,connection_binding,connection_generation)"
+                     " VALUES('alice',?,'sandbox','b',2)", ("ab" * 32,))
+        for column in PRIVATE_COLUMNS:
+            conn.execute(f"ALTER TABLE push_devices DROP COLUMN {column}")
+    for _ in range(2):
+        db.init_db(path)
+    with db.get_db(path) as conn:
+        names = {row[1] for row in conn.execute("PRAGMA table_info(push_devices)")}
+        assert set(PRIVATE_COLUMNS) <= names
+        row = conn.execute(f"SELECT token, connection_binding, connection_generation, {', '.join(PRIVATE_COLUMNS)}"
+                           " FROM push_devices").fetchone()
+        assert tuple(row) == ("ab" * 32, "b", 2, None, None, None, None, None, None)
+
+
 def test_legacy_single_handle_rebuild_preserves_override(tmp_path):
     import sqlite3
     conn = sqlite3.connect(tmp_path / "legacy.db")

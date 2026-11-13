@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Private push notifications.** With `[push] content = "private"`, Apple sees only a fixed alert and the badge count: an iOS 17 phone on app 0.15.0 opens an encrypted preview itself, and other devices get the fixed alert. Notifications settings shows each device's mode. See docs/features/notifications.md.
 - **A worldview layer.** Istota now ships the positions it judges from, taken from the Common Task manifesto, and loads them between emissaries and the persona for every task except briefings. It is on by default; `worldview_enabled = false` turns it off. See docs/configuration/persona.md.
 
 ### Changed

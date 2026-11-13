@@ -560,9 +560,12 @@ The one writer of the `claude` CLI's credentials file, which the container's ent
 
 ```bash
 istota push test --user USER [--message TEXT]   # A test alert to each of the user's registered iOS devices
+istota push keygen [--force]                    # Write the private push signing key to [push] signing_key_path
 ```
 
-Exits 1 when `[push]` is disabled, the user has no registered device, or a send fails. See [push notifications](../features/notifications.md#push-notifications).
+`push test` exits 1 when `[push]` is disabled, the user has no registered device, or a send fails. See [push notifications](../features/notifications.md#push-notifications).
+
+`push keygen` writes a new Ed25519 key to `signing_key_path` (mode 0600, its directory created 0700 if missing) and the public half to `<signing_key_path>.pub` (0644), and prints the key ID. It never prints the key. It exits 1 when `signing_key_path` is not set or a key already exists there. `--force` replaces the key, and every enrolled device then has to enroll again before it shows private previews. Startup never creates or replaces the key. See [private push v1](private-push-v1.md).
 
 ### Config plans
 
