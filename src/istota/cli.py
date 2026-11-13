@@ -3660,14 +3660,24 @@ def cmd_calendar_discover(args):
 
 
 def cmd_push_test(args):
-    """Send an operator-requested alert to each registered device."""
-    from istota.push import apns, devices
+    """Send an operator-requested alert to each registered device, through dispatch's seam."""
+    import time
+
+    from istota.push import delivery, devices, envelope
     from istota.push.preferences import push_badge_count
 
     config = load_config(Path(args.config) if args.config else None)
     if not config.push.enabled:
         print("Push notifications are disabled; enable [push] first.", file=sys.stderr)
         return 1
+    signing_key = None
+    if config.push.content == "private":
+        try:
+            signing_key = envelope.load_signing_key(config.push.signing_key_path)
+        except envelope.KeyFileError as exc:
+            print(f"Private push is configured but {exc}; run `istota push keygen` or fix the path.",
+                  file=sys.stderr)
+            return 1
     try:
         with db.get_db(config.db_path) as conn:
             registered = devices.devices_for_user(conn, args.user)
@@ -3676,22 +3686,29 @@ def cmd_push_test(args):
                 return 1
             profile = user_profiles.get_profile(config.db_path, args.user, conn=conn)
             badge = push_badge_count(conn, args.user, profile=profile or config.users.get(args.user))
-        payload = {
-            "aps": {"alert": {"title": "Istota push test", "body": args.message},
-                    "badge": badge, "sound": "default"},
-            "istota": {"kind": "notification", "link": "/chat"},
-        }
+        logical = delivery.alert("Istota push test", args.message, badge, thread="test", group="test",
+                                 target={"kind": "notification", "link": "/chat"})
         failed = False
         for device in registered:
             if not devices.registration_authorized(config, device):
                 print(f"Device {device['id']}: registration authorization expired; register again")
                 failed = True
                 continue
-            result = apns.send(config.push, device, payload, collapse_id="test", expiration=0)
+            label = f"Device {device['id']} (...{device['token'][-6:]}, {device['environment']})"
+            try:
+                prepared = delivery.build_delivery(config, device, logical, now=time.time(),
+                                                   signing_key=signing_key)
+            except delivery.DeliveryError as exc:
+                with db.get_db(config.db_path) as conn:
+                    devices.record_refusal(conn, device, exc.reason)
+                print(f"{label}: not sent: {exc.reason}")
+                failed = True
+                continue
+            result = delivery.send_prepared(config, device, prepared)
             with db.get_db(config.db_path) as conn:
                 devices.record_result(conn, device["id"], result)
-            label = "accepted by APNs" if result.success else f"failed: {result.status} {result.reason}"
-            print(f"Device {device['id']} (...{device['token'][-6:]}, {device['environment']}): {label}")
+            outcome = "accepted by APNs" if result.success else f"failed: {result.status} {result.reason}"
+            print(f"{label}: {outcome}")
             failed = failed or not result.success
         return int(failed)
     except Exception as exc:

@@ -174,6 +174,17 @@ def any_devices(conn: sqlite3.Connection) -> bool:
         return False
 
 
+def record_refusal(conn: sqlite3.Connection, device: dict, reason: str) -> None:
+    """A payload refused before APNs; the row and its enrollment are otherwise left alone."""
+    try:
+        conn.execute(
+            "UPDATE push_devices SET last_error = ? WHERE id = ? AND created_at = ?",
+            (reason, device["id"], device["created_at"]),
+        )
+    except Exception as exc:
+        logger.warning("Push refusal recording failed: %s", type(exc).__name__)
+
+
 def record_result(conn: sqlite3.Connection, device_id: int, result: "ApnsResult") -> None:
     """Apply a response to the registration that was actually sent to APNs."""
     try:
