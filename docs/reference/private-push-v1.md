@@ -155,7 +155,7 @@ A receiver that refuses a message shows the fixed outer alert and attaches no ta
 
 ## Other payloads under a private deployment
 
-- **Generic alert**, for a device without an encrypted enrollment: `{"aps": {"alert": {"title": <bot name>, "body": "You have new activity."}, "sound": "default", "badge": n}}`, with no `mutable-content` and no routing object.
+- **Generic alert**, for a device without an encrypted enrollment, or one whose `sender_key_id` is not the current signing key: `{"aps": {"alert": {"title": <bot name>, "body": "You have new activity."}, "sound": "default", "badge": n}}`, with no `mutable-content`, no routing object and no `apns-collapse-id`.
 - **Badge-only update**, unchanged from a plaintext deployment: priority 5, collapse ID `badge`, and only `aps.badge`.
 
 ## Test vectors
