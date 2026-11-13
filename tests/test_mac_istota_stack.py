@@ -1877,6 +1877,32 @@ class TestRestore:
         assert "istota-stack restore" in result.stderr
         assert ["systemctl", "enable", "--now", "istota-stack"] not in made.vm_calls()
 
+    def test_no_start_restores_and_leaves_the_stack_stopped(self, made):
+        """A restored database holds working credentials, so an operator who
+        wants to block the VM's egress first needs the stack not to start, and
+        not to start either when the VM next boots."""
+        made.set(check_image_rcs=[2])
+        result = made.run("restore", "--no-start", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert ["restore"] in made.stack_calls()
+        vm = made.vm_calls()
+        restore = vm.index(["istota-stack", "restore"])
+        assert ["systemctl", "enable", "--now", "istota-stack"] not in vm
+        assert restore < vm.index(["systemctl", "disable", "istota-stack"])
+        calls = made.stack_calls()
+        assert not any(c[:1] == ["update"] for c in calls[calls.index(["restore"]):]), calls
+        assert not any(c[:1] in (["up"], ["local-layers"]) for c in calls), calls
+        out = result.stdout + result.stderr
+        assert "istota-stack up" in out and "istota-stack create" in out
+
+    def test_no_start_is_not_passed_to_the_vm(self, made):
+        result = made.run("restore", "--no-start", "--date", BACKUP_DATE, stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert ["restore", "--date", BACKUP_DATE] in made.stack_calls()
+
+    def test_the_usage_names_no_start(self, made):
+        assert "--no-start" in made.run("--help").stdout
+
     def test_a_restored_config_that_needs_claude_code_gets_its_rebuild(self, made):
         made.set(check_image_rcs=[2])
         result = made.run("restore", stdin="istota\n")
