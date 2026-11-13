@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.49.0] - 2026-11-13
+
 Group members can now change their group's files: upload, make folders, edit text files and delete from Files or the group's Shared files card, which also lists recent changes. iPhone push notifications can keep their content from Apple, with the phone decrypting the preview itself. Istota also ships a worldview, the positions it judges from, as an optional prompt layer that is on by default.
 
 With full Nextcloud integration the daemon now reads your files only after they change, and the scheduler, feeds poll and status file make far fewer requests. The daily backup stops downloading old snapshots from the mount. This release has 48 commits, against 474 in 0.48.0 and 562 in 0.47.0; the rest are fixes to the Mac CLI's release checks, `istota-stack reclaim`, the browser's Chrome version and the Money overview.
@@ -3509,7 +3511,8 @@ Breaking changes this release:
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://github.com/istota-project/istota/compare/v0.48.0...main
+[Unreleased]: https://github.com/istota-project/istota/compare/v0.49.0...main
+[0.49.0]: https://github.com/istota-project/istota/releases/tag/v0.49.0
 [0.48.0]: https://github.com/istota-project/istota/releases/tag/v0.48.0
 [0.47.0]: https://github.com/istota-project/istota/releases/tag/v0.47.0
 [0.46.0]: https://github.com/istota-project/istota/releases/tag/v0.46.0
