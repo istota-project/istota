@@ -388,7 +388,7 @@ wait_for_mount_uploads() {
 
 use_apt_mirror "$(host_env APT_MIRROR)" "${STACK}/.apt-mirror" ""
 use_apt_snapshot "$(host_env APT_SNAPSHOT)" /etc/apt/apt.conf.d/50istota-snapshot
-apt_install ca-certificates curl git python3 iptables apparmor apparmor-utils openssl
+apt_install ca-certificates curl git python3 iptables nftables apparmor apparmor-utils openssl
 
 if [ ! -f /etc/apt/sources.list.d/docker.sources ]; then
     install -m 0755 -d /etc/apt/keyrings
@@ -579,10 +579,11 @@ cmp -s "${HERE}/istota-stack" /usr/local/sbin/istota-stack || stack_command_chan
 install -m 0755 "${HERE}/istota-stack" /usr/local/sbin/istota-stack
 install -m 0755 "${HERE}/istota" /usr/local/bin/istota
 install -m 0755 "${HERE}/istota-devbox-egress.sh" /usr/local/sbin/istota-devbox-egress
+install -m 0755 "${HERE}/istota-egress-hold.sh" /usr/local/sbin/istota-egress-hold
 install -m 0755 "${HERE}/istota-browser-watchdog.sh" /usr/local/sbin/istota-browser-watchdog
 install -m 0755 "${HERE}/istota-certbot" /usr/local/sbin/istota-certbot
 mount_unit_changed=""
-for unit in istota-stack.service istota-devbox-egress.service \
+for unit in istota-stack.service istota-devbox-egress.service istota-egress-hold.service \
         istota-browser-grants.service istota-browser-grants.timer \
         istota-browser-watchdog.service istota-browser-watchdog.timer \
         istota-certbot.service istota-certbot.timer mount-nextcloud.service \
@@ -673,7 +674,13 @@ if [ "$(host_env INGRESS)" = "proxied" ] && [ "$(host_env TLS_CERT_SOURCE)" = "s
     ensure_self_signed_cert "${STACK}/certs" "$(host_env DOMAIN)" "$(host_env LISTEN_ADDR)"
 fi
 
-# --- Firewall: devbox egress, the proxied listener, the host's loopback ------
+# --- Firewall: the egress hold, devbox egress, the proxied listener, the host's loopback
+# The hold's unit is required by docker.service, so restarting it would restart
+# dockerd and the stack: it is started (a no-op once active) and the script is
+# run itself, which replaces the table in one step and leaves a held stack held.
+systemctl enable istota-egress-hold.service >/dev/null
+systemctl start istota-egress-hold.service
+/usr/local/sbin/istota-egress-hold apply
 systemctl enable istota-devbox-egress.service >/dev/null
 systemctl restart istota-devbox-egress.service
 systemctl enable --now istota-browser-grants.timer >/dev/null

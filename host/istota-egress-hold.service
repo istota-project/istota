@@ -1,0 +1,21 @@
+[Unit]
+Description=Istota egress hold: a restored stack's containers kept off the network
+# Before dockerd, which starts every restart: unless-stopped container itself,
+# so the table is in before any of them can open a connection. After
+# nftables.service, whose ruleset load starts with a flush. Required by docker:
+# a hold that fails stops dockerd starting rather than letting the containers
+# out. So never restart this unit (that restarts docker); provision.sh and
+# istota-stack run the script itself, which replaces the table in one step.
+DefaultDependencies=no
+After=local-fs.target nftables.service
+Before=docker.service network-pre.target
+Wants=network-pre.target
+RequiresMountsFor=/srv/app/istota
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/istota-egress-hold apply
+
+[Install]
+RequiredBy=docker.service

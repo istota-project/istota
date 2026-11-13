@@ -44,7 +44,8 @@
 #                               a new VM from the folder's backups and the Keychain's
 #                               key, the old VM deleted first; --force restores an
 #                               empty database snapshot; --no-start leaves the stack
-#                               stopped, and off at the VM's next boot
+#                               stopped, off at the VM's next boot, and held off the
+#                               network until `istota-stack hold off`
 #   istota-stack import-standalone [--from DIR] [--config FILE] [--dry-run] [create's options]
 #                               move a standalone install (~/.istota) into a new VM: its
 #                               databases, files, settings and keys; ~/.istota is left as it is
@@ -1650,6 +1651,14 @@ cmd_restore() {
     local restore=(restore)
     [ -z "$date" ] || restore+=(--date "$date")
     [ -z "$force" ] || restore+=(--force)
+    # The hold goes in inside the VM, before anything can start the stack,
+    # and stays across reboots; a Mac firewall cannot pick out Lima's traffic.
+    # A release from before it would read --hold as an option of the restore.
+    if [ -n "$no_start" ]; then
+        vm_stack hold </dev/null >/dev/null 2>&1 \
+            || fail "$EX_CONFIG" "the release this VM runs has no \`istota-stack hold\`, so --no-start cannot keep the restored stack off the network. Nothing was restored into the new VM: run the restore again with a later --tag, or without --no-start."
+        restore+=(--hold)
+    fi
     # printf is a builtin, so the key is on no command line.
     printf '%s\n' "$key" | run_step "restore the backups" "istota-stack ${restore[*]}" vm_stack "${restore[@]}"
     # The backup's host.env may predate the key, or name an older VM's port.
@@ -1667,8 +1676,8 @@ cmd_restore() {
         elif [ "$image_rc" -ne 0 ]; then
             log "WARNING: \`istota-stack check-image\` failed (exit ${image_rc}), so whether the image has what the restored config needs is unknown."
         fi
-        log "restored from ${folder}, with the stack stopped (--no-start). secrets/ is not in the backups: write the stack's own credentials with \`istota-stack put-files\`."
-        log "start it with \`istota-stack up\` when you are ready; once it checks out, \`istota-stack create\` starts it with the VM again."
+        log "restored from ${folder}, with the stack stopped and held off the network (--no-start). secrets/ is not in the backups: write the stack's own credentials with \`istota-stack put-files\`."
+        log "start it with \`istota-stack up\` when you are ready; once it checks out, \`istota-stack hold off\` lets it out, and \`istota-stack create\` starts it with the VM again."
         return 0
     fi
     rebuild_if_lacking

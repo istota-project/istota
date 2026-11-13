@@ -261,6 +261,9 @@ services:
       # it must carry .istota-workspace (a host folder). Empty everywhere else.
       ISTOTA_WORKSPACE_FSTYPE: ${ISTOTA_WORKSPACE_FSTYPE:-}
       ISTOTA_WORKSPACE_MARKER_REQUIRED: ${ISTOTA_WORKSPACE_MARKER_REQUIRED:-}
+      # 1 while `istota-stack hold` keeps the containers off the network, for
+      # doctor's runtime.egress_hold. Empty everywhere else.
+      ISTOTA_EGRESS_HOLD: ${ISTOTA_EGRESS_HOLD:-}
     # Credentials, one file each, mounted under /run/secrets and read into the
     # environment by `istota-secrets` after the drop, so no value is in this
     # file or in `docker inspect`. See the top-level `secrets:` below.

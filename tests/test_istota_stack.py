@@ -37,7 +37,7 @@ from pathlib import Path
 import pytest
 
 from tests.support import parity
-from tests.support.host_stubs import HeldLock, install_flock
+from tests.support.host_stubs import HeldLock, install_flock, install_nft_stub
 
 REPO = Path(__file__).resolve().parent.parent
 #: The script under test. The negative-control driver points this at a broken copy.
@@ -2100,6 +2100,169 @@ def mounted(fx) -> Fixture:
     mount.mkdir()
     (mount / ".istota-workspace").write_text("")
     return fx
+
+
+SYSTEMCTL_STUB = r"""#!/bin/bash
+printf 'systemctl %s\n' "$*" >> "$STUB_CALLS"
+case "$*" in
+  "is-active --quiet istota-stack.service") [ -n "${STUB_UNIT_ACTIVE:-}" ] ;;
+  *) exit 0 ;;
+esac
+"""
+
+
+@pytest.fixture
+def held(fx) -> Fixture:
+    """A VM with the hold's script installed, `nft` and `systemctl` stubbed."""
+    bindir = Path(fx.env["PATH"].split(":")[0])
+    install_nft_stub(bindir)
+    (bindir / "systemctl").write_text(SYSTEMCTL_STUB)
+    (bindir / "systemctl").chmod(0o755)
+    fx.env.update({
+        "ISTOTA_EGRESS_HOLD_BIN": str(REPO / "host" / "istota-egress-hold.sh"),
+        "NFT_STATE": str(fx.root / "nft-table"),
+        "NFT_CALLS": str(fx.root / "nft-calls"),
+    })
+    return fx
+
+
+class TestTheEgressHold:
+    """#946: `istota-stack hold`, the state file it keeps beside `.env`, and the
+    rules that keep a held stack from starting unheld."""
+
+    @staticmethod
+    def _state(fx: Fixture) -> Path:
+        return fx.stack / ".egress-hold"
+
+    @staticmethod
+    def _table(fx: Fixture) -> Path:
+        return Path(fx.env["NFT_STATE"])
+
+    @staticmethod
+    def _started(fx: Fixture) -> bool:
+        return any(call.endswith("up -d --remove-orphans") for call in fx.docker_calls())
+
+    def test_hold_on_writes_the_state_and_puts_the_table_in(self, held):
+        result = held.run("hold", "on", STUB_STACK_DOWN="1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert self._state(held).read_text() == "1\n"
+        assert "hook forward" in self._table(held).read_text()
+        assert held.run("hold").stdout.startswith("held:")
+        assert not self._started(held), "a stopped stack stays stopped"
+
+    def test_hold_off_clears_both(self, held):
+        assert held.run("hold", "on", STUB_STACK_DOWN="1").returncode == 0
+        result = held.run("hold", "off", STUB_STACK_DOWN="1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not self._state(held).exists()
+        assert not self._table(held).exists()
+        assert held.run("hold").stdout.strip() == "not held"
+
+    def test_a_running_stack_is_brought_up_again_on_the_change(self, held):
+        """The daemon's ISTOTA_EGRESS_HOLD, which doctor reads, follows the hold."""
+        result = held.run("hold", "on")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert self._started(held)
+
+    @pytest.mark.parametrize("unit", ["inside the unit", "unit active"])
+    def test_up_refuses_a_hold_whose_table_is_not_in(self, held, unit):
+        self._state(held).write_text("1\n")
+        env = {"ISTOTA_STACK_UNIT": "1"} if unit == "inside the unit" else {"STUB_UNIT_ACTIVE": "1"}
+        result = held.run("up", **env)
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "table is not in" in result.stderr
+        assert not self._started(held)
+
+    def test_up_refuses_a_hold_with_no_script_to_read_it(self, held):
+        self._state(held).write_text("1\n")
+        result = held.run("up", ISTOTA_STACK_UNIT="1", ISTOTA_EGRESS_HOLD_BIN=str(held.root / "nowhere"))
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert not self._started(held)
+
+    def test_a_held_up_starts_through_the_unit(self, held):
+        """So the unit's ExecStop downs the stack at a clean shutdown, and the
+        restart policy does not bring it back at the next boot."""
+        assert held.run("hold", "on", STUB_STACK_DOWN="1").returncode == 0
+        result = held.run("up")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "systemctl start istota-stack.service" in held.docker_calls()
+        assert not self._started(held), "the unit's own `up` starts the stack"
+
+    def test_an_up_on_its_callers_lock_starts_directly_while_held(self, held):
+        """update and rollback run the release's `up` on the lock they hold;
+        sent through the unit, its `up` would wait on that lock for 600 s."""
+        assert held.run("hold", "on", STUB_STACK_DOWN="1").returncode == 0
+        result = held.run("up", ISTOTA_STACK_LOCK_INHERITED="1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "systemctl start istota-stack.service" not in held.docker_calls()
+        assert self._started(held)
+
+    def test_the_held_unit_starts_the_stack_and_tells_the_daemon(self, held):
+        assert held.run("hold", "on", STUB_STACK_DOWN="1").returncode == 0
+        result = held.run("up", ISTOTA_STACK_UNIT="1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert self._started(held)
+        told = _source(held, 'docker() { echo "hold=${ISTOTA_EGRESS_HOLD}"; }; compose ps')
+        assert told.stdout.strip() == "hold=1"
+
+    def test_an_unheld_stack_tells_the_daemon_nothing(self, held):
+        told = _source(held, 'docker() { echo "hold=${ISTOTA_EGRESS_HOLD-unset}"; }; compose ps')
+        assert told.stdout.strip() == "hold="
+
+    def test_an_unheld_up_starts_directly(self, held):
+        result = held.run("up")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert self._started(held)
+        assert "systemctl start istota-stack.service" not in held.docker_calls()
+
+    def test_restore_hold_survives_the_backups_host_env(self, held):
+        """The backup's host.env replaces the live one; the hold is not in it."""
+        result = subprocess.run(
+            ["bash", str(SCRIPT), "restore", "--hold", "--date", "2026-10-10"],
+            capture_output=True, text=True, input=TestRestore.KEY + "\n",
+            env={**held.env, "STUB_STACK_DOWN": "1",
+                 "STUB_RESTORED_HOST_ENV": "STORAGE=host-folder\nINGRESS=local\n"}, timeout=60)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (held.stack / "host.env").read_text() == "STORAGE=host-folder\nINGRESS=local\n"
+        assert self._state(held).read_text() == "1\n"
+        assert "hook forward" in self._table(held).read_text()
+        run = next(call for call in held.docker_calls() if "restore-workspace" in call)
+        assert run.endswith("restore-workspace --vm-dir /vm --date 2026-10-10"), run
+
+    @pytest.mark.parametrize("failure", ["restore", "build"])
+    def test_a_restore_that_fails_part_way_stays_held(self, held, failure):
+        """The hold goes in before anything is restored: a build that fails
+        after the config is in place must not leave it unheld."""
+        env = {"STUB_STACK_DOWN": "1"}
+        if failure == "restore":
+            env["STUB_RESTORE_RC"] = "1"
+        else:
+            env.update(STUB_RESTORED_STACK_ENV="COMPOSE_PROFILES=browser\n",
+                       STUB_SERVICES="daemon\\nweb\\nnginx\\nbrowser\\n",
+                       STUB_MISSING_IMAGES="istota-browser:v0", STUB_BUILD_RC="1")
+        result = subprocess.run(
+            ["bash", str(SCRIPT), "restore", "--hold"], capture_output=True, text=True,
+            input=TestRestore.KEY + "\n", env={**held.env, **env}, timeout=60)
+        assert result.returncode != 0, result.stdout + result.stderr
+        assert self._state(held).read_text() == "1\n"
+        assert "hook forward" in self._table(held).read_text()
+
+    def test_a_plain_restore_is_not_held(self, held):
+        result = subprocess.run(
+            ["bash", str(SCRIPT), "restore"], capture_output=True, text=True,
+            input=TestRestore.KEY + "\n", env={**held.env, "STUB_STACK_DOWN": "1"}, timeout=60)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not self._state(held).exists()
+
+    def test_the_backup_copy_does_not_carry_it(self, held, mounted):
+        """A copy taken while held, restored later as an ordinary restore, must
+        not leave a production stack with no egress."""
+        assert held.run("hold", "on", STUB_STACK_DOWN="1").returncode == 0
+        copied = _source(held, "copy_stack_env_out")
+        assert copied.returncode == 0, copied.stderr
+        day = Path(held.env["ISTOTA_MOUNT_DIR"]) / "Backups" / "config" / _utc_today()
+        assert sorted(p.name for p in day.iterdir()) == ["host.env", "stack.env"]
+        assert "HOLD" not in (day / "host.env").read_text()
 
 
 class TestTheStackFilesAreCopiedOut:

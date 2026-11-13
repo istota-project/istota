@@ -296,6 +296,8 @@ if verb == "shell":
         vm["admin"] = state.get("admin", "alice")
         save()
         sys.exit(state.get("setup_rc", 0))
+    if stack[:1] == ["hold"]:
+        sys.exit(state.get("hold_rc", 0))
     if stack[:1] == ["check-image"]:
         rcs = state.get("check_image_rcs", [0])
         rc = rcs.pop(0) if rcs else 0
@@ -1884,18 +1886,36 @@ class TestRestore:
         made.set(check_image_rcs=[2])
         result = made.run("restore", "--no-start", stdin="istota\n")
         assert result.returncode == 0, result.stdout + result.stderr
-        assert ["restore"] in made.stack_calls()
+        assert ["restore", "--hold"] in made.stack_calls()
         vm = made.vm_calls()
-        restore = vm.index(["istota-stack", "restore"])
+        restore = vm.index(["istota-stack", "restore", "--hold"])
         assert ["systemctl", "enable", "--now", "istota-stack"] not in vm
         assert restore < vm.index(["systemctl", "disable", "istota-stack"])
         calls = made.stack_calls()
-        assert not any(c[:1] == ["update"] for c in calls[calls.index(["restore"]):]), calls
+        assert not any(c[:1] == ["update"] for c in calls[calls.index(["restore", "--hold"]):]), calls
         assert not any(c[:1] in (["up"], ["local-layers"]) for c in calls), calls
-        assert calls.index(["restore"]) < calls.index(["check-image"])
+        assert calls.index(["restore", "--hold"]) < calls.index(["check-image"])
         out = result.stdout + result.stderr
         assert "needs more than this VM's image has" in out
         assert "istota-stack up" in out and "istota-stack create" in out
+        assert "istota-stack hold off" in out
+
+    def test_no_start_refuses_a_release_with_no_hold(self, made):
+        """An older VM script reads --hold as a restore option and fails after
+        the old VM is gone; say why before anything is restored."""
+        made.set(hold_rc=64)
+        result = made.run("restore", "--no-start", stdin="istota\n")
+        assert result.returncode != 0
+        assert "no `istota-stack hold`" in result.stderr
+        assert not any(c[:1] == ["restore"] for c in made.stack_calls())
+
+    def test_a_restore_that_starts_the_stack_is_not_held(self, made):
+        """The hold is for a stack the operator checks before it runs; a plain
+        restore starts it at once."""
+        result = made.run("restore", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert ["restore"] in made.stack_calls()
+        assert not any("--hold" in c for c in made.stack_calls())
 
     @pytest.mark.parametrize("rc, says", [(0, None), (1, "check-image` failed (exit 1)")])
     def test_no_start_reports_the_image_check(self, made, rc, says):
@@ -1909,7 +1929,7 @@ class TestRestore:
     def test_no_start_is_not_passed_to_the_vm(self, made):
         result = made.run("restore", "--no-start", "--date", BACKUP_DATE, stdin="istota\n")
         assert result.returncode == 0, result.stdout + result.stderr
-        assert ["restore", "--date", BACKUP_DATE] in made.stack_calls()
+        assert ["restore", "--date", BACKUP_DATE, "--hold"] in made.stack_calls()
 
     def test_the_usage_names_no_start(self, made):
         assert "--no-start" in made.run("--help").stdout
