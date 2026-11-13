@@ -1258,3 +1258,83 @@ describe('the [models.aliases] editor', () => {
     ]);
   });
 });
+
+describe('backup', () => {
+  function stubDownloads() {
+    const names: string[] = [];
+    const blobs: Blob[] = [];
+    let blob: Blob | null = null;
+    // jsdom has no object URLs.
+    vi.stubGlobal(
+      'URL',
+      Object.assign(URL, {
+        createObjectURL: vi.fn((b: Blob) => {
+          blob = b;
+          return 'blob:fixture';
+        }),
+        revokeObjectURL: vi.fn(),
+      }),
+    );
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      names.push(this.download);
+      blobs.push(blob!);
+    });
+    return { names, blobs };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('downloads the saved file, not the edits the page holds', async () => {
+    const downloads = stubDownloads();
+    const saved = configView([imapHost], { raw_toml: '[email]\nimap_host = "old"\n' });
+    mount(saved);
+    await fireEvent.input(await screen.findByLabelText('imap_host'), {
+      target: { value: 'new' },
+    });
+    api.getAdminConfig.mockResolvedValue(
+      configView([imapHost], { raw_toml: '[email]\nimap_host = "saved-since"\n' }),
+    );
+    await fireEvent.click(screen.getByRole('button', { name: 'Back up configuration' }));
+    expect(await screen.findByText(/Unsaved changes are not included/)).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: 'Download' }));
+    await waitFor(() => expect(downloads.names).toHaveLength(1));
+    expect(downloads.names[0]).toMatch(/\.toml$/);
+    const text = await downloads.blobs[0].text();
+    expect(text).toContain('imap_host = "saved-since"');
+    expect(text).not.toContain('"new"');
+    expect(text.startsWith(saved.backup_limits!.config_preamble)).toBe(true);
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(screen.getByText('1 change')).toBeInTheDocument();
+  });
+
+  it('is offered on a read-only installation, and refuses secrets while a change is open', async () => {
+    api.getConfigRequest.mockResolvedValue(configRequest({ id: 21, status: 'taken' }));
+    mount(
+      configView([imapHost], {
+        editable: false,
+        applier: { kind: 'none', available: false, reason: 'No applier.' },
+      }),
+      [configRequest({ id: 21, status: 'taken' })],
+    );
+    await screen.findByText('Change #21');
+    await fireEvent.click(screen.getByRole('button', { name: 'Back up configuration' }));
+    const box = screen.getByLabelText('Include installation secrets', {
+      exact: false,
+      selector: 'input',
+    });
+    expect(box).toBeDisabled();
+    expect(screen.getByText(/waiting for the host/)).toBeInTheDocument();
+    expect(screen.queryByText(/Unsaved changes/)).toBeNull();
+  });
+
+  it('withholds the plain download when the view carries no limit', async () => {
+    mount(configView([imapHost], { backup_limits: null }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Back up configuration' }));
+    expect(screen.getByRole('button', { name: 'Download' })).toBeDisabled();
+  });
+});

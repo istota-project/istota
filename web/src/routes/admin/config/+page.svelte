@@ -21,6 +21,7 @@
   import { notifyWarning } from '@minot/ui/stores/notices';
   import { useHeaderSave } from '@minot/ui/stores/headerSave';
   import AdminsEditor from '$lib/admin/config/AdminsEditor.svelte';
+  import BackupDialog from '$lib/admin/config/BackupDialog.svelte';
   import FieldRow from '$lib/admin/config/FieldRow.svelte';
   import FieldControl from '$lib/admin/config/FieldControl.svelte';
   import HistoryList from '$lib/admin/config/HistoryList.svelte';
@@ -76,6 +77,7 @@
 
   let draft = $state<ConfigDraft>(emptyDraft());
   let reviewing = $state(false);
+  let backingUp = $state(false);
   let requestId = $state<number | null>(null);
   let pageNotice = $state('');
   let history = $state<ConfigRequest[] | null>(null);
@@ -640,7 +642,20 @@
         {#if filter.trim()}
           <span class="match-count caption num">{matchCount} matching</span>
         {/if}
+        <Button variant="secondary" class="backup-button" onclick={() => (backingUp = true)}
+          >Back up configuration</Button
+        >
       </div>
+
+      {#if backingUp}
+        <BackupDialog
+          unsaved={count > 0}
+          requestOpen={requestId !== null}
+          encryptedAvailable={!!view.backup_encrypted_available}
+          limitsAvailable={!!view.backup_limits}
+          onClose={() => (backingUp = false)}
+        />
+      {/if}
 
       {#if !filter.trim()}
         <Card title="Admins">
@@ -847,6 +862,10 @@
 
   .match-count {
     white-space: nowrap;
+  }
+
+  .config-toolbar :global(.backup-button) {
+    margin-left: auto;
   }
 
   .banner-actions {

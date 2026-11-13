@@ -87,6 +87,8 @@ export function configView(
     raw_toml: '',
     secrets: [],
     admins: { users: ['alice'], candidates: ['alice', 'bob'], read_only_reason: null },
+    backup_limits: { config_bytes: 262144, config_preamble: '# Istota configuration backup.\n\n' },
+    backup_encrypted_available: true,
     ...overrides,
   };
 }

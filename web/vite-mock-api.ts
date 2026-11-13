@@ -5064,6 +5064,39 @@ function mockAdminConfig() {
       candidates: ['alice', 'bob', 'carol', 'dave'],
       read_only_reason: null,
     },
+    backup_limits: {
+      config_bytes: 256 * 1024,
+      config_preamble:
+        '# Istota configuration backup.\n' +
+        '# Credentials are replaced by "<unchanged>"; database-backed settings and\n' +
+        '# environment overrides are not in this file.\n\n',
+    },
+    backup_encrypted_available: true,
+  };
+}
+
+/** Stand-in bytes: the mock has no KDBX writer, only the response's shape. */
+function mockConfigBackup() {
+  const stamp = new Date()
+    .toISOString()
+    .replace(/\.\d{3}Z$/, 'Z')
+    .replace(/[-:]/g, '');
+  return {
+    filename: `istota-config-${stamp}.kdbx`,
+    file: btoa('mock encrypted backup'),
+    password: 'mock-backup-password-correct-horse',
+    summary: {
+      file_credentials: 3,
+      inline_credentials: 1,
+      omissions: [
+        {
+          category: 'environment',
+          name: 'istota_brave_api_key',
+          reason: 'supplied outside the saved configuration',
+        },
+      ],
+      secrets_dir_available: true,
+    },
   };
 }
 
@@ -5579,6 +5612,7 @@ function configEditorHandler({ url, method, body }: MockReq): unknown | undefine
   if (url === '/istota/api/admin/config/preview' && method === 'POST') {
     return mockConfigPreview(body);
   }
+  if (url === '/istota/api/admin/config/backup' && method === 'POST') return mockConfigBackup();
   if (url === '/istota/api/admin/config/requests' && method === 'POST') {
     return mockConfigSubmit(body);
   }

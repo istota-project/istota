@@ -825,6 +825,34 @@ export interface AdminConfigView {
   model_catalogue?: ConfigModelCatalogue | null;
   /** `candidates`: every user with a live sign-in identity, who may be picked. */
   admins: { users: string[]; candidates?: string[]; read_only_reason: string | null };
+  /** The server's limit on a backup's configuration, in UTF-8 bytes counting
+   *  `config_preamble`, which heads the plain download. Absent from an older
+   *  server, and then the plain download is not offered. */
+  backup_limits?: { config_bytes: number; config_preamble: string } | null;
+  /** Whether this server can write the encrypted backup (the vault extra). */
+  backup_encrypted_available?: boolean;
+}
+
+/** A credential the encrypted backup does not hold, and why; never a value. */
+export interface ConfigBackupOmission {
+  category: string;
+  name: string;
+  reason: string;
+}
+
+export interface ConfigBackupExport {
+  filename: string;
+  /** Base64 of the encrypted KDBX file. */
+  file: string;
+  /** The generated password that opens it, shown once. */
+  password: string;
+  summary: {
+    file_credentials: number;
+    inline_credentials: number;
+    omissions: ConfigBackupOmission[];
+    /** False when this installation has no deployment secret files to read. */
+    secrets_dir_available: boolean;
+  };
 }
 
 export type ConfigOp =
@@ -920,7 +948,7 @@ export class ConfigChangeError extends Error {
 
 /** Outside `apiFetch` because a refusal's code and its extras have to reach
  *  the review dialog, and `apiFetch` keeps only the message. */
-async function configChangeWrite<T>(path: string, body: unknown): Promise<T> {
+async function configChangeWrite<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
   let resp: Response;
   try {
     resp = await fetch(`${base}/api/admin/config${path}`, {
@@ -928,8 +956,11 @@ async function configChangeWrite<T>(path: string, body: unknown): Promise<T> {
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal,
     });
-  } catch {
+  } catch (e) {
+    // A request the caller withdrew says nothing about the connection.
+    if (signal?.aborted) throw e;
     noteTransport(false, 'unreachable');
     throw new ConfigChangeError('Istota could not be reached. Nothing was sent.', 0, null);
   }
@@ -989,6 +1020,17 @@ export interface ConfigRestore {
 
 export function restoreConfigRequest(id: number): Promise<ConfigRestore> {
   return configChangeWrite<ConfigRestore>(`/requests/${id}/restore`, {});
+}
+
+/** The saved configuration and installation credentials as an encrypted
+ *  KDBX file. `keyfile` is base64 of a KeePass XML key file, or null. Needs
+ *  step-up action `admin_config_backup`; nothing is kept on the server. */
+export function exportConfigBackup(
+  keyfile: string | null,
+  step_up: StepUpProof,
+  signal?: AbortSignal,
+): Promise<ConfigBackupExport> {
+  return configChangeWrite<ConfigBackupExport>('/backup', { keyfile, step_up }, signal);
 }
 
 /** Withdraw a request the host has not taken yet. */
@@ -6084,6 +6126,7 @@ export type StepUpAction =
   | 'history_restore'
   | 'history_purge'
   | 'admin_config_change'
+  | 'admin_config_backup'
   | 'admin_briefing_delete'
   | 'admin_cron_delete'
   | 'admin_browser_console';
