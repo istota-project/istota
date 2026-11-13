@@ -174,7 +174,7 @@ def _signing_key(config: Config):
         key = envelope.load_signing_key(config.push.signing_key_path)
     except envelope.KeyFileError as exc:
         if not _warned_signing_key:
-            logger.warning("Private push unavailable, nothing is sent until the key can be read: %s", exc)
+            logger.warning("Private push signing key unreadable, sending only the generic alert: %s", exc)
             _warned_signing_key = True
         return None
     _warned_signing_key = False
@@ -197,8 +197,6 @@ def run_push_dispatch(config: Config) -> None:
             if not devices.any_devices(conn):
                 return
         signing_key = _signing_key(config)
-        if config.push.content == "private" and signing_key is None:
-            return
         with db.get_db(config.db_path) as conn:
             now = time.time()
             ceiling = _tick_ceiling(conn, config.push.chat_delay_seconds, now=now)

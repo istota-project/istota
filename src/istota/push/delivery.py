@@ -183,18 +183,17 @@ def build_delivery(config: Config, device: dict, logical: LogicalPush, *, now: f
     """The exact APNs body for one device.
 
     A legacy envelope that cannot fit raises ValueError, as `_fit_payload`
-    always has. A private payload that cannot be built raises DeliveryError,
-    and so does any alert on a private deployment without its signing key.
+    always has. A private payload that cannot be built raises DeliveryError.
+    A private deployment without its signing key sends every device the
+    generic alert, which needs no key and carries no text.
     """
     if logical.kind == "badge":
         return PreparedPush(_serialize({"aps": {"badge": logical.badge}}), "badge", 5, "badge", logical.badge, None)
     if config.push.content != "private":
         return PreparedPush(_serialize(legacy_payload(logical, device)), logical.group, 10, "alert",
                             logical.badge, None)
-    if signing_key is None:
-        raise DeliveryError("signing_key_unavailable")
-    sender_key_id = envelope.key_id(signing_key.public_key().public_bytes_raw())
-    if effective_content(config, device, sender_key_id) == "encrypted":
+    sender_key_id = envelope.key_id(signing_key.public_key().public_bytes_raw()) if signing_key else None
+    if signing_key is not None and effective_content(config, device, sender_key_id) == "encrypted":
         return _sealed(config, device, logical, now, signing_key)
     return PreparedPush(_generic_payload(config, logical.badge), None, 10, "alert", logical.badge, None)
 

@@ -316,11 +316,15 @@ def test_an_envelope_over_the_apns_bound_is_payload_too_large(private, monkeypat
     assert refused.value.reason == "payload_too_large"
 
 
-def test_a_private_deployment_never_builds_an_alert_without_its_key(private):
+def test_without_its_key_a_private_deployment_sends_every_device_the_generic_alert(private):
     config, signing_key, device_key = private
+    generic = {"aps": {"alert": {"title": "Istota Test", "body": "You have new activity."},
+                       "sound": "default", "badge": 3}}
     for device in (encrypted_device(signing_key, device_key), plain_device()):
-        with pytest.raises(delivery.DeliveryError):
-            delivery.build_delivery(config, device, chat_alert(), now=NOW, signing_key=None)
+        prepared = delivery.build_delivery(config, device, chat_alert(), now=NOW, signing_key=None)
+        assert json.loads(prepared.payload) == generic
+        assert prepared.collapse_id is None
+        plaintext_free(prepared.payload, prepared.collapse_id)
 
 
 def test_send_prepared_hands_apns_the_measured_bytes(private, monkeypatch):
@@ -402,17 +406,22 @@ def test_private_sweep_sends_each_device_a_plaintext_free_payload(private_sweep)
         assert all(d["last_error"] is None and d["last_badge"] == 2 for d in devices.devices_for_user(conn, ACCOUNT))
 
 
-def test_missing_signing_key_warns_once_and_leaves_pending_work(private_sweep, caplog):
+def test_missing_signing_key_warns_once_and_sends_only_the_generic_alert(private_sweep, caplog):
     from istota.notifications import store
-    config, _, _, requests, _, _ = private_sweep
+    config, _, _, requests, _, room = private_sweep
     Path(config.push.signing_key_path).unlink()
     dispatch.run_push_dispatch(config)
     dispatch.run_push_dispatch(config)
-    assert not requests
-    assert caplog.text.count("signing key") == 1
+    assert sum("signing key unreadable" in r.getMessage() for r in caplog.records) == 1
+    tokens = {r.url.path.rsplit("/", 1)[1] for r in requests}
+    assert tokens == {"cd" * 32, "ef" * 32, "ab" * 32}
+    for request in requests:
+        body = json.loads(request.content)
+        assert "istota_private" not in body and "mutable-content" not in body["aps"]
+        plaintext_free(request.content, request.headers.get("apns-collapse-id"), room.token,
+                       "Approval needed", "notification_id")
     with db.get_db(config.db_path) as conn:
-        assert len(store.take_pending_pushes(conn)) == 1
-        assert conn.execute("SELECT last_pushed_message_id FROM push_state").fetchone()[0] == 0
+        assert store.take_pending_pushes(conn) == []
 
 
 def test_a_refused_seal_is_recorded_and_the_next_device_still_gets_its_alerts(private_sweep, caplog):
