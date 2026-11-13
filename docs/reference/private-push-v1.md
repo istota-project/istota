@@ -126,7 +126,7 @@ signature = Ed25519.Sign(sender_private_key, signed)                   -- 64 byt
 
 The AAD is empty; the header is bound through `info` and the signature. `sealed` is 32 bytes of `enc`, then the ciphertext, which is the padded plaintext plus a 16-byte AES-GCM tag. Its length is therefore 560, 1072, 1584 or 2096 bytes.
 
-In Python this is `Suite(KEM.X25519, KDF.HKDF_SHA256, AEAD.AES_128_GCM).encrypt(padded, device_public_key, info=info)` from `cryptography.hazmat.primitives.hpke` (cryptography 47 or later), which returns `enc || ciphertext`. On iOS, CryptoKit's `HPKE.Recipient(privateKey:ciphersuite:info:encapsulatedKey:)` with the first 32 bytes of `sealed` as the encapsulated key and the rest as the ciphertext is expected to open it; that has not yet been run against the vectors, and the iOS app's first stage records the result here.
+In Python this is `Suite(KEM.X25519, KDF.HKDF_SHA256, AEAD.AES_128_GCM).encrypt(padded, device_public_key, info=info)` from `cryptography.hazmat.primitives.hpke` (cryptography 47 or later), which returns `enc || ciphertext`. On iOS (17 and later), CryptoKit's `HPKE.Recipient(privateKey:ciphersuite:info:encapsulatedKey:)` opens it with the first 32 bytes of `sealed` as the encapsulated key, the rest as the ciphertext and empty AAD; every vector was opened this way on the iOS 26.5 Simulator. CryptoKit has no predefined suite for this combination, so it is built as `HPKE.Ciphersuite(kem: .Curve25519_HKDF_SHA256, kdf: .HKDF_SHA256, aead: .AES_GCM_128)`.
 
 ## Sealing
 
