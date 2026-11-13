@@ -577,10 +577,16 @@ class TestTheEncryptedLayout:
         assert caught.value.code == "keyfile_invalid"
 
     def test_the_finished_file_is_held_to_the_import_cap(self, install, cheap, monkeypatch):
-        from istota.credentials import kdbx_import
+        from istota.credentials import kdbx_export, kdbx_import
 
         bundle = _full_bundle(install)
-        size = len(_export(bundle, cheap))
+        first = _export(bundle, cheap)
+        size = len(first)
+        # Two exports of one bundle differ in size by a few bytes, so every
+        # later export is given the first one's bytes.
+        monkeypatch.setattr(kdbx_export, "serialize", lambda kp: first)
+        monkeypatch.setattr(kdbx_import, "VAULT_READ_CAP_BYTES", size)
+        assert _export(bundle, cheap) == first
         monkeypatch.setattr(kdbx_import, "VAULT_READ_CAP_BYTES", size - 1)
         with pytest.raises(BackupError) as caught:
             _export(bundle, cheap)
