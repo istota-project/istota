@@ -182,6 +182,10 @@ istota_apns_key_file: ""
 # Set enabled, apns_key_id, apns_team_id and apns_topic. The file path is fixed
 # at /data/config/apns/AuthKey.p8 inside the container.
 istota_push_config: {}
+# True for one run creates a new private push signing key when the config
+# already uses one and both key files are gone. Every enrolled device then
+# enrolls again; restoring the pair from a backup avoids that.
+istota_push_replace_signing_key: false
 
 # --- Admins ------------------------------------------------------------------
 # User ids, one per line of /srv/app/istota/config/admins. Empty leaves the

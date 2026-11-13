@@ -63,6 +63,14 @@
       diff: false
       changed_when: false
 
+    - name: Stage consent to replace a lost push signing key
+      ansible.builtin.copy:
+        content: ""
+        dest: "{{ _istota_push_stage.path }}/replace-signing-key"
+        mode: "0444"
+      when: istota_push_replace_signing_key | bool
+      changed_when: false
+
     - name: Apply push settings and restart when changed
       ansible.builtin.command:
         argv:
@@ -76,6 +84,11 @@
       changed_when: _istota_push_applied.rc == 2
       failed_when: _istota_push_applied.delta is not defined or _istota_push_applied.rc not in [0, 2]
       no_log: true
+  rescue:
+    # The apply task is no_log, so its refusal would otherwise read only "censored".
+    - name: Report the push configuration failure
+      ansible.builtin.fail:
+        msg: "{{ (_istota_push_applied.stderr | default('', true)) or 'Push deployment failed before the helper reported a reason; see the failed task above.' }}"
   always:
     - name: Remove the push staging directory
       ansible.builtin.file:

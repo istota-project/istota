@@ -14,12 +14,13 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 from istota import apply
 from istota.config import PushConfig
+from istota.lib.atomic_write import write_bytes_atomic
 from istota.push import envelope
 from istota.settings_plan import engine
 from istota.settings_plan.schema import parse_plan
 
 
-def configure(config_path, settings, key_data):
+def configure(config_path, settings, key_data, *, replace_signing_key=False):
     allowed = {field.name for field in dataclasses.fields(PushConfig)} - {"apns_key_path"}
     if not isinstance(settings, dict) or set(settings) - allowed:
         raise ValueError("Unknown push setting")
@@ -32,7 +33,10 @@ def configure(config_path, settings, key_data):
         raise ValueError("Missing APNs topic")
     if importlib.util.find_spec("h2") is None:
         raise ValueError("The deployed image lacks HTTP/2 support")
-    key = serialization.load_pem_private_key(key_data, password=None)
+    try:
+        key = serialization.load_pem_private_key(key_data, password=None)
+    except (ValueError, TypeError):
+        raise ValueError("The APNs key is not an unencrypted PEM key") from None
     if not isinstance(key, ec.EllipticCurvePrivateKey) or not isinstance(key.curve, ec.SECP256R1):
         raise ValueError("APNs requires a P-256 signing key")
     key_dir = config_path.parent / "apns"
@@ -44,8 +48,16 @@ def configure(config_path, settings, key_data):
         raise ValueError("The APNs destination must not be a symlink")
     with engine.apply_lock(config_path):
         document = tomllib.loads(config_path.read_text())
-        document["push"] = {**document.get("push", {}), **settings, "apns_key_path": str(key_path)}
+        live = dict(document.get("push", {}))
+        document["push"] = {**live, **settings, "apns_key_path": str(key_path)}
         signing_key = _signing_key_path(config_path, document["push"])
+        repairs = set()
+        if signing_key is not None:
+            repairs = _signing_key_repairs(signing_key)
+            was_private = (live.get("content") == "private"
+                           and str(live.get("signing_key_path", "")).strip() == str(signing_key))
+            if "create" in repairs and was_private and not replace_signing_key:
+                raise ValueError(_LOST_KEY)
         # snapshot preserves the current config-management marker.
         plan = parse_plan({"meta": {"version": 1, "source": "snapshot"}, "config": document})
         context = engine.Context(config_path, backup=10)
@@ -55,21 +67,26 @@ def configure(config_path, settings, key_data):
             info = key_path.stat()
             key_changed = (key_path.read_bytes() != key_data or stat.S_IMODE(info.st_mode) != 0o600
                            or info.st_uid != os.geteuid())
-        signing_key_missing = signing_key is not None and not _existing_signing_key(signing_key)
         try:
             if key_changed:
                 key_dir.mkdir(mode=0o700, exist_ok=True)
                 apply.write_private(key_path, key_data)
-            if signing_key_missing:
-                envelope.write_signing_key(signing_key)
+            _repair_signing_key(signing_key, repairs)
             result = engine.execute_plan(operations, context)
         except Exception:
             # A committed key replacement still needs a restart after recovery.
             return 3
-        written = key_changed or signing_key_missing
+        written = key_changed or bool(repairs)
         if result.errors:
             return 3 if written or result.changed else 1
         return 2 if written or result.changed else 0
+
+
+_LOST_KEY = (
+    "The push signing key and its .pub are missing although the config already uses them. "
+    "A new key makes every enrolled device enroll again. Restore the pair from a backup, "
+    "or set istota_push_replace_signing_key: true for one run to create a new one."
+)
 
 
 def _signing_key_path(config_path, push):
@@ -78,10 +95,10 @@ def _signing_key_path(config_path, push):
     `content = "private"` with no path gets one in the config directory, the
     only place this container may write, as the APNs key does.
     """
+    if push.get("content", "legacy") != "private":
+        return None
     path = str(push.get("signing_key_path", "")).strip()
     if not path:
-        if push.get("content", "legacy") != "private":
-            return None
         path = str(config_path.parent / "push" / "signing.pem")
         push["signing_key_path"] = path
     override = os.environ.get("ISTOTA_PUSH_SIGNING_KEY_PATH", "").strip()
@@ -93,29 +110,54 @@ def _signing_key_path(config_path, push):
     return path
 
 
-def _existing_signing_key(path):
-    """Whether a usable key pair is already there; a broken one is refused, never replaced.
+def _signing_key_repairs(path):
+    """What the key pair at `path` needs: a subset of create, public and chmod.
 
-    Replacing a key makes every enrolled device enroll again, so that stays
+    A pair that is broken in any other way is refused, never replaced:
+    replacing a key makes every enrolled device enroll again, so that stays
     `istota push keygen --force`, an operator's deliberate step.
     """
     public = envelope.public_key_path(path)
     if not path.exists() and not public.exists():
-        return False
+        return {"create"}
+    repairs = set()
     try:
         raw = envelope.load_signing_key(path).public_key().public_bytes_raw()
-        if envelope.load_public_key(public) != raw:
+        if not public.exists():
+            repairs.add("public")
+        elif envelope.load_public_key(public) != raw:
             raise ValueError("The push public key file does not match the signing key")
     except envelope.KeyFileError as exc:
         raise ValueError(str(exc)) from None
-    return True
+    info = path.stat()
+    if info.st_uid != os.geteuid():
+        raise ValueError("The push signing key is owned by another account")
+    if stat.S_IMODE(info.st_mode) != 0o600:
+        repairs.add("chmod")
+    return repairs
+
+
+def _repair_signing_key(path, repairs):
+    if "create" in repairs:
+        envelope.write_signing_key(path)
+        return
+    if "chmod" in repairs:
+        os.chmod(path, 0o600)
+    if "public" in repairs:
+        line = envelope.public_key_line(envelope.load_signing_key(path))
+        write_bytes_atomic(envelope.public_key_path(path), line.encode("ascii"), mode=0o644, fsync=True)
 
 
 def main():
     try:
         inputs = Path(sys.argv[1])
         return configure(Path('/data/config/config.toml'), json.loads((inputs / 'settings.json').read_text()),
-                         (inputs / 'AuthKey.p8').read_bytes())
+                         (inputs / 'AuthKey.p8').read_bytes(),
+                         replace_signing_key=(inputs / 'replace-signing-key').exists())
+    except ValueError as exc:
+        # Every refusal above names a condition, never a value from a key or the config.
+        print(f'Push configuration refused: {exc}', file=sys.stderr)
+        return 1
     except Exception:
         print('Push configuration refused; check the settings, signing key and deployed push support.', file=sys.stderr)
         return 1
