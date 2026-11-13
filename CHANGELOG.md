@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On a Mac, `istota-stack update --appliance` now refuses a release older than the one the stack last ran, as `create --appliance` already did. Before, it installed the older release, whose image may not open a database the newer one had migrated.
+- On a Mac, `create`, `restore` and `update --appliance` now check which release the running VM has before they pick one, so they see a release that `istota-stack rollback` went back to. Before, the Mac still had the newer release on record: `restore` installed it again, and the downgrade check compared against it.
 - `istota-stack reclaim` no longer misses that a compose file names a volume. The check piped into `grep -q` under `pipefail`, so on a match it could read as no match, and `reclaim --apply` could then remove a volume the stack still declares.
 - The browser image installs Google's current stable Chrome on every `istota-stack update`. Before, Docker's build cache kept the Chrome from an earlier build until something else in the browser image changed, so Chrome could fall weeks behind. `istota doctor` now reports the running Chrome and warns when a newer stable release has been out for more than a week.
 - Files no longer says your tasks can read and change the All users folder from your private chat. Tasks reach it only from a room linked to All users, and its note in Files now says so.
