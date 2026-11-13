@@ -812,3 +812,108 @@ class TestTheStrictParser:
         opened["group"]["entries"][0]["history"] = 3
         opened["group"]["entries"][1]["properties"]["KPXC_DECRYPTION_TIME_PREFERENCE"] = "x"
         backup.parse_installation_backup(opened)
+
+
+class TestPlainUpload:
+    def test_a_redacted_backup_is_a_bundle_with_no_credentials(self, install):
+        gathered = _gather(install, f'[email]\nimap_host = "h"\nsmtp_password = "{SMTP_INLINE}"\n')
+        bundle = backup.read_plain_backup(gathered.config_toml.encode("utf-8"))
+        assert bundle.config_toml == gathered.config_toml
+        assert bundle.credentials == []
+
+    @pytest.mark.parametrize("data", [b"", b"  \n\t\n", b"\xff\xfe not utf-8", b"[email\n"])
+    def test_empty_malformed_or_unparsable_is_invalid(self, data):
+        with pytest.raises(BackupError) as caught:
+            backup.read_plain_backup(data)
+        assert caught.value.code == "invalid_backup"
+
+    def test_an_encrypted_file_is_not_read_as_toml(self):
+        with pytest.raises(BackupError) as caught:
+            backup.read_plain_backup(backup.KDBX_SIGNATURE + b"rest")
+        assert caught.value.code == "invalid_backup"
+
+    @pytest.mark.parametrize("text", [
+        f'[email]\nsmtp_password = "{SMTP_INLINE}"\n',
+        f'[brain.native.providers.own]\napi_key = "{OWN_KEY}"\n',
+        f'[brain.native.extra_headers]\nX-A = "{IMAP_INLINE}"\n',
+    ])
+    def test_a_real_credential_value_refuses_without_naming_it(self, text):
+        with pytest.raises(BackupError) as caught:
+            backup.read_plain_backup(text.encode("utf-8"))
+        assert caught.value.code == "plaintext_secrets"
+        _no_secret_in(str(caught.value))
+
+    def test_an_empty_credential_is_not_a_value(self):
+        backup.read_plain_backup(b'[email]\nsmtp_password = ""\n')
+
+    def test_the_configuration_limit_holds(self):
+        filler = "x" * (backup.CONFIG_MAX_BYTES - len('[email]\nimap_host = ""\n'))
+        backup.read_plain_backup(f'[email]\nimap_host = "{filler}"\n'.encode())
+        with pytest.raises(BackupError) as caught:
+            backup.read_plain_backup(f'[email]\nimap_host = "{filler}x"\n'.encode())
+        assert caught.value.code == "too_large"
+
+
+class TestCredentialStatuses:
+    def _statuses(self, install, current, files=None):
+        bundle = _full_bundle(install)
+        return {row["id"]: row for row in backup.credential_statuses(bundle, current, files or {})}
+
+    def test_new_changed_unchanged_and_host_only(self, install):
+        _write_secret(install[1], "istota_nextcloud_app_password", "nc-app-password-41")
+        rows = self._statuses(install, (
+            f'[email]\nsmtp_password = "{SMTP_INLINE}"\n\n'
+            '[brain.native.providers.own]\napi_key = "another-key"\n'
+        ), {"istota_email_imap_password": "rotated-42"})
+        assert {key: row["status"] for key, row in rows.items()} == {
+            "file:istota_email_imap_password": "changed",
+            # Unchanged through the mapped inline fallback.
+            "file:istota_email_smtp_password": "unchanged",
+            "file:istota_nextcloud_app_password": "host_only",
+            "inline:brain.native.providers.own.api_key": "changed",
+            "inline:security.credential_exports_per_day": "new",
+        }
+        assert rows["file:istota_nextcloud_app_password"]["reason"]
+        assert [key for key, row in rows.items() if row["selectable"]] == [
+            "file:istota_email_imap_password",
+            "inline:brain.native.providers.own.api_key",
+            "inline:security.credential_exports_per_day",
+        ]
+        assert rows["file:istota_email_smtp_password"]["source"] == "inline"
+        assert rows["inline:security.credential_exports_per_day"]["source"] == "inline"
+        _no_secret_in(json.dumps(rows))
+        assert "nc-app-password-41" not in json.dumps(rows)
+
+    def test_a_typed_value_compares_by_type(self, install):
+        rows = self._statuses(install, '[security]\ncredential_exports_per_day = 7.0\n')
+        assert rows["inline:security.credential_exports_per_day"]["status"] == "changed"
+        rows = self._statuses(install, '[security]\ncredential_exports_per_day = 7\n')
+        assert rows["inline:security.credential_exports_per_day"]["status"] == "unchanged"
+
+    def test_the_current_files_are_read_as_a_gather_reads_them(self, install, tmp_path):
+        _write_secret(install[1], "istota_email_imap_password", IMAP_FILE + "\n")
+        _write_secret(install[1], "istota_email_smtp_password", "\n")
+        assert backup.current_secret_files(install[1]) == {"istota_email_imap_password": IMAP_FILE}
+        assert backup.current_secret_files(tmp_path / "absent") == {}
+        (install[1] / "istota_email_smtp_password").unlink()
+        (install[1] / "istota_email_smtp_password").symlink_to(install[1] / "istota_email_imap_password")
+        with pytest.raises(BackupError) as caught:
+            backup.current_secret_files(install[1])
+        assert caught.value.code == "unreadable_secret"
+
+
+class TestRestoreDigests:
+    def test_the_input_digest_binds_bytes_format_flag_and_selection(self):
+        base = backup.restore_input_digest(b"a", fmt="kdbx", restore_config=True, selected=["x", "y"])
+        assert base == backup.restore_input_digest(b"a", fmt="kdbx", restore_config=True, selected=["y", "x"])
+        for other in (
+            backup.restore_input_digest(b"b", fmt="kdbx", restore_config=True, selected=["x", "y"]),
+            backup.restore_input_digest(b"a", fmt="toml", restore_config=True, selected=["x", "y"]),
+            backup.restore_input_digest(b"a", fmt="kdbx", restore_config=False, selected=["x", "y"]),
+            backup.restore_input_digest(b"a", fmt="kdbx", restore_config=True, selected=["x"]),
+        ):
+            assert other != base
+
+    def test_the_preview_digest_is_canonical(self):
+        assert backup.preview_digest({"a": 1, "b": [1, "é"]}) == backup.preview_digest({"b": [1, "é"], "a": 1})
+        assert backup.preview_digest({"a": 1}) != backup.preview_digest({"a": 2})

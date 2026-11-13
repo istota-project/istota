@@ -21,6 +21,10 @@ worker (`credentials/kdbx_worker.py`), behind the installation-wide decrypt
 slot; `parse_installation_backup` is the strict reading of what the worker
 returns.
 
+A restore reads an upload with `read_plain_backup` or `open_installation_backup`,
+shows each credential through `credential_statuses` and ties the reviewed
+preview to its submit with `restore_input_digest` and `preview_digest`.
+
 `destination_refusal` is the one exclusion and destination policy, applied on
 gather and on import; `validate_bundle` is the one set of size limits, applied
 to a gathered bundle and to a parsed upload. Credential values are never in a
@@ -635,6 +639,156 @@ def restore_change_set(
     except toml_write.TomlWriteError as exc:
         raise ChangeError(f"the restored document cannot be written: {exc}") from None
     return {"base_digest": base_digest, "ops": [], "raw": raw, "secrets": file_secrets}, warnings
+
+
+# --- a restore's inputs and what it shows -------------------------------------
+
+#: The first eight bytes of a KDBX file (KeePass 2.x signature).
+KDBX_SIGNATURE = b"\x03\xd9\xa2\x9a\x67\xfb\x4b\xb5"
+
+
+def read_plain_backup(data: bytes) -> Bundle:
+    """An uploaded plain TOML backup, as a bundle with no credentials.
+
+    Refuses an empty or whitespace-only file rather than read it as a reset,
+    text that is not UTF-8 TOML, and a file holding a real credential value at
+    any secret path (`secrets.extract_inline_secrets`, the one predicate): a
+    plain upload must not become a change set carrying a pasted secret.
+    """
+    from istota.config_editor import edits
+
+    if data.startswith(KDBX_SIGNATURE):
+        raise _invalid("This is an encrypted backup; restore it as one.")
+    if len(data) > CONFIG_MAX_BYTES:
+        raise _too_large("configuration", CONFIG_MAX_BYTES)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _invalid("The file is not UTF-8 text.") from None
+    if not text.strip():
+        raise _invalid("The file is empty.")
+    try:
+        document = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        raise _invalid("The file is not a TOML configuration.") from None
+    _, held = secrets.extract_inline_secrets(document)
+    if any(edits._holds_value(value) for value in held.values()):
+        raise BackupError(
+            "plaintext_secrets",
+            "This file holds credential values in plain text. Restore an encrypted backup, "
+            "or enter the credentials in the editor.",
+        )
+    bundle = Bundle(config_toml=text)
+    validate_bundle(bundle)
+    return bundle
+
+
+def current_secret_files(secrets_dir: Path) -> dict[str, str]:
+    """What each secret file a backup may restore holds now, nonempty only,
+    read as a gather reads it. Feeds `credential_statuses` and
+    `restore_change_set(current_files=...)`."""
+    found: dict[str, str] = {}
+    for name in _gathered_names():
+        value = _file_value(_read_secret_file(secrets_dir, name), name)
+        if value:
+            found[name] = value
+    return found
+
+
+def _same(now: Any, value: Any) -> bool:
+    return type(now) is type(value) and now == value
+
+
+def _current_value(
+    credential: FileCredential | InlineCredential, current: dict, current_files: Mapping[str, str],
+) -> Any:
+    """The value this installation uses now at the credential's destination,
+    or None. A secret file credential falls back to its mapped inline value,
+    as the launcher and a gather do."""
+    from istota.config_editor import edits, schema
+    from istota.config_editor.handoff import HandoffError, secret_file_text
+
+    if isinstance(credential, InlineCredential):
+        found, value = secrets.lookup(current, credential.path)
+        return value if found and edits._holds_value(value) else None
+    if credential.target in current_files:
+        return current_files[credential.target]
+    paths = {name: path for path, name in schema.file_credentials().items()}
+    path = paths.get(credential.target)
+    if path is None:
+        return None
+    found, inline = secrets.lookup(edits.normalized(current), path)
+    if not found or not edits._holds_value(inline):
+        return None
+    try:
+        return secret_file_text(secrets.label(path), credential.target, inline)
+    except HandoffError:
+        return None
+
+
+def credential_statuses(
+    bundle: Bundle, current_text: str, current_files: Mapping[str, str],
+) -> list[dict]:
+    """Each credential the backup holds, as a restore preview shows it: its
+    destination id, name, kind, source and status (`new`, `changed`,
+    `unchanged` or `host_only`). Never a value. Only `new` and `changed`
+    entries are selectable."""
+    from istota.config_editor.edits import UNREADABLE_CONFIG, ChangeError
+
+    try:
+        current = tomllib.loads(current_text)
+    except tomllib.TOMLDecodeError:
+        raise ChangeError(UNREADABLE_CONFIG) from None
+    rows = []
+    for credential in sorted(bundle.credentials, key=lambda item: item.destination):
+        reason = host_only_reason(credential)
+        if reason is not None:
+            status = "host_only"
+        else:
+            now = _current_value(credential, current, current_files)
+            if now is None:
+                status = "new"
+            elif _same(now, credential.value):
+                status = "unchanged"
+            else:
+                status = "changed"
+        is_file = isinstance(credential, FileCredential)
+        rows.append({
+            "id": credential.destination,
+            "kind": "file" if is_file else "inline",
+            "name": _file_title(credential) if is_file else secrets.label(credential.path),
+            "source": credential.source if is_file else "inline",
+            "status": status,
+            "reason": reason,
+            "selectable": status in ("new", "changed"),
+        })
+    return rows
+
+
+def _canonical(value: Any) -> bytes:
+    return json.dumps(
+        value, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")
+
+
+def restore_input_digest(
+    data: bytes, *, fmt: str, restore_config: bool, selected: Collection[str],
+) -> str:
+    """What a restore preview was made from: the uploaded bytes, the format,
+    whether the configuration is restored and the selected destinations. Never
+    the password or key file. A consistency check, not an authorization."""
+    return hashlib.sha256(_canonical({
+        "file": hashlib.sha256(data).hexdigest(),
+        "format": fmt,
+        "restore_config": bool(restore_config),
+        "selected": sorted(set(selected)),
+    })).hexdigest()
+
+
+def preview_digest(public: Any) -> str:
+    """The sha256 of a restore preview's public fields, canonically encoded,
+    so a submit can tell the preview it rebuilt from the one reviewed."""
+    return hashlib.sha256(_canonical(public)).hexdigest()
 
 
 # --- the encrypted backup -----------------------------------------------------

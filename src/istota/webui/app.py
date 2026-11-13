@@ -6059,55 +6059,79 @@ async def admin_config_submit(
     request, the typed confirmations and step-up, which is redeemed last so a
     refusal the admin must fix first does not spend their code.
     """
-    from istota.config_editor import applier, edits
-    from istota.config_editor import requests as config_requests
-    from istota.credentials import store as credential_store
-
     user_id = user["username"]
     try:
         body = await _read_config_change_body(request)
         await _require_config_identity(user_id)
-        found = applier.detect(_config)
-        if not found["available"]:
-            raise _ConfigRefusal(409, "no_applier", found["reason"])
+        _require_config_applier()
         config_path, text, digest = await _current_config_file()
         _check_base_digest(body, digest)
         preview = await _preview_config_change(user_id, body, text)
-        if preview.blocked:
-            raise _ConfigRefusal(400, "invalid_change", "The change has problems to fix first.",
-                                 errors=preview.errors, problems=preview.blocking)
-        if not preview.changed:
-            raise _ConfigRefusal(400, "invalid_change", "The change set changes nothing.",
-                                 errors=["the change set changes nothing"], problems=[])
-        await _check_managed(config_path, preview)
-        open_id = await asyncio.to_thread(_open_config_request_id)
-        if open_id is not None:
-            raise _ConfigRefusal(409, "request_open", "A change is already waiting for the host.", id=open_id)
-        confirmed = body.get("confirm") or []
-        if not isinstance(confirmed, list) or not all(isinstance(item, str) for item in confirmed):
-            raise _ConfigRefusal(400, "invalid_change", "confirm is not a list of keys.",
-                                 errors=["confirm is not a list of keys"], problems=[])
-        unconfirmed = sorted(set(preview.risky_keys) - set(confirmed))
-        if unconfirmed:
-            raise _ConfigRefusal(409, "confirm_required", "Confirm the risky changes first.", keys=unconfirmed)
-        refusal = await _require_step_up(request, body, "admin_config_change")
-        if refusal is not None:
-            return refusal
-        try:
-            request_id = await asyncio.to_thread(_create_config_request, preview, user_id, digest)
-        except config_requests.RequestOpen as exc:
-            raise _ConfigRefusal(409, "request_open", "A change is already waiting for the host.", id=exc.id) from None
-        except credential_store.SecretKeyMissingError:
-            raise _ConfigRefusal(
-                503, "secret_key_unavailable",
-                "The credential master key is not available to the web process, so the change "
-                "cannot be stored.",
-            ) from None
+        return await _submit_config_preview(
+            request, body, preview, user_id=user_id, config_path=config_path, digest=digest,
+        )
     except _ConfigRefusal as refusal:
         return refusal.response()
+
+
+def _require_config_applier() -> None:
+    from istota.config_editor import applier
+
+    found = applier.detect(_config)
+    if not found["available"]:
+        raise _ConfigRefusal(409, "no_applier", found["reason"])
+
+
+async def _submit_config_preview(
+    request: Request, body: dict, preview, *, user_id: str, config_path: Path, digest: str,
+    kind: str = "admin_config_change",
+) -> JSONResponse:
+    """Store an already-built `Preview` for the host applier and touch its trigger.
+
+    The checks every config submission shares, in their order: blocked and
+    no-op refusals, managed resources, the open request, the typed
+    confirmations, then step-up, redeemed last so a refusal the admin must fix
+    first does not spend their code, and the durable row. `body` carries
+    `confirm` and `step_up`; the applier and the base digest are the caller's
+    to have checked. Raises `_ConfigRefusal`; a step-up refusal is returned.
+    """
+    from istota.config_editor import applier, edits
+    from istota.config_editor import requests as config_requests
+    from istota.credentials import store as credential_store
+
+    if preview.blocked:
+        raise _ConfigRefusal(400, "invalid_change", "The change has problems to fix first.",
+                             errors=preview.errors, problems=preview.blocking)
+    if not preview.changed:
+        raise _ConfigRefusal(400, "invalid_change", "The change set changes nothing.",
+                             errors=["the change set changes nothing"], problems=[])
+    await _check_managed(config_path, preview)
+    open_id = await asyncio.to_thread(_open_config_request_id)
+    if open_id is not None:
+        raise _ConfigRefusal(409, "request_open", "A change is already waiting for the host.", id=open_id)
+    confirmed = body.get("confirm") or []
+    if not isinstance(confirmed, list) or not all(isinstance(item, str) for item in confirmed):
+        raise _ConfigRefusal(400, "invalid_change", "confirm is not a list of keys.",
+                             errors=["confirm is not a list of keys"], problems=[])
+    unconfirmed = sorted(set(preview.risky_keys) - set(confirmed))
+    if unconfirmed:
+        raise _ConfigRefusal(409, "confirm_required", "Confirm the risky changes first.", keys=unconfirmed)
+    refusal = await _require_step_up(request, body, "admin_config_change")
+    if refusal is not None:
+        return refusal
+    try:
+        request_id = await asyncio.to_thread(_create_config_request, preview, user_id, digest)
+    except config_requests.RequestOpen as exc:
+        raise _ConfigRefusal(409, "request_open", "A change is already waiting for the host.", id=exc.id) from None
+    except credential_store.SecretKeyMissingError:
+        raise _ConfigRefusal(
+            503, "secret_key_unavailable",
+            "The credential master key is not available to the web process, so the change "
+            "cannot be stored.",
+        ) from None
     logger.info(
-        "admin_config_change admin=%s request=%d sections=[%s] keys=%d secrets=[%s] admins_changed=%s",
-        user_id, request_id, ",".join(preview.changed_sections), preview.changed_keys,
+        "%s admin=%s request=%d sections=[%s] keys=%d secrets=[%s] admins_changed=%s",
+        kind, user_id, request_id, ",".join(preview.changed_sections), preview.changed_keys,
         ",".join(sorted({edits.loggable_secret_name(name) for name in preview.secret_names})),
         preview.admins_changed,
     )
@@ -6293,6 +6317,266 @@ async def admin_config_backup(
         user_id, counts["file_credentials"], counts["inline_credentials"], counts["omissions"],
     )
     return JSONResponse(payload, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+
+# Base64 of an 8 MiB archive plus the key file and selection, with room to spare.
+_CONFIG_RESTORE_BODY_LIMIT = 12 * 1024 * 1024
+_CONFIG_RESTORE_PREVIEW_KEYS = frozenset({
+    "format", "file", "password", "keyfile", "base_digest", "restore_config", "selected",
+})
+# Separate from `_CONFIG_CHANGE_KEYS`: the ordinary edit routes take no files or passwords.
+_CONFIG_RESTORE_SUBMIT_KEYS = _CONFIG_RESTORE_PREVIEW_KEYS | {
+    "input_digest", "preview_digest", "confirm", "step_up",
+}
+_CONFIG_RESTORE_PASSWORD_MAX_CHARS = 4096
+_CONFIG_RESTORE_SELECTED_MAX_CHARS = 1024
+# An opened or read backup's refusal, keyed by `BackupError.code`.
+_CONFIG_RESTORE_STATUS = {
+    "too_large": 413,
+    "invalid_backup": 400,
+    "plaintext_secrets": 400,
+    "backup_locked": 400,
+    "keyfile_invalid": 400,
+    "vault_unavailable": 503,
+    "backup_busy": 503,
+    "backup_timeout": 503,
+    "backup_unavailable": 503,
+    "unreadable_secret": 409,
+}
+
+
+@dataclass
+class _RestoreInput:
+    fmt: str
+    data: bytes = _dc_field(repr=False)
+    password: str | None = _dc_field(repr=False)
+    keyfile: bytes | None = _dc_field(repr=False)
+    restore_config: bool
+    selected: list[str]
+
+    def digest(self) -> str:
+        from istota.config_editor import backup
+
+        return backup.restore_input_digest(
+            self.data, fmt=self.fmt, restore_config=self.restore_config, selected=self.selected,
+        )
+
+
+def _strict_base64(raw: str, max_bytes: int, refusal: _ConfigRefusal, too_large: _ConfigRefusal) -> bytes:
+    if not isinstance(raw, str) or not raw:
+        raise refusal
+    if len(raw) > 4 * math.ceil(max_bytes / 3):
+        raise too_large
+    try:
+        return base64.b64decode(raw.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, binascii.Error):
+        raise refusal from None
+
+
+def _read_restore_input(body: dict) -> _RestoreInput:
+    """A restore body's upload, unlock material and selection, checked for
+    shape only. Every refusal is fixed text; nothing uploaded is echoed."""
+    from istota.config_editor import backup
+    from istota.credentials.kdbx_import import VAULT_MAX_ENTRIES, VAULT_READ_CAP_BYTES
+
+    def invalid(detail: str) -> _ConfigRefusal:
+        return _ConfigRefusal(400, "invalid_body", detail)
+
+    fmt = body.get("format")
+    if fmt not in ("toml", "kdbx"):
+        raise invalid('format is "toml" or "kdbx".')
+    cap = backup.CONFIG_MAX_BYTES if fmt == "toml" else VAULT_READ_CAP_BYTES
+    what = "configuration" if fmt == "toml" else "encrypted file"
+    data = _strict_base64(
+        body.get("file"), cap, invalid("file is not strict base64."),
+        _ConfigRefusal(413, "too_large", f"The backup's {what} is over its limit of {cap} bytes."),
+    )
+    restore_config = body.get("restore_config", True)
+    if not isinstance(restore_config, bool):
+        raise invalid("restore_config is true or false.")
+    selected = body.get("selected") or []
+    if (
+        not isinstance(selected, list) or len(selected) > VAULT_MAX_ENTRIES
+        or not all(isinstance(item, str) and 0 < len(item) <= _CONFIG_RESTORE_SELECTED_MAX_CHARS
+                   for item in selected)
+    ):
+        raise invalid("selected is not a list of credential ids.")
+    selected = sorted(set(selected))
+    password = body.get("password")
+    raw_keyfile = body.get("keyfile")
+    if fmt == "toml":
+        if password is not None or raw_keyfile is not None or selected or not restore_config:
+            raise invalid("A plain backup restores the configuration only, with no password or credentials.")
+        return _RestoreInput(fmt, data, None, None, True, [])
+    if password is not None and (
+        not isinstance(password, str) or len(password) > _CONFIG_RESTORE_PASSWORD_MAX_CHARS
+    ):
+        raise invalid("password is not a string.")
+    keyfile = None
+    if raw_keyfile is not None:
+        keyfile_refusal = _ConfigRefusal(400, "keyfile_invalid", "The key file is not one Istota can use.")
+        keyfile = _strict_base64(raw_keyfile, 4096, keyfile_refusal, keyfile_refusal)
+    if not password and keyfile is None:
+        raise _ConfigRefusal(400, "backup_locked", "Wrong password or key file.")
+    return _RestoreInput(fmt, data, password, keyfile, restore_config, selected)
+
+
+def _restore_refusal(exc) -> _ConfigRefusal:
+    return _ConfigRefusal(_CONFIG_RESTORE_STATUS.get(exc.code, 400), exc.code, str(exc))
+
+
+async def _open_restore_bundle(inp: _RestoreInput):
+    """The upload as a bundle: a plain file read here, an encrypted one in the
+    decrypt worker behind the installation's one slot, which refuses at once
+    when busy."""
+    from istota.config_editor import backup
+
+    try:
+        if inp.fmt == "toml":
+            return backup.read_plain_backup(inp.data)
+        if not inp.data.startswith(backup.KDBX_SIGNATURE):
+            raise backup.BackupError("invalid_backup", "The file is not an encrypted Istota backup.")
+        if not backup.encrypted_backup_available():
+            raise backup.BackupError("vault_unavailable", "Install the vault extra to open encrypted backups.")
+        return await backup.open_installation_backup(
+            inp.data, password=inp.password, keyfile=inp.keyfile, db_path=_config.db_path,
+        )
+    except backup.BackupError as exc:
+        raise _restore_refusal(exc) from None
+
+
+_RESTORE_NOTES = {
+    "toml": (
+        "A plain backup restores the configuration only. It replaces the whole file, so a "
+        "setting it does not hold returns to its default; credentials stay as they are now."
+    ),
+    "kdbx": (
+        "Restoring the configuration replaces the whole file, so a setting the backup does not "
+        "hold returns to its default. Credentials you do not select stay as they are now."
+    ),
+}
+
+
+async def _build_config_restore(user_id: str, inp: _RestoreInput, text: str, digest: str):
+    """The restore's `Preview`, built server-side from the reopened upload,
+    and its public response. No decrypted value is in the response: selected
+    credentials reach the `Preview` only, which seals them on submission."""
+    from istota.config_editor import backup, edits
+
+    bundle = await _open_restore_bundle(inp)
+    try:
+        current_files = await asyncio.to_thread(
+            backup.current_secret_files, backup.deployment_secrets_dir(),
+        )
+        credentials = backup.credential_statuses(bundle, text, current_files)
+        selectable = {row["id"] for row in credentials if row["selectable"]}
+        if set(inp.selected) - selectable:
+            raise _ConfigRefusal(
+                400, "invalid_selection",
+                "The selection names a credential this restore cannot write; preview again.",
+            )
+        change_set, warnings = backup.restore_change_set(
+            bundle, text, restore_config=inp.restore_config, selected=inp.selected,
+            base_digest=digest, current_files=current_files,
+        )
+    except backup.BackupError as exc:
+        raise _restore_refusal(exc) from None
+    except edits.ChangeError as exc:
+        raise _ConfigRefusal(400, "invalid_change", "The backup cannot be restored onto this configuration.",
+                             errors=[str(exc)], problems=[]) from None
+    preview = await _preview_config_change(user_id, change_set, text, extra_problems=warnings)
+    payload = _preview_payload(preview, digest)
+    public = {
+        "preview": {key: value for key, value in payload.items() if key != "running_tasks"},
+        "credentials": credentials,
+        "note": _RESTORE_NOTES[inp.fmt],
+    }
+    return preview, {
+        "preview": payload,
+        "input_digest": inp.digest(),
+        "preview_digest": backup.preview_digest(public),
+        "credentials": credentials,
+        "note": public["note"],
+    }
+
+
+async def _read_restore_body(request: Request, keys: frozenset) -> dict:
+    body = await _read_config_json(
+        request, _CONFIG_RESTORE_BODY_LIMIT, "The restore is larger than 12 MiB, or did not say its size.",
+    )
+    if set(body) - keys:
+        raise _ConfigRefusal(400, "invalid_body", "The request has a field a restore does not read.")
+    return body
+
+
+@api_router.post("/admin/config/restore/preview")
+async def admin_config_restore_preview(
+    request: Request, user: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin),
+):
+    """What restoring an uploaded backup would do, previewed.
+
+    Read-only: nothing is stored and no step-up is asked. Returns the editor's
+    preview, each credential the backup holds with its status and no value,
+    and the two digests a submit must send back. Blocking problems answer 200
+    in the body, as the ordinary preview does.
+    """
+    user_id = user["username"]
+    try:
+        body = await _read_restore_body(request, _CONFIG_RESTORE_PREVIEW_KEYS)
+        await _require_config_identity(user_id, "Restoring the configuration")
+        inp = _read_restore_input(body)
+        config_path, text, digest = await _current_config_file()
+        _check_base_digest(body, digest)
+        preview, payload = await _build_config_restore(user_id, inp, text, digest)
+        await _check_managed(config_path, preview)
+    except _ConfigRefusal as refusal:
+        logger.info("admin_config_restore_preview admin=%s result=%s", user_id, refusal.error)
+        return refusal.response()
+    logger.info(
+        "admin_config_restore_preview admin=%s result=ok credentials=%d selected=%d",
+        user_id, len(payload["credentials"]), len(inp.selected),
+    )
+    return _no_store(payload)
+
+
+@api_router.post("/admin/config/restore/requests", status_code=202)
+async def admin_config_restore_submit(
+    request: Request, user: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin),
+):
+    """Queue a reviewed restore as an ordinary config change request.
+
+    The upload and unlock material are sent again and the restore rebuilt
+    here; its input and its regenerated preview must match the digests the
+    preview returned, then every submission check runs again
+    (`_submit_config_preview`). A busy decrypt slot refuses before the step-up
+    is redeemed.
+    """
+    user_id = user["username"]
+    try:
+        body = await _read_restore_body(request, _CONFIG_RESTORE_SUBMIT_KEYS)
+        await _require_config_identity(user_id, "Restoring the configuration")
+        _require_config_applier()
+        inp = _read_restore_input(body)
+        config_path, text, digest = await _current_config_file()
+        _check_base_digest(body, digest)
+        stale = _ConfigRefusal(
+            409, "preview_changed", "The restore differs from the one reviewed. Preview it again.",
+        )
+        if body.get("input_digest") != inp.digest():
+            raise stale
+        preview, payload = await _build_config_restore(user_id, inp, text, digest)
+        if body.get("preview_digest") != payload["preview_digest"]:
+            raise stale
+        response = await _submit_config_preview(
+            request, body, preview, user_id=user_id, config_path=config_path, digest=digest,
+            kind="admin_config_restore",
+        )
+    except _ConfigRefusal as refusal:
+        logger.info("admin_config_restore admin=%s result=%s", user_id, refusal.error)
+        return refusal.response()
+    if response.status_code != 202:
+        logger.info("admin_config_restore admin=%s result=step_up_refused", user_id)
+    return response
 
 
 def _config_request_id(raw: str) -> int:
