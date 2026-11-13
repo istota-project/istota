@@ -25,9 +25,9 @@ With full Nextcloud integration the daemon now reads your files only after they 
 ### Changed
 
 - **Group members can change their group's files.** Every current member can upload, create folders, edit text files and delete in the group's folder from Files, and upload from the Shared files card. The All users folder stays admin-only. See docs/features/groups.md.
-- **The daemon reads your Nextcloud files only after they change.** It asks Nextcloud every 30 seconds what changed and follows only those folders, and the mount keeps the rest for ten minutes. An edit still reaches the bot within about a minute. `istota doctor` checks the mount's new control socket.
-- **Fewer background requests.** The feeds poll is queued only when a feed is due, only the calendar and location skills look up calendars, module jobs sync every ten minutes, and `status.json` is written on change or every five minutes. A newly enabled module's first poll can take up to ten minutes.
-- Smaller changes: recent searches are a list you move through with the arrow keys, and an invoice bank sync marked paid shows a "synced" badge.
+- **The daemon reads your Nextcloud files only after they change.** It asks Nextcloud every 30 seconds what changed and follows only those folders, and the mount keeps the rest for ten minutes. An edit still reaches the bot within about a minute.
+- **Fewer background requests.** The feeds poll is queued only when a feed is due, only the calendar and location skills look up calendars, module jobs sync every ten minutes, and `status.json` is written on change or every five minutes. A new module's first poll can take ten minutes.
+- Smaller changes: recent searches are a list you move through with the arrow keys, an invoice bank sync marked paid shows a "synced" badge, and the model catalogue adds Claude Fable 5.2 and marks Claude Sonnet 4.5 deprecated.
 
 ### Fixed
 

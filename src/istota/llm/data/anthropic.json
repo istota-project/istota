@@ -52,6 +52,31 @@
       "price_tiers": []
     },
     {
+      "id": "claude-fable-5-2",
+      "name": "Claude Fable 5.2",
+      "family": "fable",
+      "released": "2026-11-09",
+      "deprecated": false,
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "effort_map": {
+        "xhigh": "xhigh",
+        "max": "max"
+      },
+      "supports_tools": true,
+      "supports_structured_outputs": true,
+      "input_price_per_mtok": 8.0,
+      "output_price_per_mtok": 40.0,
+      "cache_read_price_per_mtok": 0.2,
+      "cache_write_price_per_mtok": 10.0,
+      "price_tiers": []
+    },
+    {
       "id": "claude-haiku-4-5",
       "name": "Claude Haiku 4.5",
       "family": "haiku",
@@ -257,7 +282,7 @@
       "name": "Claude Sonnet 4.5",
       "family": "sonnet",
       "released": "2025-09-29",
-      "deprecated": false,
+      "deprecated": true,
       "context_window": 200000,
       "max_output_tokens": 64000,
       "input": [
