@@ -487,7 +487,7 @@ Start from a new, stopped stack, and do not run setup against it: setup makes a 
 A restored stack polls mail, runs scheduled jobs and sends messages with whatever credentials work, as soon as it starts. Removing credentials is not enough, since the restored database holds working ones. Keep it quiet until you have checked it:
 
 - **On a server**, block the VM's outbound network from outside the guest (the host's firewall or the provider's network rules) before you start the stack.
-- **On a Mac** that is not possible: the new VM needs the network to install and build, and its traffic leaves through Lima on the Mac, where a firewall cannot tell it apart. After `restore --no-start`, block the containers' outbound connections inside the VM instead. Open `istota-stack shell` and run `sudo iptables -I DOCKER-USER 1 -s 172.16.0.0/12 ! -d 172.16.0.0/12 -j DROP`. This covers the stack's networks only when `docker network ls` and `docker network inspect` put them under 172.16.0.0/12. A reboot or a run of `provision.sh` drops the rule, so add it again after either.
+- **On a Mac** that is not possible: the new VM needs the network to install and build, and its traffic leaves through Lima on the Mac, where a firewall cannot tell it apart. After `restore --no-start`, block the containers' outbound connections inside the VM instead. Open `istota-stack shell` and run `sudo iptables -I DOCKER-USER 1 -s 172.16.0.0/12 ! -d 172.16.0.0/12 -j DROP`. This covers the stack's networks only when `docker network ls` and `docker network inspect` put them under 172.16.0.0/12. A reboot drops the rule, and a run of `provision.sh` (which a `create` re-run includes) puts the stack's own exceptions ahead of it, reopening DNS to Lima's gateway and the Mac ports the stack may reach; insert it again at position 1 after either. Once the stack has started, its containers come back by themselves when the VM boots, before you can add the rule again, so while the block is in place stop the stack with `istota-stack down` before you stop or restart the VM.
 
 Then start the stack (`istota-stack up`), and check from inside the daemon container that an outside address does not answer, for example `istota-stack exec python -c 'import socket; socket.create_connection(("1.1.1.1", 443), timeout=5)'`, which should time out. Lift the block only after the checks below. On a Mac, `istota-stack create` then turns the stack on at the VM's boot again, rebuilding the image first if the restored config needs Claude Code.
 
@@ -500,7 +500,7 @@ Then start the stack (`istota-stack up`), and check from inside the daemon conta
 - Look at enabled scheduled jobs, pending tasks and outgoing mail before you lift the network block. A snapshot can put a job back to before something it already did, and nothing replays or skips that work for you.
 - Keep the original backups unchanged, so a failed attempt can be repeated on another clean VM.
 
-The Mac path and the configuration-only restore were rehearsed end to end on a disposable Lima VM in November 2026. The server path has not been rehearsed yet.
+A Mac restore and the configuration-only restore were rehearsed end to end on a disposable Lima VM in November 2026, before `--no-start` existed; the `--no-start` path with the in-VM block, and the server path, have not been rehearsed yet.
 
 ## Container logs
 

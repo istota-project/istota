@@ -1892,8 +1892,19 @@ class TestRestore:
         calls = made.stack_calls()
         assert not any(c[:1] == ["update"] for c in calls[calls.index(["restore"]):]), calls
         assert not any(c[:1] in (["up"], ["local-layers"]) for c in calls), calls
+        assert calls.index(["restore"]) < calls.index(["check-image"])
         out = result.stdout + result.stderr
+        assert "needs more than this VM's image has" in out
         assert "istota-stack up" in out and "istota-stack create" in out
+
+    @pytest.mark.parametrize("rc, says", [(0, None), (1, "check-image` failed (exit 1)")])
+    def test_no_start_reports_the_image_check(self, made, rc, says):
+        made.set(check_image_rcs=[rc])
+        result = made.run("restore", "--no-start", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        out = result.stdout + result.stderr
+        assert "needs more than this VM's image has" not in out
+        assert says is None or says in out
 
     def test_no_start_is_not_passed_to_the_vm(self, made):
         result = made.run("restore", "--no-start", "--date", BACKUP_DATE, stdin="istota\n")

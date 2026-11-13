@@ -1664,6 +1664,8 @@ cmd_restore() {
         vm_stack check-image </dev/null || image_rc=$?
         if [ "$image_rc" -eq 2 ]; then
             log "the restored config needs more than this VM's image has (Claude Code, or a local layer); \`istota-stack create\` builds it, and starts the stack."
+        elif [ "$image_rc" -ne 0 ]; then
+            log "WARNING: \`istota-stack check-image\` failed (exit ${image_rc}), so whether the image has what the restored config needs is unknown."
         fi
         log "restored from ${folder}, with the stack stopped (--no-start). secrets/ is not in the backups: write the stack's own credentials with \`istota-stack put-files\`."
         log "start it with \`istota-stack up\` when you are ready; once it checks out, \`istota-stack create\` starts it with the VM again."
