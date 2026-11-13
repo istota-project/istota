@@ -30,6 +30,13 @@
   const identity = getCurrentUser();
   const profile = $derived(settings.profile);
   let devices: PushDevice[] = $state([]);
+  const contentLabels: Record<PushDevice['content'], string> = {
+    encrypted: 'Private previews',
+    generic: 'Private, no preview',
+    legacy: 'Standard previews',
+  };
+  const anyPrivate = $derived(devices.some((device) => device.content !== 'legacy'));
+  const anyStandard = $derived(devices.some((device) => device.content === 'legacy'));
   let loading = $state(true);
   let error = $state('');
   let removing: number | null = $state(null);
@@ -216,8 +223,15 @@
     <ul class="devices">
       {#each devices as device (device.id)}
         <li>
-          <div>
+          <div class="vstack" style:--vstack-gap="var(--space-1)">
             <span>iOS {device.app_version} · …{device.token_tail}</span>
+            {#if contentLabels[device.content]}<span class="caption"
+                >{contentLabels[device.content]}</span
+              >{/if}
+            {#if device.stale_key}<Alert appearance="inline" variant="warn"
+                >This server's notification key changed. Register this device again to show private
+                previews.</Alert
+              >{/if}
             {#if device.last_error}<p class="description">{device.last_error}</p>{/if}
           </div>
           <Button
@@ -234,6 +248,12 @@
         </li>
       {/each}
     </ul>
+    {#if anyPrivate}
+      <p class="description">
+        Private previews are decrypted on the phone. Apple sees only a fixed alert and the badge
+        count.
+      </p>
+    {/if}
   {:else if !error}
     <EmptyState size="sm">No devices registered.</EmptyState>
   {/if}
@@ -257,10 +277,12 @@
     <Field label="Show message previews" checkbox badge={managedBadge(profile, 'push_preview')}>
       <Checkbox bind:checked={profile.push_preview} disabled={isManaged(profile, 'push_preview')} />
     </Field>
-    <p class="description">
-      Previews send message text to Apple for display on your lock screen. Turn them off to send
-      only a generic title, badge and link.
-    </p>
+    {#if anyStandard || !anyPrivate}
+      <p class="description">
+        Standard previews send message text to Apple for display on your lock screen. Turn them off
+        to send only a generic title, badge and link.
+      </p>
+    {/if}
   {/if}
 </Card>
 
