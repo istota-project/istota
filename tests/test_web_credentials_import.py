@@ -103,3 +103,29 @@ async def test_wrong_passphrase_is_safe(signed_client, caplog):  # noqa: F811 --
     assert r.status_code == 400
     assert r.json()["field"] == "passphrase"
     assert "SENTINEL" not in r.text + caplog.text
+
+
+@pytest.mark.parametrize("suffix", ["", "/preview"])
+async def test_an_installation_backup_points_at_the_admin_page(signed_client, config, monkeypatch, suffix):  # noqa: F811
+    import hashlib
+
+    from istota.config_editor import backup
+    from istota.credentials import kdbx_export
+    from tests.support.kdbx import _template_bytes, create_database
+
+    _template_bytes()
+    monkeypatch.setattr("pykeepass.create_database", create_database)
+    bundle = backup.Bundle(config_toml=backup.CONFIG_PREAMBLE, file_credentials=[
+        backup.FileCredential("istota_email_imap_password", "file", "installation-value-41"),
+    ])
+    data = backup.build_installation_kdbx(
+        bundle, password=PASSPHRASE, keyfile=None, options=kdbx_export.ExportOptions(64, 1, 1),
+    )
+    fields = {"passphrase": PASSPHRASE}
+    if not suffix:
+        fields = {**fields, "selected": '["email_imap_password"]', "digest": hashlib.sha256(data).hexdigest()}
+    r = await signed_client.post(BASE + suffix, files=upload(data), data=fields, headers=ORIGIN)
+    assert r.status_code == 400
+    assert r.json()["detail"] == credential_read.INSTALLATION_BACKUP_REFUSAL
+    assert "installation-value-41" not in r.text
+    assert store.get_secret(config.db_path, "alice", "vault_entries", "email_imap_password") is None

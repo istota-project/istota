@@ -464,3 +464,351 @@ class TestRestoreChangeSet:
                 bundle, "", restore_config=True, selected=["file:istota_caldav_password"],
                 base_digest="d" * 64,
             )
+
+
+# --- the encrypted backup -----------------------------------------------------
+
+BACKUP_PASSWORD = "SENTINEL-backup-password-4c1d"
+TYPED_SECRET = 'typed "secret" \\ 39'
+USER_VAULT_VALUE = "user-vault-value-40"
+
+
+@pytest.fixture
+def cheap(monkeypatch):
+    """pykeepass's database at a test-sized Argon2, through the same code."""
+    from istota.credentials import kdbx_export
+    from tests.support.kdbx import _template_bytes, create_database
+
+    _template_bytes()
+    monkeypatch.setattr("pykeepass.create_database", create_database)
+    return kdbx_export.ExportOptions(64, 1, 1)
+
+
+def _full_bundle(install):
+    _write_secret(install[1], "istota_email_imap_password", IMAP_FILE)
+    return _gather(install, (
+        f'[email]\nimap_host = "imap.example.org"\nsmtp_password = "{SMTP_INLINE}"\n\n'
+        '[security]\ncredential_exports_per_day = 7\n\n'
+        f'[brain.native.providers.own]\napi_key = "{OWN_KEY}"\n'
+    ))
+
+
+def _export(bundle, cheap, keyfile=None):
+    return backup.build_installation_kdbx(bundle, password=BACKUP_PASSWORD, keyfile=keyfile, options=cheap)
+
+
+async def _open(data, db_path, password=BACKUP_PASSWORD, keyfile=None):
+    return await backup.open_installation_backup(data, password=password, keyfile=keyfile, db_path=db_path)
+
+
+def _keepass(data, keyfile=None):
+    import io
+
+    from pykeepass import PyKeePass
+
+    return PyKeePass(io.BytesIO(data), password=BACKUP_PASSWORD,
+                     keyfile=io.BytesIO(keyfile) if keyfile is not None else None)
+
+
+def _keyfile():
+    import hashlib
+
+    data = bytes(range(32))
+    digest = hashlib.sha256(data).hexdigest()[:8].upper()
+    return (
+        f'<KeyFile><Meta><Version>2.0</Version></Meta><Key><Data Hash="{digest}">'
+        f'{data.hex()}</Data></Key></KeyFile>'
+    ).encode()
+
+
+class TestTheEncryptedLayout:
+    def test_keepass_reads_the_layout_without_istota(self, install, cheap):
+        import hashlib
+
+        bundle = _full_bundle(install)
+        kp = _keepass(_export(bundle, cheap))
+        assert [group.name for group in kp.root_group.subgroups] == ["Istota installation backup"]
+        root = kp.root_group.subgroups[0]
+        assert sorted(group.name for group in root.subgroups) == ["Deployment credentials", "Inline credentials"]
+        manifest = next(entry for entry in root.entries if entry.title == "Backup manifest")
+        props = manifest.custom_properties
+        assert props["istota.format"] == "installation-backup"
+        assert props["istota.version"] == "1"
+        assert props["istota.recovery_scope"] == "configuration-and-installation-credentials"
+        assert "the original credential-store master key" in json.loads(props["istota.recovery_requires"])
+        omitted = {item["name"] for item in json.loads(props["istota.omissions"])}
+        assert {"istota_web_session_secret_key", "ISTOTA_SECRET_KEY", "ISTOTA_WEB_TOKEN_KEY"} <= omitted
+        configuration = next(entry for entry in root.entries if entry.title == "Configuration")
+        [attachment] = configuration.attachments
+        assert attachment.filename == "config.toml"
+        assert attachment.data.decode() == bundle.config_toml
+        assert props["istota.config_sha256"] == hashlib.sha256(attachment.data).hexdigest()
+        _no_secret_in(attachment.data.decode())
+        _no_secret_in(json.dumps(props))
+
+        deployment = next(group for group in root.subgroups if group.name == "Deployment credentials")
+        files = {entry.custom_properties["istota.target"]: entry for entry in deployment.entries}
+        assert files["istota_email_imap_password"].password == IMAP_FILE
+        assert files["istota_email_imap_password"].custom_properties["istota.source"] == "file"
+        assert files["istota_email_smtp_password"].password == SMTP_INLINE
+        assert files["istota_email_smtp_password"].custom_properties["istota.source"] == "inline"
+        assert files["istota_email_smtp_password"].title == "email.smtp_password (istota_email_smtp_password)"
+        inline = next(group for group in root.subgroups if group.name == "Inline credentials")
+        typed = {entry.title: entry for entry in inline.entries}
+        counter = typed["security.credential_exports_per_day"]
+        assert counter.password == "7"
+        assert counter.custom_properties["istota.value"] == "7"
+        assert counter.is_custom_property_protected("istota.value")
+        assert json.loads(counter.custom_properties["istota.path"]) == ["security", "credential_exports_per_day"]
+        assert all(not entry.history for entry in kp.entries)
+        assert len(kp.attachments) == 1
+
+    def test_a_key_file_is_required_when_given(self, install, cheap):
+        from pykeepass.exceptions import CredentialsError
+
+        data = _export(_full_bundle(install), cheap, keyfile=_keyfile())
+        with pytest.raises(CredentialsError):
+            _keepass(data)
+        _keepass(data, keyfile=_keyfile())
+
+    def test_an_invalid_key_file_refuses_before_any_work(self, install, cheap):
+        with pytest.raises(BackupError) as caught:
+            _export(_full_bundle(install), cheap, keyfile=b"not a key file")
+        assert caught.value.code == "keyfile_invalid"
+
+    def test_the_finished_file_is_held_to_the_import_cap(self, install, cheap, monkeypatch):
+        from istota.credentials import kdbx_import
+
+        bundle = _full_bundle(install)
+        size = len(_export(bundle, cheap))
+        monkeypatch.setattr(kdbx_import, "VAULT_READ_CAP_BYTES", size - 1)
+        with pytest.raises(BackupError) as caught:
+            _export(bundle, cheap)
+        assert caught.value.code == "too_large"
+        assert str(size - 1) in str(caught.value)
+
+    def test_an_oversized_bundle_refuses_before_the_key_derivation(self, cheap, monkeypatch):
+        from istota.credentials import kdbx_export
+
+        def never(**kwargs):
+            raise AssertionError("derived a key for a bundle over its limit")
+
+        monkeypatch.setattr(kdbx_export, "new_database", never)
+        with pytest.raises(BackupError) as caught:
+            _export(_bundle(_toml_of_bytes(backup.CONFIG_MAX_BYTES + 1, "a")), cheap)
+        assert caught.value.code == "too_large"
+
+
+def _at_the_limits():
+    """A bundle with the configuration and the credential aggregate each at
+    exactly its limit."""
+    def records(last: int):
+        values = ["v" * 7900] * 32 + ["v" * last]
+        return [
+            InlineCredential(("brain", "native", "providers", f"p{index:02}", "api_key"), value)
+            for index, value in enumerate(values)
+        ]
+
+    last = backup.CREDENTIALS_MAX_BYTES - len(backup.canonical_credentials(records(0)))
+    credentials = records(last)
+    assert len(backup.canonical_credentials(credentials)) == backup.CREDENTIALS_MAX_BYTES
+    config = _toml_of_bytes(backup.CONFIG_MAX_BYTES, "中")
+    assert len(config.encode()) == backup.CONFIG_MAX_BYTES
+    return _bundle(config, inline_credentials=credentials)
+
+
+class TestRoundTrip:
+    async def test_an_export_opens_and_parses_to_the_same_bundle(self, install, cheap, tmp_path):
+        bundle = _full_bundle(install)
+        opened = await _open(_export(bundle, cheap), tmp_path / "db.sqlite")
+        assert opened.config_toml == bundle.config_toml
+        assert _files(opened) == _files(bundle)
+        assert {(item.path, item.value) for item in opened.inline_credentials} == {
+            (item.path, item.value) for item in bundle.inline_credentials
+        }
+        counter = next(item for item in opened.inline_credentials if item.path[-1] == "credential_exports_per_day")
+        assert counter.value == 7 and type(counter.value) is int
+        assert opened.omissions == bundle.omissions
+        assert opened.manifest.recovery_scope == backup.RECOVERY_SCOPE
+        assert opened.secrets_dir_available is True
+        _no_secret_in(repr(opened))
+        _no_secret_in(json.dumps(opened.summary()))
+
+    async def test_an_archive_at_every_limit_opens_through_the_import_validator(self, cheap, tmp_path):
+        bundle = _at_the_limits()
+        opened = await _open(_export(bundle, cheap), tmp_path / "db.sqlite")
+        assert opened.config_toml == bundle.config_toml
+        assert opened.inline_credentials == bundle.inline_credentials
+
+    async def test_a_typed_string_with_quotes_and_backslashes_round_trips(self, cheap, tmp_path):
+        bundle = _bundle(backup.CONFIG_PREAMBLE, inline_credentials=[
+            InlineCredential(("brain", "native", "providers", "own", "api_key"), TYPED_SECRET),
+            InlineCredential(("security", "credential_exports_per_day"), True),
+        ])
+        opened = await _open(_export(bundle, cheap), tmp_path / "db.sqlite")
+        assert opened.inline_credentials == bundle.inline_credentials
+        assert type(opened.inline_credentials[1].value) is bool
+
+    async def test_a_key_file_backup_opens_only_with_it(self, install, cheap, tmp_path):
+        data = _export(_full_bundle(install), cheap, keyfile=_keyfile())
+        with pytest.raises(BackupError) as caught:
+            await _open(data, tmp_path / "db.sqlite")
+        assert caught.value.code == "backup_locked"
+        opened = await _open(data, tmp_path / "db.sqlite", keyfile=_keyfile())
+        assert _files(opened)
+
+    async def test_a_wrong_password_is_backup_locked_and_says_nothing(self, install, cheap, tmp_path):
+        with pytest.raises(BackupError) as caught:
+            await _open(_export(_full_bundle(install), cheap), tmp_path / "db.sqlite", password="wrong")
+        assert caught.value.code == "backup_locked"
+        _no_secret_in(str(caught.value))
+
+    async def test_bytes_that_are_not_keepass_are_invalid(self, tmp_path):
+        with pytest.raises(BackupError) as caught:
+            await _open(b"not a keepass file at all", tmp_path / "db.sqlite")
+        assert caught.value.code == "invalid_backup"
+
+    async def test_a_restored_inline_origin_credential_goes_to_its_secret_file(self, install, cheap, tmp_path):
+        bundle = _gather(install, f'[email]\nimap_host = "old"\nsmtp_password = "{SMTP_INLINE}"\n')
+        opened = await _open(_export(bundle, cheap), tmp_path / "db.sqlite")
+        change_set, _ = backup.restore_change_set(
+            opened, '[email]\nimap_host = "new"\n', restore_config=True,
+            selected=["file:istota_email_smtp_password"], base_digest="d",
+        )
+        assert change_set["secrets"] == {"istota_email_smtp_password": SMTP_INLINE}
+        assert SMTP_INLINE not in change_set["raw"]
+
+
+class TestTheAdminRestoreRefuses:
+    async def test_an_ordinary_user_vault(self, cheap, tmp_path):
+        from tests.support.kdbx import create_database
+
+        path = tmp_path / "user.kdbx"
+        kp = create_database(str(path), password=BACKUP_PASSWORD)
+        group = kp.add_group(kp.root_group, "istota")
+        kp.add_entry(group, "aws", "", USER_VAULT_VALUE)
+        kp.save()
+        with pytest.raises(BackupError) as caught:
+            await _open(path.read_bytes(), tmp_path / "db.sqlite")
+        assert caught.value.code == "invalid_backup"
+        assert USER_VAULT_VALUE not in str(caught.value)
+
+    async def test_an_attachment_over_the_configuration_limit(self, install, cheap, tmp_path, monkeypatch):
+        bundle = _full_bundle(install)
+        data = _export(bundle, cheap)
+        monkeypatch.setattr(backup, "CONFIG_MAX_BYTES", len(bundle.config_toml.encode()) - 1)
+        with pytest.raises(BackupError) as caught:
+            await _open(data, tmp_path / "db.sqlite")
+        assert caught.value.code == "too_large"
+
+    async def test_a_file_over_the_import_cap_before_any_decrypt(self, tmp_path, monkeypatch):
+        from istota.credentials import kdbx_import, kdbx_worker
+
+        def never(*args, **kwargs):
+            raise AssertionError("spawned a decrypt for a file over the cap")
+
+        monkeypatch.setattr(kdbx_worker, "open_group", never)
+        with pytest.raises(BackupError) as caught:
+            await _open(b"x" * (kdbx_import.VAULT_READ_CAP_BYTES + 1), tmp_path / "db.sqlite")
+        assert caught.value.code == "too_large"
+
+
+def _worker_answer(config=backup.CONFIG_PREAMBLE):
+    """A worker answer in the exported layout, to edit before parsing."""
+    import base64
+    import hashlib
+
+    manifest = _answer_entry("Backup manifest", {
+        "istota.format": "installation-backup", "istota.version": "1", "istota.entry": "manifest",
+        "istota.config_sha256": hashlib.sha256(config.encode()).hexdigest(),
+        "istota.omissions": "[]", "istota.recovery_requires": "[]",
+    })
+    configuration = _answer_entry("Configuration", {"istota.entry": "configuration"}, attachments=[
+        {"filename": "config.toml", "data": base64.b64encode(config.encode()).decode()},
+    ])
+    return {"matches": 1, "group": {
+        "name": "Istota installation backup", "entries": [manifest, configuration], "groups": [],
+    }}
+
+
+def _answer_entry(title, properties, password="", attachments=()):
+    return {"title": title, "username": "", "password": password, "url": "", "notes": "",
+            "properties": properties, "protected": [], "attachments": list(attachments), "history": 0}
+
+
+def _file_entry(target, value="v"):
+    return _answer_entry(target, {"istota.kind": "file", "istota.target": target, "istota.source": "file"}, value)
+
+
+def _inline_entry(path, value):
+    return _answer_entry("x", {"istota.kind": "inline", "istota.path": path, "istota.value": value})
+
+
+class TestTheStrictParser:
+    def test_the_minimal_layout_parses(self):
+        bundle = backup.parse_installation_backup(_worker_answer())
+        assert bundle.config_toml == backup.CONFIG_PREAMBLE and bundle.credentials == []
+
+    @pytest.mark.parametrize("change", [
+        "no_group", "two_groups", "version", "digest", "no_manifest", "two_configurations",
+        "extra_entry", "extra_attachment", "attachment_name", "unknown_group", "nested_group",
+        "forbidden_target", "unknown_target", "duplicate_target", "empty_value", "mapped_inline_path",
+        "nan_value", "table_value", "bad_toml", "manifest_attachment",
+    ])
+    def test_each_departure_refuses_the_whole_file(self, change):
+        opened = _worker_answer("a = \n" if change == "bad_toml" else "a = 1\n")
+        group = opened["group"]
+        manifest, configuration = group["entries"]
+        deployment = {"name": "Deployment credentials", "entries": [], "groups": []}
+        inline = {"name": "Inline credentials", "entries": [], "groups": []}
+        group["groups"] = [deployment, inline]
+        provider = '["brain","native","providers","o","api_key"]'
+
+        if change == "no_group":
+            opened = {"matches": 0, "group": None}
+        elif change == "two_groups":
+            opened["matches"] = 2
+        elif change == "version":
+            manifest["properties"]["istota.version"] = "2"
+        elif change == "digest":
+            manifest["properties"]["istota.config_sha256"] = "0" * 64
+        elif change == "no_manifest":
+            group["entries"] = [configuration]
+        elif change == "two_configurations":
+            group["entries"].append(configuration)
+        elif change == "extra_entry":
+            group["entries"].append(_answer_entry("notes", {}))
+        elif change == "extra_attachment":
+            deployment["entries"].append({**_file_entry("istota_email_imap_password"),
+                                          "attachments": [{"filename": "x", "data": ""}]})
+        elif change == "manifest_attachment":
+            manifest["attachments"] = [{"filename": "x", "data": ""}]
+        elif change == "attachment_name":
+            configuration["attachments"][0]["filename"] = "other.toml"
+        elif change == "unknown_group":
+            group["groups"].append({"name": "Elsewhere", "entries": [], "groups": []})
+        elif change == "nested_group":
+            deployment["groups"].append({"name": "x", "entries": [], "groups": []})
+        elif change == "forbidden_target":
+            deployment["entries"].append(_file_entry("istota_web_session_secret_key"))
+        elif change == "unknown_target":
+            deployment["entries"].append(_file_entry("../etc/passwd"))
+        elif change == "duplicate_target":
+            deployment["entries"] += [_file_entry("istota_email_imap_password")] * 2
+        elif change == "empty_value":
+            deployment["entries"].append(_file_entry("istota_email_imap_password", ""))
+        elif change == "mapped_inline_path":
+            inline["entries"].append(_inline_entry('["email","smtp_password"]', '"v"'))
+        elif change == "nan_value":
+            inline["entries"].append(_inline_entry(provider, "NaN"))
+        elif change == "table_value":
+            inline["entries"].append(_inline_entry(provider, '{"a": "b"}'))
+        with pytest.raises(BackupError) as caught:
+            backup.parse_installation_backup(opened)
+        assert caught.value.code == "invalid_backup"
+
+    def test_entry_history_and_foreign_properties_are_ignored(self):
+        opened = _worker_answer()
+        opened["group"]["entries"][0]["history"] = 3
+        opened["group"]["entries"][1]["properties"]["KPXC_DECRYPTION_TIME_PREFERENCE"] = "x"
+        backup.parse_installation_backup(opened)

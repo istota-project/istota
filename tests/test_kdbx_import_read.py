@@ -1849,3 +1849,73 @@ def test_skip_reason_vocabulary_matches_the_parser():
         credential_read.SKIP_EMPTY_VALUE, credential_read.SKIP_OVERSIZE_VALUE,
         credential_read.SKIP_UNUSABLE_OTP,
     }
+
+
+class TestAnInstallationBackupIsRefused:
+    """An installation backup carries deployment credentials. The user
+    importer refuses it before mapping, so its fallback traversal never turns
+    them into names in a user's namespace."""
+
+    def _installation_backup(self, tmp_path, *, group_name="Istota installation backup", marker=True):
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, group_name)
+        manifest = kp.add_entry(root, "Backup manifest", "", "")
+        if marker:
+            manifest.set_custom_property("istota.format", "installation-backup")
+        deployment = kp.add_group(root, "Deployment credentials")
+        kp.add_entry(deployment, "email.imap_password", "", API_KEY_VALUE)
+        kp.save()
+        return path
+
+    def test_the_reserved_group_is_refused_with_the_admin_pointer(self, tmp_path, caplog):
+        path = self._installation_backup(tmp_path, marker=False)
+        with caplog.at_level(logging.DEBUG), pytest.raises(credential_read.InstallationBackupRefused) as caught:
+            _read(path)
+        assert str(caught.value) == "Use Admin → Configuration to restore an installation backup."
+        assert API_KEY_VALUE not in caplog.text
+
+    def test_a_renamed_group_is_still_refused_by_its_marker(self, tmp_path):
+        path = self._installation_backup(tmp_path, group_name="istota")
+        with pytest.raises(credential_read.InstallationBackupRefused):
+            _read(path)
+
+    def test_the_same_file_without_either_is_an_ordinary_vault(self, tmp_path):
+        path = self._installation_backup(tmp_path, group_name="istota", marker=False)
+        read, _ = _read(path)
+        assert read.scoped
+
+    def test_preview_refuses_before_reading_the_database(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(credential_read.store, "secret_key_available", lambda: True)
+        path = self._installation_backup(tmp_path)
+
+        def never(*args, **kwargs):
+            raise AssertionError("an installation backup reached the user mapping")
+
+        monkeypatch.setattr(credential_read, "_map_groups", never)
+        with pytest.raises(credential_read.InstallationBackupRefused):
+            credential_read.preview(tmp_path / "unused.db", "alice", path.read_bytes(), PASSPHRASE)
+
+    def test_a_real_exported_backup_is_refused(self, tmp_path, monkeypatch):
+        from istota.config_editor import backup
+        from istota.credentials import kdbx_export
+        from tests.support.kdbx import _template_bytes, create_database
+
+        _template_bytes()
+        monkeypatch.setattr("pykeepass.create_database", create_database)
+        bundle = backup.Bundle(config_toml=backup.CONFIG_PREAMBLE, file_credentials=[
+            backup.FileCredential("istota_email_imap_password", "file", API_KEY_VALUE),
+        ])
+        data = backup.build_installation_kdbx(
+            bundle, password=PASSPHRASE, keyfile=None, options=kdbx_export.ExportOptions(64, 1, 1),
+        )
+        with pytest.raises(credential_read.InstallationBackupRefused):
+            parse_vault(data, PASSPHRASE)
+
+    def test_the_opener_keeps_its_error_mapping(self, tmp_path):
+        _, path = _standard_vault(tmp_path)
+        with pytest.raises(VaultLocked):
+            credential_read.open_database(path.read_bytes(), "wrong")
+        with pytest.raises(VaultCorrupt):
+            credential_read.open_database(b"not a vault", PASSPHRASE)
+        kp = credential_read.open_database(path.read_bytes(), PASSPHRASE)
+        assert not credential_read.is_installation_backup(kp)

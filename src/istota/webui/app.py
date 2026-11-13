@@ -15831,6 +15831,9 @@ async def _import_credentials(request: Request, user_id: str, *, preview_only: b
     except credential_read.VaultLocked:
         return JSONResponse({"detail": "Wrong passphrase or key file.", "field": "passphrase"},
                              status_code=400, headers=headers)
+    except credential_read.InstallationBackupRefused:
+        return JSONResponse({"detail": credential_read.INSTALLATION_BACKUP_REFUSAL},
+                            status_code=400, headers=headers)
     except credential_read.VaultCorrupt:
         return JSONResponse({"detail": "Not a KeePass file Istota can read."}, status_code=400, headers=headers)
     except credential_read.VaultLibraryMissing:

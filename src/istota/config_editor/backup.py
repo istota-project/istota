@@ -15,6 +15,12 @@ Two kinds of credential entry:
 - **inline**: any other secret leaf (`secrets.is_secret_path`) held in the
   file, restored at its path with its TOML type.
 
+`build_installation_kdbx` writes a bundle as the encrypted backup and
+`open_installation_backup` reads one back through the disposable decrypt
+worker (`credentials/kdbx_worker.py`), behind the installation-wide decrypt
+slot; `parse_installation_backup` is the strict reading of what the worker
+returns.
+
 `destination_refusal` is the one exclusion and destination policy, applied on
 gather and on import; `validate_bundle` is the one set of size limits, applied
 to a gathered bundle and to a parsed upload. Credential values are never in a
@@ -115,6 +121,8 @@ class Bundle:
     omissions: list[Omission] = dataclasses.field(default_factory=list)
     config_digest: str | None = None
     secrets_dir_available: bool = True
+    #: A parsed backup's manifest; None for a gather.
+    manifest: "Manifest | None" = None
 
     @property
     def credentials(self) -> list[FileCredential | InlineCredential]:
@@ -613,3 +621,403 @@ def restore_change_set(
     except toml_write.TomlWriteError as exc:
         raise ChangeError(f"the restored document cannot be written: {exc}") from None
     return {"base_digest": base_digest, "ops": [], "raw": raw, "secrets": file_secrets}, warnings
+
+
+# --- the encrypted backup -----------------------------------------------------
+#
+# One reserved root group holding a manifest entry, a Configuration entry with
+# the redacted `config.toml` attached, and one subgroup per credential kind.
+# Routing is by the `istota.*` properties, never by titles, which are for a
+# person reading the file in KeePassXC.
+
+FORMAT_VERSION = "1"
+MANIFEST_TITLE = "Backup manifest"
+CONFIGURATION_TITLE = "Configuration"
+CONFIG_ATTACHMENT = "config.toml"
+DEPLOYMENT_GROUP = "Deployment credentials"
+INLINE_GROUP = "Inline credentials"
+RECOVERY_SCOPE = "configuration-and-installation-credentials"
+#: What a rebuild needs beyond this file. Prerequisites, not something the
+#: exporter checked.
+RECOVERY_REQUIRES: tuple[str, ...] = (
+    "framework and module database snapshots",
+    "workspace files and the config/admins copies",
+    "the original credential-store master key",
+    "the deployment bootstrap inputs (stack.env, host.env)",
+    "a way to regain admin access",
+)
+
+_P = "istota."
+_ENTRY_ROLE = _P + "entry"
+_KIND = _P + "kind"
+_TARGET = _P + "target"
+_SOURCE = _P + "source"
+_PATH = _P + "path"
+_VALUE = _P + "value"
+
+#: The worker's bounds on a decrypted file, beside the bundle's own limits.
+#: Strings: the credential aggregate twice (an inline value is in its Password
+#: field and its typed property) plus a fixed allowance for titles, property
+#: names and the manifest. Attachments: the configuration's cap. Depth: the
+#: credential subgroups under the reserved group, nothing deeper.
+WORKER_TEXT_ALLOWANCE_BYTES = 128 * 1024
+
+
+def _worker_limits():
+    from istota.credentials.kdbx_import import VAULT_MAX_ENTRIES
+    from istota.credentials.kdbx_worker import WorkerLimits
+
+    return WorkerLimits(
+        entries=VAULT_MAX_ENTRIES,
+        depth=1,
+        text_bytes=2 * CREDENTIALS_MAX_BYTES + WORKER_TEXT_ALLOWANCE_BYTES,
+        attachment_bytes=CONFIG_MAX_BYTES,
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class Manifest:
+    """The manifest's fields, none of them a credential."""
+
+    version: str
+    created: str
+    app_version: str
+    config_sha256: str
+    recovery_scope: str
+    recovery_requires: tuple[str, ...]
+
+
+def decrypt_lock_path(db_path: Path) -> Path:
+    """The installation-wide decrypt admission anchor, beside the database:
+    every web worker shares that directory, and no sandbox binds it."""
+    return Path(db_path).parent / ".config-backup-decrypt.lock"
+
+
+def _readable(value: Any) -> str:
+    return value if isinstance(value, str) else json.dumps(value, allow_nan=False)
+
+
+def _file_title(credential: FileCredential) -> str:
+    from istota.config_editor import schema
+
+    paths = {name: path for path, name in schema.file_credentials().items()}
+    path = paths.get(credential.target)
+    return f"{secrets.label(path)} ({credential.target})" if path else credential.target
+
+
+def build_installation_kdbx(
+    bundle: Bundle, *, password: str, keyfile: bytes | None,
+    options=None, created: str | None = None,
+) -> bytes:
+    """`bundle` as a fresh encrypted KDBX file, built in memory.
+
+    The bundle is validated before the key derivation and the finished file
+    is checked against `VAULT_READ_CAP_BYTES`, the import's own cap, so an
+    export the restore would refuse is never returned.
+    """
+    from datetime import datetime, timezone
+
+    from istota import __version__
+    from istota.credentials import kdbx_export
+    from istota.credentials.kdbx_import import (
+        INSTALLATION_BACKUP_GROUP, INSTALLATION_FORMAT, INSTALLATION_FORMAT_PROPERTY,
+        VAULT_READ_CAP_BYTES,
+    )
+
+    if keyfile is not None and kdbx_export.keyfile_refusal(keyfile):
+        raise BackupError("keyfile_invalid", "The key file is not a KeePass XML key file.")
+    validate_bundle(bundle)
+    config_bytes = bundle.config_toml.encode("utf-8")
+    kp = kdbx_export.new_database(
+        password=password, keyfile=keyfile, options=options or kdbx_export.INTERACTIVE,
+    )
+    root = kp.add_group(kp.root_group, INSTALLATION_BACKUP_GROUP)
+
+    manifest = kp.add_entry(root, MANIFEST_TITLE, "", "")
+    properties = {
+        INSTALLATION_FORMAT_PROPERTY: INSTALLATION_FORMAT,
+        _P + "version": FORMAT_VERSION,
+        _ENTRY_ROLE: "manifest",
+        _P + "created": created or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        _P + "app_version": __version__,
+        _P + "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
+        _P + "omissions": json.dumps([omission.as_json() for omission in bundle.omissions]),
+        _P + "secrets_dir_available": "true" if bundle.secrets_dir_available else "false",
+        _P + "recovery_scope": RECOVERY_SCOPE,
+        _P + "recovery_requires": json.dumps(list(RECOVERY_REQUIRES)),
+    }
+    for key, value in properties.items():
+        manifest.set_custom_property(key, value)
+
+    configuration = kp.add_entry(root, CONFIGURATION_TITLE, "", "")
+    configuration.set_custom_property(_ENTRY_ROLE, "configuration")
+    configuration.add_attachment(kp.add_binary(config_bytes), CONFIG_ATTACHMENT)
+
+    if bundle.file_credentials:
+        group = kp.add_group(root, DEPLOYMENT_GROUP)
+        for credential in bundle.file_credentials:
+            entry = kp.add_entry(group, _file_title(credential), "", credential.value)
+            entry.set_custom_property(_KIND, "file")
+            entry.set_custom_property(_TARGET, credential.target)
+            entry.set_custom_property(_SOURCE, credential.source)
+    if bundle.inline_credentials:
+        group = kp.add_group(root, INLINE_GROUP)
+        for credential in bundle.inline_credentials:
+            entry = kp.add_entry(group, secrets.label(credential.path), "", _readable(credential.value))
+            entry.set_custom_property(_KIND, "inline")
+            entry.set_custom_property(_PATH, json.dumps(list(credential.path), ensure_ascii=False))
+            entry.set_custom_property(
+                _VALUE, json.dumps(credential.value, ensure_ascii=False, allow_nan=False), protect=True,
+            )
+    data = kdbx_export.serialize(kp)
+    if len(data) > VAULT_READ_CAP_BYTES:
+        raise _too_large("encrypted file", VAULT_READ_CAP_BYTES)
+    return data
+
+
+# --- reading one back ---------------------------------------------------------
+
+
+def _invalid(reason: str = "The file is not an Istota installation backup this version can restore.") -> BackupError:
+    return BackupError("invalid_backup", reason)
+
+
+def _strict_json(text: str) -> Any:
+    def refuse(_constant):
+        raise ValueError("not finite")
+
+    return json.loads(text, parse_constant=refuse)
+
+
+def _str_field(record: dict, key: str) -> str:
+    value = record.get(key)
+    if not isinstance(value, str):
+        raise _invalid()
+    return value
+
+
+def _entries_of(group: dict) -> list[dict]:
+    entries = group.get("entries")
+    if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+        raise _invalid()
+    for entry in entries:
+        if not isinstance(entry.get("properties"), dict) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in entry["properties"].items()
+        ):
+            raise _invalid()
+        if not isinstance(entry.get("attachments"), list):
+            raise _invalid()
+    return entries
+
+
+def _groups_of(group: dict) -> list[dict]:
+    groups = group.get("groups")
+    if not isinstance(groups, list) or not all(isinstance(item, dict) for item in groups):
+        raise _invalid()
+    return groups
+
+
+def _manifest(entry: dict) -> tuple[Manifest, list[Omission], bool]:
+    from istota.credentials.kdbx_import import INSTALLATION_FORMAT, INSTALLATION_FORMAT_PROPERTY
+
+    properties = entry["properties"]
+    if properties.get(INSTALLATION_FORMAT_PROPERTY) != INSTALLATION_FORMAT:
+        raise _invalid()
+    if properties.get(_P + "version") != FORMAT_VERSION:
+        raise _invalid("The backup's format version is not one this version of Istota can restore.")
+    try:
+        omissions_raw = _strict_json(properties.get(_P + "omissions", "[]"))
+        requires_raw = _strict_json(properties.get(_P + "recovery_requires", "[]"))
+    except (ValueError, RecursionError):
+        raise _invalid() from None
+    if not isinstance(omissions_raw, list) or not isinstance(requires_raw, list):
+        raise _invalid()
+    omissions = []
+    for item in omissions_raw:
+        if not (isinstance(item, dict) and set(item) == {"category", "name", "reason"}
+                and all(isinstance(value, str) for value in item.values())):
+            raise _invalid()
+        omissions.append(Omission(item["category"], item["name"], item["reason"]))
+    if not all(isinstance(item, str) for item in requires_raw):
+        raise _invalid()
+    available = properties.get(_P + "secrets_dir_available", "true")
+    if available not in ("true", "false"):
+        raise _invalid()
+    digest = properties.get(_P + "config_sha256", "")
+    if not (isinstance(digest, str) and len(digest) == 64):
+        raise _invalid()
+    manifest = Manifest(
+        version=FORMAT_VERSION,
+        created=properties.get(_P + "created", ""),
+        app_version=properties.get(_P + "app_version", ""),
+        config_sha256=digest,
+        recovery_scope=properties.get(_P + "recovery_scope", ""),
+        recovery_requires=tuple(requires_raw),
+    )
+    return manifest, omissions, available == "true"
+
+
+def _configuration(entry: dict, manifest: Manifest) -> str:
+    import base64
+    import binascii
+
+    attachments = entry["attachments"]
+    if len(attachments) != 1 or not isinstance(attachments[0], dict):
+        raise _invalid()
+    attachment = attachments[0]
+    if attachment.get("filename") != CONFIG_ATTACHMENT or not isinstance(attachment.get("data"), str):
+        raise _invalid()
+    try:
+        data = base64.b64decode(attachment["data"], validate=True)
+    except (binascii.Error, ValueError):
+        raise _invalid() from None
+    if len(data) > CONFIG_MAX_BYTES:
+        raise _too_large("configuration", CONFIG_MAX_BYTES)
+    if hashlib.sha256(data).hexdigest() != manifest.config_sha256:
+        raise _invalid("The backup's configuration does not match its manifest.")
+    try:
+        text = data.decode("utf-8")
+        tomllib.loads(text)
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+        raise _invalid("The backup's configuration does not parse.") from None
+    return text
+
+
+def _no_attachments(entry: dict) -> None:
+    if entry["attachments"]:
+        raise _invalid("The backup holds an attachment it does not restore.")
+
+
+def _file_credential(entry: dict) -> FileCredential:
+    properties = entry["properties"]
+    if properties.get(_KIND) != "file":
+        raise _invalid()
+    value = _str_field(entry, "password")
+    if not value:
+        raise _invalid("The backup holds an empty credential.")
+    return FileCredential(
+        target=properties.get(_TARGET, ""), source=properties.get(_SOURCE, ""), value=value,
+    )
+
+
+def _inline_credential(entry: dict) -> InlineCredential:
+    properties = entry["properties"]
+    if properties.get(_KIND) != "inline" or _PATH not in properties or _VALUE not in properties:
+        raise _invalid()
+    try:
+        path = _strict_json(properties[_PATH])
+        value = _strict_json(properties[_VALUE])
+    except (ValueError, RecursionError):
+        raise _invalid() from None
+    if not isinstance(path, list) or not all(isinstance(segment, str) for segment in path):
+        raise _invalid()
+    if not _typed_scalar(value) or value == "":
+        raise _invalid("The backup holds an empty or untyped credential.")
+    return InlineCredential(path=tuple(path), value=value)
+
+
+def parse_installation_backup(opened: dict) -> Bundle:
+    """The strict reading of the decrypt worker's answer, as a bundle.
+
+    Refuses as `invalid_backup` anything but exactly one reserved group
+    holding one manifest of a known version, one Configuration entry whose
+    one `config.toml` attachment matches the manifest's digest, and credential
+    entries in their kind's subgroup; any other entry, subgroup or attachment
+    in the reserved group refuses the whole file. Entry history is ignored.
+    Limits, forbidden and repeated destinations are `validate_bundle`'s, the
+    same check a gather passes.
+    """
+    if not isinstance(opened, dict):
+        raise _invalid()
+    matches, group = opened.get("matches"), opened.get("group")
+    if matches == 0 or group is None:
+        raise _invalid()
+    if matches != 1 or not isinstance(group, dict):
+        raise _invalid("The file holds more than one installation backup.")
+
+    manifests, configurations = [], []
+    for entry in _entries_of(group):
+        role = entry["properties"].get(_ENTRY_ROLE)
+        if role == "manifest":
+            manifests.append(entry)
+        elif role == "configuration":
+            configurations.append(entry)
+        else:
+            raise _invalid("The backup holds an entry it does not restore.")
+    if len(manifests) != 1 or len(configurations) != 1:
+        raise _invalid()
+    _no_attachments(manifests[0])
+    manifest, omissions, dir_available = _manifest(manifests[0])
+    config_toml = _configuration(configurations[0], manifest)
+
+    file_credentials: list[FileCredential] = []
+    inline_credentials: list[InlineCredential] = []
+    seen_groups: set[str] = set()
+    for subgroup in _groups_of(group):
+        name = subgroup.get("name")
+        if name not in (DEPLOYMENT_GROUP, INLINE_GROUP) or name in seen_groups:
+            raise _invalid("The backup holds a group it does not restore.")
+        seen_groups.add(name)
+        if _groups_of(subgroup):
+            raise _invalid("The backup holds a group it does not restore.")
+        for entry in _entries_of(subgroup):
+            _no_attachments(entry)
+            if name == DEPLOYMENT_GROUP:
+                file_credentials.append(_file_credential(entry))
+            else:
+                inline_credentials.append(_inline_credential(entry))
+
+    bundle = Bundle(
+        config_toml=config_toml,
+        file_credentials=file_credentials,
+        inline_credentials=inline_credentials,
+        omissions=omissions,
+        secrets_dir_available=dir_available,
+        manifest=manifest,
+    )
+    validate_bundle(bundle)
+    return bundle
+
+
+async def open_installation_backup(
+    data: bytes, *, password: str | None, keyfile: bytes | None, db_path: Path,
+    timeout: float | None = None, command: list[str] | None = None,
+) -> Bundle:
+    """An uploaded encrypted backup, decrypted in the worker behind the
+    installation's one decrypt slot, then parsed. Every failure is a
+    `BackupError` with a fixed code and message; nothing uploaded is echoed."""
+    from istota.credentials import kdbx_import, kdbx_worker
+    from istota.credentials.kdbx_import import VAULT_READ_CAP_BYTES
+
+    if not isinstance(data, bytes) or not data:
+        raise _invalid()
+    if len(data) > VAULT_READ_CAP_BYTES:
+        raise _too_large("encrypted file", VAULT_READ_CAP_BYTES)
+    if keyfile is not None and (not isinstance(keyfile, bytes) or not keyfile or len(keyfile) > 4096):
+        raise BackupError("keyfile_invalid", "The key file is not one Istota can use.")
+    try:
+        opened = await kdbx_worker.open_group_async(
+            data, password, keyfile,
+            group=kdbx_import.INSTALLATION_BACKUP_GROUP, limits=_worker_limits(),
+            lock_path=decrypt_lock_path(db_path),
+            timeout=timeout or kdbx_worker.TIMEOUT_SECONDS, command=command,
+        )
+    except kdbx_worker.WorkerBusy:
+        raise BackupError("backup_busy", "Another backup is being opened; try again shortly.") from None
+    except kdbx_worker.WorkerUnavailable:
+        raise BackupError("backup_unavailable", "Backups cannot be opened on this installation now.") from None
+    except kdbx_worker.WorkerTimeout:
+        raise BackupError("backup_timeout", "Opening the backup took too long.") from None
+    except kdbx_worker.WorkerTooLarge as exc:
+        if exc.limit == "depth":
+            raise _invalid("The backup holds a group it does not restore.") from None
+        raise BackupError("too_large", "The backup holds more than this version restores.") from None
+    except kdbx_worker.WorkerFailed:
+        raise _invalid() from None
+    except kdbx_import.VaultLocked:
+        raise BackupError("backup_locked", "Wrong password or key file.") from None
+    except kdbx_import.VaultLibraryMissing:
+        raise BackupError("vault_unavailable", "Install the vault extra to open encrypted backups.") from None
+    except kdbx_import.VaultCorrupt:
+        raise _invalid() from None
+    return parse_installation_backup(opened)
