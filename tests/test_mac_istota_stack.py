@@ -223,6 +223,8 @@ if verb == "shell":
     command = command[1:]
     vm = state.setdefault("vm", {})
     if command[:2] == ["sh", "-c"]:
+        if state.get("probe_rc"):
+            sys.exit(state["probe_rc"])
         out(f"tag={vm.get('tag', '')}\nunsigned={vm.get('unsigned', '')}\n"
             f"publish={vm.get('publish', '')}\n"
             f"config={1 if vm.get('config') else 0}\nadmin={vm.get('admin', '')}\n")
@@ -2670,6 +2672,39 @@ class TestUpdateFromARelease:
         result = made.run("update", "--appliance", str(newer))
         assert result.returncode == 65
         assert f"APPLIANCE={_resolved(release.dir)}\n" in _state_text(made)
+
+    def test_an_older_release_is_refused(self, made, release):
+        """The database a newer release migrated may not open on an older
+        one (SchemaTooNew), and the VM's update has no schema check (ISSUE-940)."""
+        older = self._another(release.root / "v1.2.0")
+        result = made.run("update", "--appliance", str(older))
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert APPLIANCE_TAG in result.stderr
+        assert made.stack_calls() == []
+        assert f"APPLIANCE={_resolved(release.dir)}\n" in _state_text(made)
+
+    def test_an_unsigned_deployed_tag_is_not_ordered(self, made, release):
+        state = made.home / ".config" / "istota-stack" / "istota.env"
+        state.write_text(state.read_text().replace("DEPLOYED_UNSIGNED=\n", "DEPLOYED_UNSIGNED=1\n"))
+        older = self._another(release.root / "v1.2.0")
+        assert made.run("update", "--appliance", str(older)).returncode == 0
+        assert made.stack_calls()[0][:2] == ["update", "v1.2.0"]
+
+    def test_an_update_read_back_from_nowhere_still_records_its_release(self, made, release):
+        newer = self._another(release.root / "v1.4.0")
+        made.set(probe_rc=1)
+        result = made.run("update", "--appliance", str(newer))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "DEPLOYED_TAG=v1.4.0\n" in _state_text(made)
+
+    def test_the_release_rolled_back_to_installs_again(self, made, release):
+        newer = self._another(release.root / "v1.4.0")
+        assert made.run("update", "--appliance", str(newer)).returncode == 0
+        assert made.run("rollback").returncode == 0
+        made.calls_path.unlink()
+        result = made.run("update", "--appliance", str(release.dir))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert made.stack_calls()[0][:2] == ["update", APPLIANCE_TAG]
 
     def test_a_vm_made_from_a_release_tag_has_no_release_mount(self, mac, release):
         assert _create(mac, "--no-setup").returncode == 0

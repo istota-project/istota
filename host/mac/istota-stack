@@ -579,11 +579,23 @@ refuse_release_root() {
     fi
 }
 
+# A signed deployed release newer than the release in DIR refused, since its
+# database is migrated past what that release's image reads.
+refuse_older_release() {
+    local tag="$1" dir="$2" deployed newest
+    deployed="$(state_get DEPLOYED_TAG)"
+    if [ -n "$deployed" ] && [ "$deployed" != "$tag" ] && [ -z "$(state_get DEPLOYED_UNSIGNED)" ]; then
+        newest="$(printf '%s\n' "$deployed" "$tag" | newest_release_tag || true)"
+        if [ "$newest" = "$deployed" ]; then
+            fail "$EX_CONFIG" "the stack last ran ${deployed}, newer than ${tag} in ${dir}; its database may not open on ${tag}. Give the release directory of ${deployed} or a later one. Nothing was changed."
+        fi
+    fi
+}
+
 # create's --appliance (or the recorded one): the release directory checked,
-# its tag the source's, and a deployed release newer than it refused, since
-# its database is migrated past what this release's image reads.
+# its tag the source's, and not older than the release deployed.
 appliance_settings() {
-    local tag_option="$1" deployed newest
+    local tag_option="$1"
     check_release_dir "$CREATE_APPLIANCE"
     CREATE_APPLIANCE="$RELEASE_PATH"
     if [ -n "$tag_option" ] && [ "$tag_option" != "$RELEASE_TAG" ]; then
@@ -591,13 +603,7 @@ appliance_settings() {
     fi
     CREATE_TAG="$RELEASE_TAG"
     refuse_release_root "$(dirname "$CREATE_APPLIANCE")"
-    deployed="$(state_get DEPLOYED_TAG)"
-    if [ -n "$deployed" ] && [ "$deployed" != "$CREATE_TAG" ] && [ -z "$(state_get DEPLOYED_UNSIGNED)" ]; then
-        newest="$(printf '%s\n' "$deployed" "$CREATE_TAG" | newest_release_tag || true)"
-        if [ "$newest" = "$deployed" ]; then
-            fail "$EX_CONFIG" "the stack last ran ${deployed}, newer than ${CREATE_TAG} in ${CREATE_APPLIANCE}; its database may not open on ${CREATE_TAG}. Give the release directory of ${deployed} or a later one. Nothing was changed."
-        fi
-    fi
+    refuse_older_release "$CREATE_TAG" "$CREATE_APPLIANCE"
 }
 
 # The release's manifest checked here, before its disk is booted: signed by
@@ -1377,6 +1383,7 @@ cmd_update() {
         # The VM sees only the releases directory it was made with.
         [ "$(dirname "$appliance")" = "$(dirname "$recorded")" ] \
             || fail "$EX_CONFIG" "${INSTANCE} mounts $(dirname "$recorded"), and ${appliance} is not in it. Unpack the release there."
+        refuse_older_release "$RELEASE_TAG" "$appliance"
         update=(update "$RELEASE_TAG" --bundle "${RELEASE_MOUNT}/${RELEASE_TAG}/istota-${RELEASE_TAG}.bundle"
             --images "${RELEASE_MOUNT}/${RELEASE_TAG}")
         set -- "${update[@]:1}"
@@ -1387,6 +1394,9 @@ cmd_update() {
     [ -z "$appliance" ] || state_set "APPLIANCE=${appliance}"
     if probe="$(vm sh -c "$VM_PROBE" </dev/null)"; then
         record_deployed "$probe"
+    elif [ -n "$appliance" ]; then
+        # The VM's update --bundle installed this signed tag or failed.
+        state_set "DEPLOYED_TAG=${RELEASE_TAG}" "DEPLOYED_UNSIGNED="
     else
         log "WARNING: could not read the deployed tag back from the VM; until a create or update records it, a new VM made from this Mac installs the tag recorded before this update"
     fi
