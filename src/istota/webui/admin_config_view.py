@@ -876,7 +876,7 @@ def build_config_view(
     """
     import tomllib
 
-    from istota.config_editor import edits, schema, secrets
+    from istota.config_editor import backup, edits, schema, secrets
     from istota.config_editor.applier import NO_APPLIER
     from istota.config_editor.reference import field_docs
 
@@ -957,6 +957,13 @@ def build_config_view(
             secrets_managed=ctx["managed_reasons"]["secrets"] is not None,
         ),
         "raw_toml": _raw_document(ctx["redacted"]),
+        # The plain download measures itself against the server's limit and
+        # preamble rather than keeping copies of either.
+        "backup_limits": {
+            "config_bytes": backup.CONFIG_MAX_BYTES,
+            "config_preamble": backup.CONFIG_PREAMBLE,
+        },
+        "backup_encrypted_available": backup.encrypted_backup_available(),
         "has_comments": edits.has_comments(document) if document is not None else False,
         "secrets": _secret_files(config, ctx),
         "model_catalogue": model_catalogue(config),

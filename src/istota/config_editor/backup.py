@@ -474,6 +474,20 @@ def _build(
     return bundle
 
 
+def deployment_secrets_dir(environ: Mapping[str, str] | None = None) -> Path:
+    """The stack's secret directory, by `istota-secrets`' own rule:
+    `ISTOTA_SECRETS_DIR` when set and nonempty, else `/run/secrets`."""
+    environ = os.environ if environ is None else environ
+    return Path(environ.get("ISTOTA_SECRETS_DIR") or "/run/secrets")
+
+
+def encrypted_backup_available() -> bool:
+    """Whether the vault extra, which writes and reads the KDBX, is installed."""
+    import importlib.util
+
+    return importlib.util.find_spec("pykeepass") is not None
+
+
 def _open_request(db_path: Path | None) -> bool:
     from istota import db
     from istota.config_editor import requests

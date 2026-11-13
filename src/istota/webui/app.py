@@ -9,6 +9,7 @@ from istota.credentials import kdbx_import as credential_read
 
 import asyncio
 import base64
+import binascii
 import hashlib
 import hmac
 import ipaddress
@@ -5898,16 +5899,28 @@ def _read_config_bytes(path: Path) -> bytes | None:
 
 
 async def _read_config_change_body(request: Request) -> dict:
-    """The change set as a JSON object, bounded at 256 KiB.
+    """The change set as a JSON object, bounded at 256 KiB."""
+    body = await _read_config_json(
+        request, _CONFIG_CHANGE_BODY_LIMIT,
+        "The change is larger than 256 KiB, or did not say its size.",
+    )
+    if set(body) - _CONFIG_CHANGE_KEYS:
+        raise _ConfigRefusal(400, "invalid_change", "The change set has a field this editor does not read.",
+                             errors=["the change set has a field this editor does not read"], problems=[])
+    return body
+
+
+async def _read_config_json(request: Request, limit: int, too_large: str) -> dict:
+    """A config route's body as a JSON object, bounded at `limit` bytes.
 
     Built on `request_guards.read_bounded_body`, whose errors are worded for
     an upload, so neither that wording nor a 422 carrying the input comes back.
     """
     try:
-        raw = await read_bounded_body(request, _CONFIG_CHANGE_BODY_LIMIT)
+        raw = await read_bounded_body(request, limit)
     except BodyError as exc:
         if exc.status == 413:
-            raise _ConfigRefusal(413, "too_large", "The change is larger than 256 KiB, or did not say its size.") from None
+            raise _ConfigRefusal(413, "too_large", too_large) from None
         raise _ConfigRefusal(400, "invalid_body", "The request was interrupted.") from None
     try:
         body = json.loads(raw)
@@ -5915,9 +5928,6 @@ async def _read_config_change_body(request: Request) -> dict:
         raise _ConfigRefusal(400, "invalid_body", "The request body is not JSON.") from None
     if not isinstance(body, dict):
         raise _ConfigRefusal(400, "invalid_body", "The request body must be a JSON object.")
-    if set(body) - _CONFIG_CHANGE_KEYS:
-        raise _ConfigRefusal(400, "invalid_change", "The change set has a field this editor does not read.",
-                             errors=["the change set has a field this editor does not read"], problems=[])
     return body
 
 
@@ -5927,11 +5937,11 @@ async def _live_identity(user_id: str) -> bool:
     return identity is not None and not identity.disabled
 
 
-async def _require_config_identity(user_id: str) -> None:
+async def _require_config_identity(user_id: str, doing: str = "Changing the configuration") -> None:
     if not await _live_identity(user_id):
         raise _ConfigRefusal(
             403, "admin_identity_required",
-            "Changing the configuration needs an admin with a live email sign-in identity.",
+            f"{doing} needs an admin with a live email sign-in identity.",
         )
 
 
@@ -6108,6 +6118,181 @@ async def admin_config_submit(
         logger.warning("config request %d: trigger file not written: %s", request_id,
                        exc.strerror or type(exc).__name__)
     return _no_store({"id": request_id}, 202)
+
+
+_CONFIG_BACKUP_BODY_LIMIT = 64 * 1024
+_CONFIG_BACKUP_KEYS = frozenset({"keyfile", "step_up"})
+# A gathered or built backup's refusal: the status, keyed by `BackupError.code`.
+# Every message is the module's own fixed text, never a value.
+_CONFIG_BACKUP_STATUS = {
+    "too_large": 413,
+    "keyfile_invalid": 400,
+    "request_open": 409,
+    "state_changed": 409,
+    "config_unreadable": 409,
+    "unreadable_secret": 409,
+    "invalid_saved_credential": 409,
+}
+_VAULT_UNAVAILABLE = ("vault_unavailable", "Install the vault extra to write an encrypted backup.")
+
+
+def _config_backup_keyfile(body: dict) -> bytes | None:
+    """The optional key file, strict base64 of a KeePass XML key file."""
+    from istota.credentials import kdbx_export
+
+    raw = body.get("keyfile")
+    if raw is None:
+        return None
+    refusal = _ConfigRefusal(400, "keyfile_invalid", "The key file is not a KeePass XML key file.")
+    # 4 KiB decoded is at most 5464 base64 characters.
+    if not isinstance(raw, str) or not raw or len(raw) > 5464:
+        raise refusal
+    try:
+        keyfile = base64.b64decode(raw.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, binascii.Error):
+        raise refusal from None
+    try:
+        invalid = kdbx_export.keyfile_refusal(keyfile)
+    except credential_read.VaultLibraryMissing:
+        raise _ConfigRefusal(503, *_VAULT_UNAVAILABLE) from None
+    if invalid:
+        raise refusal
+    return keyfile
+
+
+def _config_backup_limit(conn, user_id: str) -> None:
+    """The per-admin export limit the credential export counts, as a refusal."""
+    try:
+        _export_limit(conn, user_id)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        raise _ConfigRefusal(
+            429, "export_rate_limited", "The daily export limit is reached.",
+            next_allowed_at=detail.get("next_allowed_at"),
+        ) from None
+
+
+def _config_backup_preflight(user_id: str) -> None:
+    """What refuses before the step-up is redeemed, so the code is not spent."""
+    from istota import db
+    from istota.config_editor import backup
+
+    if not backup.encrypted_backup_available():
+        raise _ConfigRefusal(503, *_VAULT_UNAVAILABLE)
+    with db.get_db(_config.db_path) as conn:
+        _config_backup_limit(conn, user_id)
+    if _open_config_request_id() is not None:
+        raise _ConfigRefusal(
+            409, "request_open", "A configuration change is waiting to be applied; back up after it finishes.",
+        )
+
+
+def _build_config_backup(user_id: str, keyfile: bytes | None, ip: str | None) -> tuple[dict, dict]:
+    """Gather, encrypt and record one installation backup, under the export slot.
+
+    The success audit row and the notices are written only once the finished
+    file has passed every limit, in one transaction with the limit's recheck.
+    """
+    from istota import db
+    from istota.config_editor import backup
+    from istota.credentials import audit, kdbx_export
+    from istota.notifications.resolvers import task_alert
+    from istota.notifications.store import hand_to_daemon
+
+    if not kdbx_export.EXPORT_SLOT.acquire(timeout=30):
+        raise _ConfigRefusal(503, "backup_busy", "Another export is running. Try again in a minute.")
+    try:
+        with db.get_db(_config.db_path) as conn:
+            _config_backup_limit(conn, user_id)
+        try:
+            bundle = backup.gather_backup(
+                Path(_config.config_path), backup.deployment_secrets_dir(), db_path=_config.db_path,
+            )
+            password = kdbx_export.generate_export_password()
+            data = backup.build_installation_kdbx(bundle, password=password, keyfile=keyfile)
+        except backup.BackupError as exc:
+            raise _ConfigRefusal(_CONFIG_BACKUP_STATUS.get(exc.code, 409), exc.code, str(exc)) from None
+        except credential_read.VaultLibraryMissing:
+            raise _ConfigRefusal(503, *_VAULT_UNAVAILABLE) from None
+        now = datetime.now(timezone.utc)
+        summary = bundle.summary()
+        counts = {
+            "file_credentials": summary["file_credentials"],
+            "inline_credentials": summary["inline_credentials"],
+            "omissions": len(summary["omissions"]),
+        }
+        notice = (
+            f"{user_id} downloaded an encrypted backup of this instance's configuration and "
+            f"installation credentials at {now.strftime('%Y-%m-%d %H:%M')} UTC. If no admin did this, "
+            "sign out everywhere and replace the installation's credentials."
+        )
+        with db.get_db(_config.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            # Another web process can finish an export while this one builds.
+            _config_backup_limit(conn, user_id)
+            audit.record(conn, user_id, action="export", actor=f"web:{user_id}", detail={
+                "scope": "installation_config", **counts, "keyfile": keyfile is not None, "ip": ip,
+            })
+            audit_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            recipients = sorted(set(_config.admin_users or ()) | {user_id})
+            hand_to_daemon(conn, [
+                task_alert.write(
+                    conn, admin_id, dedup_key=f"config-backup-exported:{audit_id}",
+                    title="The configuration was backed up", body=notice, severity="warning",
+                )
+                for admin_id in recipients
+            ])
+        payload = {
+            "filename": f"istota-config-{now.strftime('%Y%m%dT%H%M%SZ')}.kdbx",
+            "file": base64.b64encode(data).decode("ascii"),
+            "password": password,
+            "summary": summary,
+        }
+        return payload, counts
+    finally:
+        kdbx_export.EXPORT_SLOT.release()
+
+
+@api_router.post("/admin/config/backup")
+async def admin_config_backup(
+    request: Request, user: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin),
+):
+    """The saved configuration and installation credentials, as an encrypted KDBX.
+
+    Returns the file, its generated password and a count summary; never a
+    credential value outside the encrypted bytes. Everything that can refuse
+    without the work refuses before the step-up is redeemed.
+    """
+    user_id = user["username"]
+    try:
+        body = await _read_config_json(
+            request, _CONFIG_BACKUP_BODY_LIMIT, "The request is larger than 64 KiB, or did not say its size.",
+        )
+        if set(body) - _CONFIG_BACKUP_KEYS:
+            raise _ConfigRefusal(400, "invalid_body", "The request has a field a backup does not read.")
+        await _require_config_identity(user_id, "Backing up the configuration")
+        if _config.config_path is None or not Path(_config.config_path).is_file():
+            raise _ConfigRefusal(409, "config_unreadable", "There is no config.toml to back up.")
+        keyfile = _config_backup_keyfile(body)
+        await asyncio.to_thread(_config_backup_preflight, user_id)
+        refusal = await _require_step_up(request, body, "admin_config_backup")
+        if refusal is not None:
+            logger.info("admin_config_backup admin=%s result=step_up_refused", user_id)
+            return refusal
+        payload, counts = await asyncio.to_thread(
+            _build_config_backup, user_id, keyfile, _client_ip(request),
+        )
+    except _ConfigRefusal as refusal:
+        logger.info("admin_config_backup admin=%s result=%s", user_id, refusal.error)
+        return refusal.response()
+    except Exception as exc:
+        logger.error("admin_config_backup admin=%s result=error type=%s", user_id, type(exc).__name__)
+        return _no_store({"error": "backup_failed", "detail": "The backup could not be made."}, 500)
+    logger.info(
+        "admin_config_backup admin=%s result=ok file_credentials=%d inline_credentials=%d omissions=%d",
+        user_id, counts["file_credentials"], counts["inline_credentials"], counts["omissions"],
+    )
+    return JSONResponse(payload, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
 
 def _config_request_id(raw: str) -> int:
@@ -16895,16 +17080,19 @@ _STEP_UP_LABELS = {
     "admin_briefing_delete": "delete a briefing",
     "admin_cron_delete": "delete a scheduled job",
     "admin_browser_console": "open a user's browser console",
+    "admin_config_backup": "download a backup of this instance's configuration and credentials",
 }
 # Codes that guard no vault: an admin may ask for one without the vault gate.
 _ADMIN_STEP_UP_ACTIONS = frozenset({"admin_config_change", "admin_briefing_delete", "admin_cron_delete",
-                                    "admin_browser_console"})
+                                    "admin_browser_console", "admin_config_backup"})
 # Actions the account password may confirm where the install can mail a code.
 # Opt-in, so a new action takes the code: for the vault the mailbox is the
 # second factor, since a phished password must not export or reveal it
 # (credentials-single-store's decision). Without mail every action takes the
 # password, the only proof left.
-_PASSWORD_STEP_UP_ACTIONS = _ADMIN_STEP_UP_ACTIONS
+# The installation backup carries credentials, so it takes the code like a
+# vault export.
+_PASSWORD_STEP_UP_ACTIONS = _ADMIN_STEP_UP_ACTIONS - {"admin_config_backup"}
 
 
 def _step_up_session(request: Request) -> str:
