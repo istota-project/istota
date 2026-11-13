@@ -1,5 +1,7 @@
 """Personal push eligibility through real profile, room and dispatch seams."""
 
+import json
+
 import pytest
 
 from istota import db, user_profiles
@@ -120,6 +122,7 @@ async def test_filtered_total_agrees_across_endpoint_dispatch_and_cli(client, mo
     assert (result["open"], result["chat_unread"], result["push_badge"]) == (2, 4, 3)
     sent = []
     def send(config, device, payload, **kwargs):
+        payload = json.loads(payload)
         sent.append(payload)
         return apns.ApnsResult(status=200, badge=payload["aps"]["badge"], device_created_at=device["created_at"])
     monkeypatch.setattr(apns, "send", send)

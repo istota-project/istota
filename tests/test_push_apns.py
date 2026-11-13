@@ -216,6 +216,24 @@ def test_disabled_missing_key_invalid_token_and_oversize_never_send(signing, reg
     assert apns.send(config, device, PAYLOAD, transport=transport).reason == "ProviderTokenUnavailable"
 
 
+def test_preserialized_bytes_are_sent_exactly_and_still_bounded(signing, registry):
+    config, _ = signing
+    device = registered(registry)
+    requests = []
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200)
+    # Key order and spacing no json.dumps call here would reproduce.
+    body = b'{"istota_private": {"h":"x"} ,"aps":{"badge":4}}'
+    result = apns.send(config, device, body, transport=httpx.MockTransport(respond))
+    assert result.success and result.badge == 4
+    assert requests[0].content == body
+    def unexpected(request):
+        pytest.fail("request should not reach the transport")
+    oversize = b'{"aps":{"alert":"' + b"x" * 4096 + b'"}}'
+    assert apns.send(config, device, oversize, transport=httpx.MockTransport(unexpected)).reason == "PayloadTooLarge"
+
+
 def test_doctor_checks_metadata_without_reading_key(signing, monkeypatch):
     push, _ = signing
     config = Config(push=push)

@@ -117,28 +117,33 @@ def _client() -> httpx.Client:
 
 
 def send(
-    config: PushConfig, device: dict, payload: dict, *, push_type: str = "alert",
+    config: PushConfig, device: dict, payload: dict | bytes, *, push_type: str = "alert",
     priority: int = 10, collapse_id: str | None = None, expiration: int = 0,
     transport: httpx.BaseTransport | None = None,
 ) -> ApnsResult:
     """Send once, except for one bounded provider-token refresh.
 
-    ``transport`` is the HTTP boundary for offline tests; production reuses
-    ``_client()``. Results carry the registration generation so late responses
+    ``payload`` is a dict, or bytes already serialized and measured by the
+    caller, which are sent as they are. ``transport`` is the HTTP boundary for
+    offline tests; production reuses ``_client()``. Results carry the registration generation so late responses
     cannot remove or update a row that was registered again during the send.
     """
     created_at = None
     badge = None
     try:
         created_at = device.get("created_at")
-        badge = payload.get("aps", {}).get("badge")
+        if isinstance(payload, bytes):
+            body = payload
+            badge = json.loads(body).get("aps", {}).get("badge")
+        else:
+            body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+            badge = payload.get("aps", {}).get("badge")
         if not config.enabled:
             return ApnsResult(reason="PushDisabled", device_created_at=created_at)
         token = device["token"]
         if not isinstance(token, str) or not _TOKEN.fullmatch(token) or len(token) % 2:
             raise ValueError("invalid device token")
         host = _HOSTS[device["environment"]]
-        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
         if len(body) > _MAX_PAYLOAD_BYTES:
             return ApnsResult(reason="PayloadTooLarge", device_created_at=created_at)
         jwt = provider_token(config)

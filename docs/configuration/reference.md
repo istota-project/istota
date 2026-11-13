@@ -861,7 +861,7 @@ Calendars and folders shared with Istota over open protocols. See [sharing](../f
 
 ## `[push]`
 
-Native iOS push through APNs. Install the `push` extra and put the APNs signing key on the server, readable only by the service user. `istota doctor --only push.credentials` checks the key's metadata; `istota push test --user U` sends one.
+Native iOS push through APNs. Install the `push` extra and put the APNs signing key on the server, readable only by the service user. `istota doctor --only push.credentials` checks the key's metadata; `istota push test --user U` sends one. `istota doctor --only push.signing_key` checks the private push key: mode 0600, owned by the service user, parses, and matches its `.pub` file.
 
 | Setting | Default | Description |
 |---|---|---|
@@ -873,6 +873,8 @@ Native iOS push through APNs. Install the `push` extra and put the APNs signing 
 | `chat_delay_seconds` | `15` | How old an unread chat message must be before it is pushed, so a message read in the web UI first is never pushed |
 | `max_age_seconds` | `300` | Chat messages older than this when a sweep reaches them are skipped rather than pushed |
 | `alert_batch_limit` | `200` | Pending notifications read per sweep |
+| `content` | `"legacy"` | `legacy` sends plaintext previews, which Apple can read. `private` encrypts previews for devices that enrolled a device key and sends every other device a fixed alert with no preview; see [private push v1](../reference/private-push-v1.md). Any other value stops the load |
+| `signing_key_path` | `""` | The Ed25519 signing key for private push, with its public half at `<path>.pub`. Required when `content = "private"`. Create it with `istota push keygen`; `--force` replaces it, and every enrolled device then has to enroll again. `ISTOTA_PUSH_SIGNING_KEY_PATH` overrides it |
 
 ## `[assignments]`
 

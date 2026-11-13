@@ -141,6 +141,7 @@ const sidebars: SidebarsConfig = {
         'reference/doctor-checks',
         'reference/skills-index',
         'reference/environment-variables',
+        'reference/private-push-v1',
       ],
     },
   ],

@@ -117,6 +117,7 @@ These skip when the developer skill has no forge token configured.
 | `mail.connect_verified` | The TLS context every IMAP and SMTP connection uses verifies the server. *image* |
 | `mail.account_isolation` | One user's task is kept away from another user's mail account passwords |
 | `push.credentials` | The APNs signing key's metadata, without opening the key or sending |
+| `push.signing_key` | With `[push] content = "private"`: the private push signing key is a regular file, mode 0600, owned by the service user, parses as Ed25519, and matches its `.pub` file. Reports the key ID. Skipped when push is disabled or content is legacy |
 
 ## Web
 

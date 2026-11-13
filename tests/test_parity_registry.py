@@ -101,6 +101,11 @@ class TestEveryRowHasAWitness:
             assert row not in parity.PENDING and row not in parity.NOT_WITNESSED
             assert where.startswith("tests/"), (row, where)
 
+    def test_the_rows_witnessed_in_istota_mac_are_the_ones_it_witnesses(self):
+        """istota-mac can only witness a row this registry has (ISSUE-942: M8
+        was witnessed there by tests/desktop/test_update.py but missing here)."""
+        assert set(parity.WITNESSED_IN_ISTOTA_MAC) == {"M6", "M7", "M8", "M9", "M11"}
+
     def test_a_witnessed_row_is_no_longer_pending(self, witnesses):
         both = sorted(set(witnesses) & set(parity.PENDING))
         assert both == [], f"rows witnessed but still listed in PENDING: {both}"

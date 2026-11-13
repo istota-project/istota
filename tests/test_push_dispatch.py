@@ -1,6 +1,7 @@
 """Native push delivery through the real inbox and room stores."""
 
 import copy
+import json
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -46,6 +47,8 @@ def setup(tmp_path, monkeypatch):
     sent = []
 
     def send(push_config, device, payload, **kwargs):
+        # The seam hands APNs measured bytes; these assertions read them back.
+        payload = json.loads(payload)
         # A second connection can write during the network call: no transaction
         # from the sweep is allowed to hold the DB writer lock here.
         with db.get_db(config.db_path, busy_timeout_ms=10) as conn:
@@ -546,7 +549,7 @@ def test_bound_routing_survives_the_payload_bound(setup):
     (_, _, payload, _), = sent
     assert payload["istota"]["connection_binding"] == BINDING
     assert payload["istota"]["connection_generation"] == 2**53 - 1
-    assert len(dispatch.json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()) <= 4096
+    assert len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()) <= 4096
 
 
 TOKEN_BOUND = "ef" * 32

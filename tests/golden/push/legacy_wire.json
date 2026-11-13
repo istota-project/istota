@@ -1,0 +1,151 @@
+[
+ {
+  "path": "/3/device/abababababababababababababababababababababababababababababababab",
+  "headers": {
+   "apns-topic": "com.example.app",
+   "apns-push-type": "alert",
+   "apns-priority": "10",
+   "apns-expiration": "0"
+  },
+  "body": "{\"aps\":{\"alert\":{\"title\":\"Approval needed\",\"body\":\"Review the held task\"},\"badge\":6,\"sound\":\"default\",\"thread-id\":\"notif:confirmation\",\"interruption-level\":\"active\"},\"istota\":{\"kind\":\"notification\",\"notification_id\":1,\"link\":\"/chat\"}}"
+ },
+ {
+  "path": "/3/device/abababababababababababababababababababababababababababababababab",
+  "headers": {
+   "apns-topic": "com.example.app",
+   "apns-push-type": "alert",
+   "apns-priority": "10",
+   "apns-expiration": "0"
+  },
+  "body": "{\"aps\":{\"alert\":{\"title\":\"🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀\",\"body\":\"z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z \"},\"badge\":6,\"sound\":\"default\",\"thread-id\":\"notif:confirmation\",\"interruption-level\":\"active\"},\"istota\":{\"kind\":\"notification\",\"notification_id\":2}}"
+ },
+ {
+  "path": "/3/device/abababababababababababababababababababababababababababababababab",
+  "headers": {
+   "apns-topic": "com.example.app",
+   "apns-push-type": "alert",
+   "apns-priority": "10",
+   "apns-expiration": "0",
+   "apns-collapse-id": "room:<work>"
+  },
+  "body": "{\"aps\":{\"alert\":{\"title\":\"Work\",\"body\":\"2 new messages: Done Deployed the fix.\"},\"badge\":6,\"sound\":\"default\",\"thread-id\":\"room:<work>\",\"interruption-level\":\"active\"},\"istota\":{\"kind\":\"chat\",\"room_token\":\"<work>\",\"room_id\":1}}"
+ },
+ {
+  "path": "/3/device/abababababababababababababababababababababababababababababababab",
+  "headers": {
+   "apns-topic": "com.example.app",
+   "apns-push-type": "alert",
+   "apns-priority": "10",
+   "apns-expiration": "0",
+   "apns-collapse-id": "room:<cafe>"
+  },
+  "body": "{\"aps\":{\"alert\":{\"title\":\"Café ☕ üüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüü\",\"body\":\"Grüße, ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\"},\"badge\":6,\"sound\":\"default\",\"thread-id\":\"room:<cafe>\",\"interruption-level\":\"active\"},\"istota\":{\"kind\":\"chat\",\"room_token\":\"<cafe>\",\"room_id\":2}}"
+ },
+ {
+  "path": "/3/device/abababababababababababababababababababababababababababababababab",
+  "headers": {
+   "apns-topic": "com.example.app",
+   "apns-push-type": "alert",
+   "apns-priority": "10",
+   "apns-expiration": "0",
+   "apns-collapse-id": "room:<shared>"
+  },
+  "body": "{\"aps\":{\"alert\":{\"title\":\"Shared\",\"body\":\"Shared reply\"},\"badge\":6,\"sound\":\"default\",\"thread-id\":\"room:<shared>\",\"interruption-level\":\"active\"},\"istota\":{\"kind\":\"chat\",\"room_token\":\"<shared>\",\"room_id\":4}}"
+ },
+ {
+  "path": "/3/device/efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+  "headers": {
+   "apns-topic": "com.example.app",
+   "apns-push-type": "alert",
+   "apns-priority": "10",
+   "apns-expiration": "0"
+  },
+  "body": "{\"aps\":{\"alert\":{\"title\":\"Approval needed\",\"body\":\"Review the held task\"},\"badge\":6,\"sound\":\"default\",\"thread-id\":\"notif:confirmation\",\"interruption-level\":\"active\"},\"istota\":{\"kind\":\"notification\",\"notification_id\":1,\"link\":\"/chat\",\"connection_binding\":\"0f8e4b0c-2a6d-4c4e-9a43-6d2f1b8e7c51\",\"connection_generation\":7}}"
+ },
+ {
+  "path": "/3/device/efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+  "headers": {
+   "apns-topic": "com.example.app",
+   "apns-push-type": "alert",
+   "apns-priority": "10",
+   "apns-expiration": "0"
+  },
+  "body": "{\"aps\":{\"alert\":{\"title\":\"🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀\",\"body\":\"z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z z \"},\"badge\":6,\"sound\":\"default\",\"thread-id\":\"notif:confirmation\",\"interruption-level\":\"active\"},\"istota\":{\"kind\":\"notification\",\"notification_id\":2,\"connection_binding\":\"0f8e4b0c-2a6d-4c4e-9a43-6d2f1b8e7c51\",\"connection_generation\":7}}"
+ },
+ {
+  "path": "/3/device/efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+  "headers": {
+   "apns-topic": "com.example.app",
+   "apns-push-type": "alert",
+   "apns-priority": "10",
+   "apns-expiration": "0",
+   "apns-collapse-id": "room:<work>"
+  },
+  "body": "{\"aps\":{\"alert\":{\"title\":\"Work\",\"body\":\"2 new messages: Done Deployed the fix.\"},\"badge\":6,\"sound\":\"default\",\"thread-id\":\"room:<work>\",\"interruption-level\":\"active\"},\"istota\":{\"kind\":\"chat\",\"room_token\":\"<work>\",\"room_id\":1,\"connection_binding\":\"0f8e4b0c-2a6d-4c4e-9a43-6d2f1b8e7c51\",\"connection_generation\":7}}"
+ },
+ {
+  "path": "/3/device/efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+  "headers": {
+   "apns-topic": "com.example.app",
+   "apns-push-type": "alert",
+   "apns-priority": "10",
+   "apns-expiration": "0",
+   "apns-collapse-id": "room:<cafe>"
+  },
+  "body": "{\"aps\":{\"alert\":{\"title\":\"Café ☕ üüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüü\",\"body\":\"Grüße, ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\"},\"badge\":6,\"sound\":\"default\",\"thread-id\":\"room:<cafe>\",\"interruption-level\":\"active\"},\"istota\":{\"kind\":\"chat\",\"room_token\":\"<cafe>\",\"room_id\":2,\"connection_binding\":\"0f8e4b0c-2a6d-4c4e-9a43-6d2f1b8e7c51\",\"connection_generation\":7}}"
+ },
+ {
+  "path": "/3/device/efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+  "headers": {
+   "apns-topic": "com.example.app",
+   "apns-push-type": "alert",
+   "apns-priority": "10",
+   "apns-expiration": "0",
+   "apns-collapse-id": "room:<shared>"
+  },
+  "body": "{\"aps\":{\"alert\":{\"title\":\"Shared\",\"body\":\"Shared reply\"},\"badge\":6,\"sound\":\"default\",\"thread-id\":\"room:<shared>\",\"interruption-level\":\"active\"},\"istota\":{\"kind\":\"chat\",\"room_token\":\"<shared>\",\"room_id\":4,\"connection_binding\":\"0f8e4b0c-2a6d-4c4e-9a43-6d2f1b8e7c51\",\"connection_generation\":7}}"
+ },
+ {
+  "path": "/3/device/cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+  "headers": {
+   "apns-topic": "com.example.app",
+   "apns-push-type": "alert",
+   "apns-priority": "10",
+   "apns-expiration": "0"
+  },
+  "body": "{\"aps\":{\"alert\":{\"title\":\"Something needs your attention\",\"body\":\"\"},\"badge\":2,\"sound\":\"default\",\"thread-id\":\"notif:confirmation\",\"interruption-level\":\"active\"},\"istota\":{\"kind\":\"notification\",\"notification_id\":3,\"link\":\"/chat\"}}"
+ },
+ {
+  "path": "/3/device/cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+  "headers": {
+   "apns-topic": "com.example.app",
+   "apns-push-type": "alert",
+   "apns-priority": "10",
+   "apns-expiration": "0",
+   "apns-collapse-id": "room:<shared>"
+  },
+  "body": "{\"aps\":{\"alert\":{\"title\":\"New message in Shared\",\"body\":\"\"},\"badge\":2,\"sound\":\"default\",\"thread-id\":\"room:<shared>\",\"interruption-level\":\"active\"},\"istota\":{\"kind\":\"chat\",\"room_token\":\"<shared>\",\"room_id\":3}}"
+ },
+ {
+  "path": "/3/device/abababababababababababababababababababababababababababababababab",
+  "headers": {
+   "apns-topic": "com.example.app",
+   "apns-push-type": "alert",
+   "apns-priority": "5",
+   "apns-expiration": "0",
+   "apns-collapse-id": "badge"
+  },
+  "body": "{\"aps\":{\"badge\":5}}"
+ },
+ {
+  "path": "/3/device/efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+  "headers": {
+   "apns-topic": "com.example.app",
+   "apns-push-type": "alert",
+   "apns-priority": "5",
+   "apns-expiration": "0",
+   "apns-collapse-id": "badge"
+  },
+  "body": "{\"aps\":{\"badge\":5}}"
+ }
+]

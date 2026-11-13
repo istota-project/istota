@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Private push notifications.** With `[push] content = "private"`, Apple sees only a fixed alert and the badge count: an iOS 17 phone on app 0.15.0 opens an encrypted preview itself, and other devices get the fixed alert. Notifications settings shows each device's mode. See docs/features/notifications.md.
 - **A worldview layer.** Istota now ships the positions it judges from, taken from the Common Task manifesto, and loads them between emissaries and the persona for every task except briefings. It is on by default; `worldview_enabled = false` turns it off. See docs/configuration/persona.md.
 
 ### Changed
@@ -31,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - On a Mac, `istota-stack update --appliance` now refuses a release older than the one the stack last ran, as `create --appliance` already did. Before, it installed the older release, whose image may not open a database the newer one had migrated.
 - On a Mac, `create`, `restore` and `update --appliance` now check which release the running VM has before they pick one, so they see a release that `istota-stack rollback` went back to. Before, the Mac still had the newer release on record: `restore` installed it again, and the downgrade check compared against it.
+- `istota-stack reclaim` no longer misses that a compose file names a volume. The check piped into `grep -q` under `pipefail`, so on a match it could read as no match, and `reclaim --apply` could then remove a volume the stack still declares.
 - The browser image installs Google's current stable Chrome on every `istota-stack update`. Before, Docker's build cache kept the Chrome from an earlier build until something else in the browser image changed, so Chrome could fall weeks behind. `istota doctor` now reports the running Chrome and warns when a newer stable release has been out for more than a week.
 - Files no longer says your tasks can read and change the All users folder from your private chat. Tasks reach it only from a room linked to All users, and its note in Files now says so.
 - The P&L and P&L % columns of the Money overview's holdings are green and red again. An amount under a cent now shows no sign or colour, and a zero P&L % no longer shows a "+".

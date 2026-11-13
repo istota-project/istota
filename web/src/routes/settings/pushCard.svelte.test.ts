@@ -1,6 +1,6 @@
 import { tick } from 'svelte';
 import { beforeEach, afterEach, expect, it, vi } from 'vitest';
-import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { render, cleanup, screen, fireEvent, waitFor, within } from '@testing-library/svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import type { User, UserProfile, PushDevice } from '$lib/api';
 
@@ -43,6 +43,8 @@ const device: PushDevice = {
   created_at: '2026-01-01T00:00:00Z',
   last_seen_at: null,
   last_error: null,
+  content: 'legacy',
+  stale_key: false,
 };
 
 beforeEach(() => {
@@ -414,6 +416,87 @@ it('does not prompt or enroll when the page no longer owns the connection', asyn
   expect(await screen.findByRole('alert')).toHaveTextContent('The connection changed.');
   expect(plugin.register).not.toHaveBeenCalled();
   expect(api.registerPushDevice).not.toHaveBeenCalled();
+});
+
+function rowFor(tail: string) {
+  return within(screen.getByText(new RegExp(`…${tail}$`)).closest('li') as HTMLElement);
+}
+
+it('names each device’s content mode and says where private previews are opened', async () => {
+  api.listPushDevices.mockResolvedValue({
+    devices: [
+      { ...device, id: 1, token_tail: '000001', content: 'encrypted' },
+      { ...device, id: 2, token_tail: '000002', content: 'generic' },
+      { ...device, id: 3, token_tail: '000003', content: 'legacy' },
+    ],
+  });
+  mount();
+  await screen.findByText(/…000001$/);
+  rowFor('000001').getByText('Private previews');
+  rowFor('000002').getByText('Private, no preview');
+  rowFor('000003').getByText('Standard previews');
+  expect(screen.getByText(/decrypted on the phone/)).toBeInTheDocument();
+  expect(screen.queryByText(/Register this device again/)).toBeNull();
+});
+
+it('asks a device enrolled under an earlier sender key to register again', async () => {
+  api.listPushDevices.mockResolvedValue({
+    devices: [{ ...device, content: 'generic', stale_key: true }],
+  });
+  mount();
+  await screen.findByText(/…ababab$/);
+  rowFor('ababab').getByText('Private, no preview');
+  rowFor('ababab').getByText(/Register this device again/);
+  expect(screen.queryByText(/Standard previews send message text/)).toBeNull();
+});
+
+it('leaves out the private explanation when every device is standard', async () => {
+  api.listPushDevices.mockResolvedValue({ devices: [device] });
+  mount();
+  await screen.findByText(/…ababab$/);
+  rowFor('ababab').getByText('Standard previews');
+  expect(screen.queryByText(/decrypted on the phone/)).toBeNull();
+  expect(screen.getByText(/Standard previews send message text/)).toBeInTheDocument();
+});
+
+it('enrolls a 0.15.0 app privately when the server offers it', async () => {
+  const { plugin, connection } = genericShell();
+  Object.defineProperty(navigator, 'userAgent', { value: 'IstotaApp/0.15.0', configurable: true });
+  const native = plugin as unknown as Record<string, ReturnType<typeof vi.fn>>;
+  native.preparePrivateRegistration = vi.fn(async () => ({
+    content: 'generic',
+    generation: 'G'.repeat(22),
+    token: 'cd'.repeat(32),
+    environment: 'production',
+    versions: [1],
+  }));
+  native.commitPrivateRegistration = vi.fn(async () => ({}));
+  native.cancelPrivateRegistration = vi.fn(async () => ({}));
+  api.getMobilePushCapabilities.mockResolvedValue({
+    delivery: 'direct',
+    private: { versions: [1] },
+  });
+  api.getPushSenderKey.mockResolvedValue({ version: 1, key_id: 'S'.repeat(43), public_key: 'P' });
+  api.registerPushDevice.mockResolvedValue({ id: 41 });
+  mount();
+  await fireEvent.click(await screen.findByRole('button', { name: 'Register this device' }));
+  expect(await screen.findByText('This device is registered.')).toBeInTheDocument();
+  expect(api.registerPushDevice).toHaveBeenCalledWith({
+    token: 'cd'.repeat(32),
+    environment: 'production',
+    platform: 'ios',
+    app_version: '0.15.0',
+    connection_binding: binding,
+    connection_generation: 3,
+    private: { version: 1, content: 'generic', generation: 'G'.repeat(22) },
+  });
+  expect(native.commitPrivateRegistration).toHaveBeenCalledWith({
+    binding,
+    generation: 'G'.repeat(22),
+    deviceId: 41,
+  });
+  expect(connection.recordPushRegistration).toHaveBeenCalledOnce();
+  expect(native.cancelPrivateRegistration).not.toHaveBeenCalled();
 });
 
 it('does not claim success when the app refuses the registration receipt', async () => {

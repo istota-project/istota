@@ -62,6 +62,32 @@ async def test_capabilities_follow_deployment_config(client, configured, locatio
     assert len(response.content) < 512
 
 
+@pytest.mark.parametrize("content,key_path,advertised", [
+    ("legacy", "", False), ("legacy", "/data/config/push/signing.key", False),
+    ("private", "", False), ("private", "/data/config/push/signing.key", True),
+])
+async def test_private_push_is_a_separate_discovery_key(client, configured, content, key_path, advertised):
+    config = configured._config
+    config.push = PushConfig(enabled=True, apns_key_path="/run/secrets/apns-key",
+                             apns_key_id="example-key", apns_team_id="example-team",
+                             content=content, signing_key_path=key_path)
+    response = await client.get(URL)
+    push = response.json()["push"]
+    # Shipped shells check `delivery` against a closed list, so private push never changes it.
+    assert push["delivery"] == "direct"
+    assert push.get("private") == ({"versions": [1]} if advertised else None)
+    assert ("private" in push) == advertised
+    assert "signing.key" not in response.text
+    assert len(response.content) < 512
+
+
+async def test_private_push_is_not_advertised_without_direct_delivery(client, configured):
+    config = configured._config
+    config.push = PushConfig(enabled=False, content="private", signing_key_path="/data/config/push/signing.key")
+    push = (await client.get(URL)).json()["push"]
+    assert push == {"delivery": "unavailable"}
+
+
 @pytest.mark.parametrize("field,value", [
     ("apns_key_path", ""), ("apns_key_id", ""), ("apns_team_id", ""),
     ("apns_topic", ""), ("dispatch_interval_seconds", 0),
