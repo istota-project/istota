@@ -1080,6 +1080,37 @@ class TestAnUpdateOnItsOwn:
         assert "istota_update_force" in _when(report)
 
 
+class TestThePushTask:
+    """A lost signing key is replaced only with the operator's consent, and a
+    refusal reaches the operator although the apply task is `no_log`."""
+
+    def _block(self) -> dict:
+        return next(item for item in _load("tasks/push.yml") if item.get("name") == "Configure push delivery")
+
+    def test_replacing_a_signing_key_is_off_by_default(self):
+        assert _defaults()["istota_push_replace_signing_key"] is False
+
+    def test_the_consent_marker_is_staged_only_when_asked(self):
+        task = _tasks()[_index("Stage consent to replace a lost push signing key")]
+        assert task["ansible.builtin.copy"]["dest"] == "{{ _istota_push_stage.path }}/replace-signing-key"
+        assert "istota_push_replace_signing_key | bool" in _when(task)
+        assert _index(task["name"]) < _index("Apply push settings and restart when changed")
+
+    def test_a_failure_reports_the_helpers_stderr_and_still_cleans_up(self):
+        block = self._block()
+        assert [t["name"] for t in block["always"]] == ["Remove the push staging directory"]
+        (report,) = block["rescue"]
+        message = report["ansible.builtin.fail"]["msg"]
+        env = jinja2.Environment(undefined=jinja2.ChainableUndefined)
+        assert env.from_string(message).render(
+            _istota_push_applied={"stderr": "The push signing key is missing"}) == "The push signing key is missing"
+        assert "The push signing key is missing" not in env.from_string(message).render()
+        assert env.from_string(message).render().strip()
+        assert "no_log" not in report
+        apply = _tasks()[_index("Apply push settings and restart when changed")]
+        assert apply.get("no_log") is True
+
+
 class TestTheProvisionDecisionIsDurable:
     """A play that dies after host.env, .env or rclone.conf changed and before
     provision.sh finished must still provision on the next play, so the

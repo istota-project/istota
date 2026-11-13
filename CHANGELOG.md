@@ -26,7 +26,7 @@ With full Nextcloud integration the daemon now reads your files only after they 
 
 ### Added
 
-- **Private push notifications.** With `[push] content = "private"`, Apple sees only a fixed alert and the badge count, and an iOS 17 phone on app 0.15.0 decrypts the preview itself. Notifications settings shows each device's mode. On the stack, the management role's `istota_push` task creates the signing key when it is missing. See docs/features/notifications.md.
+- **Private push notifications.** With `[push] content = "private"`, Apple sees only a fixed alert and the badge count, and an iOS 17 phone on app 0.15.0 decrypts the preview itself. Notifications settings shows each device's mode. On the stack, the management role's `istota_push` task creates the signing key on the first enable, and replaces a lost one only with `istota_push_replace_signing_key`. See docs/features/notifications.md.
 - **A worldview layer.** Istota ships the positions it judges from, taken from the Common Task manifesto, loaded between emissaries and the persona for every task except briefings. `worldview_enabled = false` turns it off. See docs/configuration/persona.md.
 
 ### Changed
