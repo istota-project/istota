@@ -148,6 +148,10 @@ The operator caps what users may share with `[nextcloud.sharing]` (below). The c
 
 **Paths are scoped to the caller.** The bot's credentials reach every user's workspace; the skill must not. `files` and `share` verbs resolve a caller-supplied path against `/Users/<caller>/` and refuse anything escaping it (after `..` normalization) unless the caller is an admin.
 
+## The status file
+
+With Nextcloud configured, the daemon writes `status.json` at the root of the bot account's files for a Nextcloud app to read: the bot's name and version, when it started, its worker pool and its queue, and `updated_at`. The daemon checks once a minute and writes the file when the worker or queue counts change, and otherwise every five minutes. A reader that takes an old `updated_at` to mean the daemon has stopped needs a threshold above five minutes.
+
 ## Configuration
 
 ```toml

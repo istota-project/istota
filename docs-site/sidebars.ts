@@ -138,8 +138,10 @@ const sidebars: SidebarsConfig = {
       items: [
         'reference/cli',
         'reference/commands',
+        'reference/doctor-checks',
         'reference/skills-index',
         'reference/environment-variables',
+        'reference/private-push-v1',
       ],
     },
   ],

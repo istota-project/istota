@@ -71,6 +71,7 @@ ROWS: dict[int | str, str] = {
     "M5": "a stack update from a release bundle installs only a tag signed by the pinned key",
     "M6": "brain keys and the master key never sit in an argv or a file under the app's state",
     "M7": "no release artifact contains Claude Code or Google Chrome",
+    "M8": "the Mac app and its updates are the maintainer's",
     "M9": "web UI content cannot call into the Mac app",
     "M10": "the stack runs only images a manifest signed by the pinned key names",
     "M11": "the first launch of an appliance VM makes no network request",
@@ -88,6 +89,7 @@ NOT_WITNESSED: dict[int, str] = {
 WITNESSED_IN_ISTOTA_MAC: dict[str, str] = {
     "M6": "tests/desktop/test_first_run.py (desktop tier), control scripts/test-desktop.sh --control m6",
     "M7": "tests/test_release_mac.py (default suite)",
+    "M8": "tests/desktop/test_update.py (desktop tier), control scripts/test-desktop.sh --control m8",
     "M9": "tests/desktop/test_confinement.py (desktop tier), control scripts/test-desktop.sh --control m9",
     "M11": "tests/vm/test_appliance.py (vm tier, appliance mode), control appliance-without-offline-rule",
 }

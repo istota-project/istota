@@ -10,14 +10,14 @@ Istota provides three console scripts: `istota` (main CLI), `istota-scheduler` (
 istota -c CONFIG snapshot [-o FILE] [--format toml|json|ansible] [--user USER] [--no-meta]
 istota -c CONFIG snapshot --patch 'SOURCE=DEST' -o settings.toml
 istota -c CONFIG apply -f PLAN --dry-run [--format json]
-istota -c CONFIG apply -f PLAN [--user USER] [--prune] [--secrets-file PRIVATE_FILE]
+istota -c CONFIG apply -f PLAN [--user USER] [--prune] [--secrets-file PRIVATE_FILE] [--actor USER] [--input-format plan|role-vars]
 istota -c CONFIG apply -f PLAN --prune --prune-secrets
 istota apply -f PLAN --check --json
 ```
 
 `--user` and `--patch` are repeatable on both commands. Snapshot defaults to TOML on stdout; file output is atomic and private. It exports settings without credential values or runtime history and refuses stored briefing definitions with embedded credentials. Diagnostics go to stderr. `--no-meta` removes the ownership-preserving snapshot metadata. `--format ansible` writes the JSON under an `istota_plan` key, a `group_vars` file for the [management role](../deployment/ansible.md).
 
-Apply exits 0 unchanged, 2 changed or would change, and 1 refused or failed. `--check` uses its own 0 valid / 1 invalid contract and `--json` envelope. `--continue-on-error` permits later independent users after a runtime failure. `--backup N` retains configuration backups. See [declarative settings](../configuration/declarative-settings.md) for defaults, pruning, credentials, path patches and partial failure behavior.
+Apply exits 0 unchanged, 2 changed or would change, and 1 refused or failed. `--check` uses its own 0 valid / 1 invalid contract and `--json` envelope. `--continue-on-error` permits later independent users after a runtime failure. `--actor` names the group owner a plan's group briefings are written as, and is required for those writes. `--input-format role-vars` reads the management role's private variable envelope instead of a plan. `--backup N` retains configuration backups. See [declarative settings](../configuration/declarative-settings.md) for defaults, pruning, credentials, path patches and partial failure behavior.
 
 ### Task execution
 
@@ -94,6 +94,8 @@ The former `--default-briefings` flags are retired and return a migration diagno
 
 `--default-destination` sets the fallback delivery surface (`talk` | `email` | `ntfy` | `web` | `surface:channel` | comma list). `--route` is repeatable and sets a purpose-keyed override; `PURPOSE` is one of `reply`, `alert`, `log`, `briefing`, `notification`. See [per-user delivery routing](../configuration/per-user.md#delivery-routing).
 
+`--managed` records the fields this call writes as set by provisioning: the web UI then refuses to edit them, and a field left out of a later `--managed` call is released. `--seed` writes a new user in full, but on an existing one only fills an empty SMS number or an unbound WhatsApp binding, and releases every managed field. The two cannot be combined. A call with neither flag leaves the managed set alone, so a hand-run `ensure` locks and unlocks nothing. `--default-room TOKEN` is the room a destination that names no room lands in, on web and Talk; an empty value clears it.
+
 `--correspondent-scope NAME` (repeatable; replaces the list) sets what mail somebody else wrote may reach beyond the default, a skill name or `web`; `--clear-correspondent-scopes` goes back to the default. `files`, `memory`, `recall` and `memory_search` are refused. See [what someone else's mail can reach](../features/email.md#what-someone-elses-mail-can-reach).
 
 `--outbound-approval` sets this user's outbound email approval policy (`off` | `untrusted` | `all`); pass `""` to clear it and follow the operator's `[email] outbound_approval_floor`, which is the default. The floor is a minimum — a user value weaker than it has no effect. This is the supported way to set the policy for an existing user: the `[users.X] outbound_approval` TOML key seeds only a user with no profile row yet. See [the outbound approval gate](../features/email.md#the-outbound-approval-gate).
@@ -157,28 +159,33 @@ istota briefings schedule delete -u USER --name NAME
 
 # Content blocks
 istota briefings blocks list    -u USER [--briefing NAME]
-istota briefings blocks add     -u USER --briefing NAME --title TITLE [--directive TEXT] [--render-mode synthesis|structured] [--options '{…}']
-istota briefings blocks set     -u USER --id BLOCK_ID [--title …] [--directive …] [--render-mode …] [--options '{…}']
+istota briefings blocks add     -u USER --briefing NAME --title TITLE [--directive TEXT] [--render-mode synthesis|structured] [--options '{…}'] [--sources '[…]']
+istota briefings blocks set     -u USER --id BLOCK_ID [--title …] [--directive …] [--render-mode …] [--options '{…}' | --merge-options '{…}']
 istota briefings blocks reorder -u USER --briefing NAME --ids 3,1,2
 istota briefings blocks remove  -u USER --id BLOCK_ID
 
 # A block's sources
 istota briefings sources list   -u USER --block BLOCK_ID
 istota briefings sources add    -u USER --block BLOCK_ID --kind rss|email|browse|markets|calendar|todos|reminders|notes|shared_block --config '{…}'
+istota briefings sources set     -u USER --id SOURCE_ID [--config '{…}' | --merge-config '{…}'] [--enabled | --disabled]
+istota briefings sources reorder -u USER --block BLOCK_ID --ids 3,1,2
 istota briefings sources remove -u USER --id SOURCE_ID
 
 # Module-owned shared blocks (global, admin)
 istota briefings shared list
-istota briefings shared ensure --name NAME --cron CRON [--title …] [--directive …] [--render-mode …] [--trusted] [--disabled] [--source-json '{"kind":"markets","config":{}}']
+istota briefings shared ensure --name NAME --cron CRON [--title …] [--directive …] [--render-mode …] [--trusted | --no-trusted] [--enabled | --disabled] [--source-json '{"kind":"markets","config":{}}']
 istota briefings shared run    --name NAME
 istota briefings shared remove --name NAME
 
 # Archive
 istota briefings archive list -u USER [--briefing NAME] [--limit N]
-istota briefings archive show -u USER --id ARCHIVE_ID
+istota briefings archive show -u USER --id ARCHIVE_ID [--blocks]
+istota briefings archive read -u USER --id ARCHIVE_ID            # show it and mark it read
+istota briefings archive mark-read -u USER (--all | --briefing NAME)
+istota briefings archive delete -u USER --id ARCHIVE_ID --confirmed
 ```
 
-`--source-json` is repeatable. `ensure` / `list` / `delete` are positional actions. There are no `-n`/`-c` short flags — use `--name` and `--cron` (`-c` is the global `--config`).
+`--merge-options` and `--merge-config` merge a JSON patch over what is stored, keeping the other keys, and a `null` value deletes a key; `--options` and `--config` replace the whole value. `blocks add --sources` creates the block and its sources in one call, and writes nothing if any source is refused. `archive delete` without `--confirmed` only says what it would remove. `--source-json` is repeatable. `ensure` / `list` / `delete` are positional actions. There are no `-n`/`-c` short flags — use `--name` and `--cron` (`-c` is the global `--config`).
 
 `istota briefing` (singular) still works as a deprecated shim for `istota briefings schedule` and prints a deprecation notice. Its `--component` / `--components-json` flags are gone — the boolean-component content model is retired, and content is authored as blocks (CLI above, a settings plan's `[[users.X.briefings.blocks]]`, or the web block editor).
 
@@ -192,6 +199,7 @@ istota secret remove -u USER --service SERVICE --key KEY
 istota secret export --user USER --out PATH
 istota secret import --user USER PATH [--include-changed] [--keyfile PATH]
 istota secret vault-new    -u USER --slug SLUG [--username USER] [--url URL] [--length N] [--no-symbols]
+istota secret retire       -u USER --name NAME --yes
 ```
 
 Only `-u`/`--user` has a short form. `--service`, `--key`, and `--value` are long-only (`-v` is the global verbose flag).
@@ -201,7 +209,7 @@ Only `-u`/`--user` has a short form. `--service`, `--key`, and `--value` are lon
 
 Export requires a terminal and prints a generated password once. Import prompts privately for the source passphrase, prints a preview, and imports new entries; `--include-changed` also replaces changed entries. Both use the same credential modules as Settings.
 
-`vault-new` creates a generated credential in the encrypted table and prints its names, never its password. It requires a configured user and a unique slug; `--length` and `--no-symbols` set password requirements. It does not write a KeePass file.
+`vault-new` creates a generated credential in the encrypted table and prints its names, never its password. It requires a configured user and a unique slug; `--length` and `--no-symbols` set password requirements. It does not write a KeePass file. `retire` removes a generated credential and its grant; files it was exported to stay as they are.
 
 ### Ensure-CLI state contract
 
@@ -219,6 +227,19 @@ istota email poll                            # Poll for new emails
 istota email test                            # Test email configuration
 ```
 
+### Connected mail accounts
+
+```bash
+istota mail-account list USER [--json]
+istota mail-account ensure USER SLUG [--label …] [--permission read|read_send] [--imap-host H] [--imap-port N] [--imap-security tls|starttls] [--imap-username U] [--default-folder F] [--smtp-host H | --no-smtp] [--smtp-port N] [--smtp-security tls|starttls] [--[no-]smtp-same-login] [--smtp-username U] [--from-address A] [--from-name N] [--sent-folder F] [--[no-]enabled] [--rename-to SLUG]
+istota mail-account set-password   USER SLUG (--imap | --smtp)      # password on stdin
+istota mail-account clear-password USER SLUG (--imap | --smtp)
+istota mail-account remove USER SLUG                                # with its passwords and pending drafts
+istota mail-account test   USER SLUG                                # sign in to IMAP, and SMTP when it may send; sends nothing
+```
+
+The accounts a user connects in Settings > Connections, managed from the host. `ensure` creates or updates an account by slug, and options left off keep their value; `--rename-to` changes the slug and keeps the passwords. Passwords are read from stdin only, never from an argument. See [email](../features/email.md).
+
 ### WhatsApp
 
 ```bash
@@ -233,6 +254,17 @@ istota whatsapp billing-unblock              # Cloud: clear it, after checking M
 `pair` belongs to the `baileys` adapter. It draws the QR code in the terminal, redrawing it each time WhatsApp rotates it, and returns when the session is ready. Recovering a session WhatsApp has unlinked takes `--reset`: the credential left on disk reads as a registered account, so the sidecar keeps trying to log in with it and no code is ever offered. The flag moves that directory to a timestamped sibling and pairs into a fresh one, deleting nothing. Both forms refuse to run while a bridge is listening on the socket, so stop the scheduler and any sidecar running as a unit of its own first. The two billing verbs belong to `whatsapp_cloud` and report nothing under Baileys, which has no per-message charge.
 
 `billing-status` reads and prints; `billing-unblock` destroys the evidence row along with the block, which is why the two are separate. Both print the Meta message id in full — this is the private operator surface. See [WhatsApp](../features/whatsapp.md).
+
+### Session logs
+
+```bash
+istota session list  [-u USER] [-t TASK_ID] [-n N]          # newest first; -n 0 lists all
+istota session show  TARGET [--attempt N] [--no-thinking] [--full] [--max-chars N]
+istota session tail  TARGET [--attempt N] [-n LINES] [--no-follow] [--interval SECONDS]
+istota session stats [--days N]                              # count and size, split by user
+```
+
+The native brain's transcripts, one JSONL file per task attempt under `{db_path.parent}/logs/{user_id}/`. `TARGET` is a log's path or a bare task id, with `--attempt` choosing the attempt. `show` caps the rendered output at 200,000 characters unless given `--full` or `--max-chars 0`. `tail` prints the last records and follows the file until interrupted. A transcript holds the whole assembled prompt, so these are operator commands; a task reads its own finished transcripts through `istota-skill tasks transcript`.
 
 ### Calendar
 
@@ -514,7 +546,7 @@ istota doctor --scope image|deployment       # Only facts about the image, or ab
 istota doctor --deep                         # Include checks that start a sandbox namespace
 ```
 
-Each result is `ok`, `warn`, `fail` or `skip`, with a remedy on everything that is not `ok`. It exits 1 on any failure and 0 otherwise.
+Each result is `ok`, `warn`, `fail` or `skip`, with a remedy on everything that is not `ok`. It exits 1 on any failure and 0 otherwise. Every check is listed in [Doctor checks](doctor-checks.md).
 
 ### Claude CLI credentials
 
@@ -528,9 +560,12 @@ The one writer of the `claude` CLI's credentials file, which the container's ent
 
 ```bash
 istota push test --user USER [--message TEXT]   # A test alert to each of the user's registered iOS devices
+istota push keygen [--force]                    # Write the private push signing key to [push] signing_key_path
 ```
 
-Exits 1 when `[push]` is disabled, the user has no registered device, or a send fails. See [push notifications](../features/notifications.md#push-notifications).
+`push test` exits 1 when `[push]` is disabled, the user has no registered device, or a send fails. See [push notifications](../features/notifications.md#push-notifications).
+
+`push keygen` writes a new Ed25519 key to `signing_key_path` (mode 0600, its directory created 0700 if missing) and the public half to `<signing_key_path>.pub` (0644), and prints the key ID. It never prints the key. It exits 1 when `signing_key_path` is not set or a key already exists there. `--force` replaces the key, and every enrolled device then has to enroll again before it shows private previews. Startup never creates or replaces the key. See [private push v1](private-push-v1.md).
 
 ### Config plans
 
@@ -606,18 +641,19 @@ istota-stack update TAG                      # verify a signed release tag, buil
 istota-stack update --unsigned TAG           # any tag, without the signature check, for this run
 istota-stack update --unsigned latest        # the tip of main, recorded as main-<12 hex>
 istota-stack update TAG --bundle FILE        # the same signed release, its tag from a bundle, no fetch from origin
-istota-stack update TAG --images DIR         # the same signed release, its images loaded from a signed archive, not built
+istota-stack update TAG --images DIR [--bundle FILE]   # the same signed release, its images loaded from a signed archive, not built
 istota-stack trust-signer KEY                # print the key's fingerprint and make it the release key
 istota-stack local-layers                    # build Claude Code and Chrome on a release's loaded images
 istota-stack local-layers --status           # one JSON line per layer: absent, building, ready or failed
 istota-stack latest-tag                      # the name `update --unsigned latest` would install; changes nothing
+istota-stack browser-grant-addresses         # print what the browser's [private_hosts] grants resolve to, for the firewall
 istota-stack rollback                        # back to the previous tag, if its image can run the database
 istota-stack setup [istota setup flags]      # the terminal wizard (first install, or --force to change it)
 istota-stack setup --web [--local]           # the first setup in a browser: an address and a one-use code
 istota-stack setup --web --force [--local]   # change a configured stack in a browser; the stack stops meanwhile
 istota-stack setup-code                      # print the address and code of a setup --web in progress
 istota-stack setup-cancel                    # end a setup --web in progress; a re-run puts the old setup back
-istota-stack apply PLAN [--dry-run] [--backup N]   # `istota apply` a plan; restarts the stack on a change
+istota-stack apply PLAN [--secrets-file FILE] [--no-restart] [--dry-run] [--backup N]   # `istota apply` a plan; restarts the stack on a change
 istota-stack config-apply                    # apply what the web config editor requested
 istota-stack check-image                     # exit 2 when the image lacks what config.toml needs
 istota-stack put-files [--dry-run]           # write secrets/ and config/admins from JSON on stdin, as uid 10001
@@ -638,7 +674,9 @@ istota-stack help
 
 `update` refuses a branch, a bare commit, a lightweight or unsigned tag, and a signature the release key in `allowed_signers` does not accept; `--unsigned` drops only the signature checks. `--bundle` takes the one tag from a git bundle (the Mac app's release) instead of fetching from origin, never over a tag the checkout already has, and is refused with `--unsigned`. `--images DIR` loads `images-TAG.tar` from DIR in place of a build, after checking `images-TAG.json`: its signature in the `istota-images` namespace against `allowed_signers`, the tag and the archive's SHA-256 it names, and the ID of every image the load reports. A refused archive changes nothing, and images a refused load replaced are put back. It is also refused with `--unsigned`. Once the stack is up on those images it runs `local-layers`, which builds what no release may carry: Claude Code as `istota:TAG-cc`, which `.env`'s `ISTOTA_IMAGE` then makes daemon and web run, and Google Chrome as `istota-browser:TAG`, the browser Dockerfile's `chrome` stage on the archive's `istota-browser-base:TAG`. `host.env`'s `ISTOTA_LOCAL_LAYERS` picks which; a Claude Code layer that is no longer wanted is removed, and a layer that fails leaves the stack on the release's own image and is tried again on the next run. A Chrome layer built for an older stable release than Google's current one is built again; when Google cannot be asked, the existing layer is kept. No update changes `allowed_signers`: `trust-signer` is the only way the release key changes, and it writes `RELEASE_SIGNING_KEY` in `host.env` with it. A failed build leaves the previous tag running. `rollback` asks the previous image whether it can run the database first. Both reprovision the host when the release changed what `provision.sh` installs.
 
-Every verb that writes (`update`, `rollback`, `setup`, `apply`, `put-files`, `import-bare-metal`, `restore`, `import-standalone`, `retire-bare-metal`, `localize-workspace`, `up`, `down`, `host-env KEY=VALUE`, `trust-signer`, `local-layers`, `reclaim --apply`) takes one lock; `local-layers --status` and `reclaim` with no arguments take none. A second one waits up to ten minutes, then names the verb holding it. `setup --web` never waits, and `config-apply` exits quietly when another verb holds the lock. `setup-cancel` takes no lock, since the setup it ends holds it.
+Every verb that writes (`update`, `rollback`, `setup`, `apply`, `put-files`, `import-bare-metal`, `restore`, `import-standalone`, `retire-bare-metal`, `localize-workspace`, `up`, `down`, `host-env KEY=VALUE`, `trust-signer`, `local-layers`, `reclaim --apply`) takes one lock; `local-layers --status` and `reclaim` with no arguments take none. A second one waits up to ten minutes, then names the verb holding it. `setup --web` never waits, and `config-apply` exits quietly when another verb holds the lock. `setup-cancel` takes no lock, since the setup it ends holds it. `browser-grant-addresses` takes none either.
+
+`apply --no-restart` writes the change and records the restart as owed instead of taking it; the next `apply` without the flag restarts once for both. That is how a play that changes the config and then the user settings restarts the stack only once. `--secrets-file` passes a private sidecar with the plan's credentials (see [settings plans](../configuration/declarative-settings.md)).
 
 `setup --force` and `setup --web --force` first copy `.env`, `host.env` and `rclone.conf` into `/srv/app/istota/backups/setup-<time>/`, keeping the newest ten. `setup --web --force` then copies the config and the secrets aside, pauses the browser watchdog timer and stops the stack before it prints the address. A finished run installs the new files and starts the stack and the timer again. A run that does not finish (Ctrl-C, `setup-cancel`, an idle hour) puts the previous config and secrets back and starts the stack on them. `--local` publishes the page on `127.0.0.1:<LOCAL_FORWARD_PORT>` from `host.env`, 8080 when that is empty. `restore` and `import-standalone` are for a stack that was never set up, and all three imports refuse while any container of the stack is running.
 

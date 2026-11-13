@@ -14370,22 +14370,47 @@ def _notification_mark_seen(username: str, seen: list[tuple[int, str]]) -> None:
         notification_store.mark_seen(conn, username, seen)
 
 
+def _push_sender_key() -> bytes | None:
+    """The installation's raw public key from the `.pub` file, or None when private push is off.
+
+    Raises `envelope.KeyFileError` when private push is on and the file is missing or malformed.
+    The web process reads only the public half; the private key is the daemon's.
+    """
+    from istota.push import envelope
+
+    push = _config.push
+    if push.content != "private":
+        return None
+    if not push.signing_key_path.strip():
+        raise envelope.KeyFileError("no push signing key path")
+    return envelope.load_public_key(envelope.public_key_path(push.signing_key_path))
+
+
 def _push_devices_list(username: str) -> dict:
     from istota import db
-    from istota.push import devices
+    from istota.push import devices, envelope
 
+    try:
+        raw = _push_sender_key()
+    except envelope.KeyFileError:
+        raw = None
+    sender_key_id = envelope.key_id(raw) if raw is not None else None
     with db.get_db(_config.db_path) as conn:
-        return {"devices": devices.list_devices(conn, username)}
+        return {"devices": devices.list_devices(
+            conn, username, content_mode=_config.push.content, sender_key_id=sender_key_id,
+        )}
 
 
-def _push_device_register(username: str, body: dict, auth: dict, session_id: str | None) -> dict | None:
+def _push_device_register(
+    username: str, body: dict, auth: dict, session_id: str | None, private: dict,
+) -> dict | None:
     from istota import db
     from istota.push import devices
 
     with db.get_db(_config.db_path) as conn:
         device_id = devices.register_device(
             conn, username, **body, auth_method=auth["method"], auth_epoch=auth["epoch"],
-            auth_session_id=session_id,
+            auth_session_id=session_id, **private,
         )
         if device_id is None:
             return None
@@ -14419,9 +14444,87 @@ async def push_devices_list(user: dict = Depends(_require_api_auth)):
     return await asyncio.to_thread(_push_devices_list, user["username"])
 
 
+@api_router.get("/push/sender-key")
+async def push_sender_key(user: dict = Depends(_require_api_auth)):
+    """The public key the native shell pins for private push (docs/reference/private-push-v1.md)."""
+    from istota.push import envelope
+
+    try:
+        raw = await asyncio.to_thread(_push_sender_key)
+    except envelope.KeyFileError:
+        return JSONResponse({"detail": "private push unavailable"}, status_code=503, headers=_NO_STORE)
+    if raw is None:
+        return JSONResponse({"detail": "private push not offered"}, status_code=404, headers=_NO_STORE)
+    return JSONResponse(
+        {"version": 1, "key_id": envelope.key_id(raw), "public_key": envelope.b64url(raw)}, headers=_NO_STORE,
+    )
+
+
 _CONNECTION_BINDING = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 # The native generation reaches JavaScript as a number, which is exact only this far.
 _MAX_SAFE_INTEGER = 2**53 - 1
+_PUSH_GENERATION = re.compile(r"[A-Za-z0-9_-]{22}")
+_PRIVATE_ENROLLMENT_KEYS = {
+    "encrypted": {"version", "content", "encryption_public_key", "encryption_key_id", "sender_key_id", "generation"},
+    "generic": {"version", "content", "generation"},
+}
+
+
+def _private_enrollment(private) -> dict:
+    """The validated `private` field as `register_device` columns; HTTP 400 on anything else."""
+    from istota.push import envelope
+
+    refused = HTTPException(400, "invalid private enrollment")
+    if not isinstance(private, dict):
+        raise refused
+    content = private.get("content")
+    if not isinstance(content, str) or content not in _PRIVATE_ENROLLMENT_KEYS:
+        raise refused
+    if set(private) != _PRIVATE_ENROLLMENT_KEYS[content]:
+        raise refused
+    if type(private["version"]) is not int or private["version"] != 1:
+        raise refused
+    generation = private["generation"]
+    if not isinstance(generation, str) or not _PUSH_GENERATION.fullmatch(generation):
+        raise refused
+    columns = {
+        "private_version": 1, "private_content": content, "push_generation": generation,
+        "encryption_public_key": None, "encryption_key_id": None, "sender_key_id": None,
+    }
+    if content == "generic":
+        return columns
+    public_key = private["encryption_public_key"]
+    key_id = private["encryption_key_id"]
+    sender_key_id = private["sender_key_id"]
+    try:
+        raw = envelope.b64url_decode(public_key)
+    except ValueError:
+        raise refused from None
+    if len(raw) != 32 or key_id != envelope.key_id(raw) or not envelope.usable_device_key(raw):
+        raise refused
+    try:
+        sender_digest = envelope.b64url_decode(sender_key_id)
+    except ValueError:
+        raise refused from None
+    if len(sender_digest) != 32:
+        raise refused
+    columns.update(encryption_public_key=public_key, encryption_key_id=key_id, sender_key_id=sender_key_id)
+    return columns
+
+
+def _private_enrollment_refusal(private: dict) -> HTTPException | None:
+    """The 409 or 503 a well-formed private enrollment gets against this installation, if any."""
+    from istota.push import envelope
+
+    try:
+        raw = _push_sender_key()
+    except envelope.KeyFileError:
+        return HTTPException(503, "private push unavailable")
+    if raw is None:
+        return HTTPException(409, "private push not offered")
+    if private["sender_key_id"] is not None and private["sender_key_id"] != envelope.key_id(raw):
+        return HTTPException(409, "sender key changed")
+    return None
 
 
 @api_router.post("/push/devices")
@@ -14436,7 +14539,7 @@ async def push_devices_register(request: Request, user: dict = Depends(_require_
     except (ValueError, UnicodeDecodeError, RecursionError):
         raise HTTPException(400, "invalid JSON") from None
     if not isinstance(body, dict) or set(body) - {
-        "token", "environment", "platform", "app_version", "connection_binding", "connection_generation",
+        "token", "environment", "platform", "app_version", "connection_binding", "connection_generation", "private",
     }:
         raise HTTPException(400, "invalid device registration")
     # The generic iOS shell names its native connection; older binaries send neither field.
@@ -14460,11 +14563,22 @@ async def push_devices_register(request: Request, user: dict = Depends(_require_
     version = body.get("app_version", "")
     if not isinstance(version, str) or len(version) > 100 or any(ord(c) < 32 for c in version):
         raise HTTPException(400, "invalid app version")
+    # Absent means a plain registration, which clears an earlier private enrollment.
+    private = {}
+    if "private" in body:
+        if "connection_binding" not in body:
+            raise HTTPException(400, "invalid private enrollment")
+        private = _private_enrollment(body.pop("private"))
+        refusal = await asyncio.to_thread(_private_enrollment_refusal, private)
+        if refusal is not None:
+            raise refusal
     auth = await asyncio.to_thread(_session_auth, request)
     session_id = request.session.get("session_id")
     if auth["method"] != "none" and (not isinstance(session_id, str) or not session_id):
         raise HTTPException(409, "Sign out and sign in again before registering this device.")
-    registration = await asyncio.to_thread(_push_device_register, user["username"], body, auth, session_id)
+    registration = await asyncio.to_thread(
+        _push_device_register, user["username"], body, auth, session_id, private,
+    )
     if registration is None:
         raise HTTPException(503, "could not register device")
     return {"id": registration["id"]}

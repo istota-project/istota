@@ -223,6 +223,8 @@ if verb == "shell":
     command = command[1:]
     vm = state.setdefault("vm", {})
     if command[:2] == ["sh", "-c"]:
+        if state.get("probe_rc"):
+            sys.exit(state["probe_rc"])
         out(f"tag={vm.get('tag', '')}\nunsigned={vm.get('unsigned', '')}\n"
             f"publish={vm.get('publish', '')}\n"
             f"config={1 if vm.get('config') else 0}\nadmin={vm.get('admin', '')}\n")
@@ -253,10 +255,17 @@ if verb == "shell":
         if rc == 0:
             words = [w for i, w in enumerate(stack[1:], 1)
                      if not w.startswith("--") and stack[i - 1] not in ("--bundle", "--images")]
+            if vm.get("tag"):
+                vm["previous"], vm["previous_unsigned"] = vm["tag"], vm.get("unsigned", "")
             vm["tag"] = words[-1] if words else stack[-1]
             vm["unsigned"] = "1" if "--unsigned" in stack else ""
         save()
         sys.exit(rc)
+    if stack == ["rollback"] and not state.get("forward_rc") and vm.get("previous"):
+        vm["tag"], vm["previous"] = vm["previous"], vm["tag"]
+        vm["unsigned"], vm["previous_unsigned"] = vm.get("previous_unsigned", ""), vm.get("unsigned", "")
+        save()
+        sys.exit(0)
     if stack[:1] == ["setup-cancel"]:
         state["cancelled"] = True
         save()
@@ -1110,6 +1119,80 @@ class TestTheDeployedTagIsKept:
         assert ["update", "v1.4.0"] in updated.stack_calls()
         state = (updated.home / ".config" / "istota-stack" / "istota.env").read_text()
         assert "DEPLOYED_TAG=v1.4.0\n" in state
+
+
+class TestARollbackIsReadBack:
+    """`rollback` is the VM's own verb, forwarded with nothing on the Mac
+    watching, so what the VM runs is read back before a release is chosen:
+    a later `create`, `restore` or `update --appliance` sees the release the
+    VM rolled back to, not the newer one (ISSUE-941)."""
+
+    @pytest.fixture
+    def rolled_back(self, mac):
+        assert _create(mac).returncode == 0
+        assert mac.run("update", "v1.3.0").returncode == 0
+        result = mac.run("rollback")
+        assert result.returncode == 0, result.stdout + result.stderr
+        mac.calls_path.unlink()
+        return mac
+
+    def test_the_rollback_is_a_plain_forward(self, rolled_back):
+        assert "DEPLOYED_TAG=v1.3.0\n" in _state_text(rolled_back)
+
+    def test_restore_installs_the_tag_rolled_back_to(self, rolled_back):
+        _back_up(rolled_back)
+        result = rolled_back.run("restore", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert [c for c in rolled_back.stack_calls() if c[:1] == ["update"]] == [["update", "v1.2.0"]]
+
+    def test_restore_from_the_release_rolled_back_to(self, mac, release, tmp_path):
+        assert _appliance_create(mac, release).returncode == 0
+        # A whole signed release: restore checks the recorded one before it can read the VM.
+        newer = _release_dir(tmp_path, tag="v1.4.0").dir
+        assert mac.run("update", "--appliance", str(newer)).returncode == 0
+        assert mac.run("rollback").returncode == 0
+        _back_up(mac)
+        mac.calls_path.unlink()
+        result = mac.run("restore", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert f"--param=IMAGE={_staged_raw(mac)}" in _limactl_create(mac)
+        assert f"APPLIANCE={_resolved(release.dir)}\n" in _state_text(mac)
+
+    def test_a_stopped_vm_is_not_read_before_it_starts(self, rolled_back):
+        rolled_back.set(instance={"name": "istota", "status": "Stopped"})
+        result = rolled_back.run("create", "--no-setup")
+        assert result.returncode == 0, result.stdout + result.stderr
+        start = rolled_back.calls("limactl").index(["start", "--tty=false", "istota"])
+        assert not any(c[:1] == ["shell"] for c in rolled_back.calls("limactl")[:start])
+
+    def test_a_create_that_started_the_vm_does_not_hide_the_rollback(self, mac, release, tmp_path):
+        """create on a stopped VM reads its tag back only after starting it,
+        which records DEPLOYED_TAG and leaves APPLIANCE; restore still moves
+        APPLIANCE to the release the VM runs."""
+        assert _appliance_create(mac, release).returncode == 0
+        newer = _release_dir(tmp_path, tag="v1.4.0").dir
+        assert mac.run("update", "--appliance", str(newer)).returncode == 0
+        assert mac.run("rollback").returncode == 0
+        mac.set(instance={"name": "istota", "status": "Stopped"})
+        assert mac.run("create").returncode == 0
+        _back_up(mac)
+        mac.calls_path.unlink()
+        result = mac.run("restore", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert f"--param=IMAGE={_staged_raw(mac)}" in _limactl_create(mac)
+        assert f"APPLIANCE={_resolved(release.dir)}\n" in _state_text(mac)
+
+    def test_create_takes_the_release_rolled_back_to(self, mac, release):
+        """The guard reads the VM, not the newer tag the state last saw."""
+        assert _appliance_create(mac, release, "--no-setup").returncode == 0
+        newer = TestUpdateFromARelease._another(release.root / "v1.4.0")
+        assert mac.run("update", "--appliance", str(newer)).returncode == 0
+        assert mac.run("rollback").returncode == 0
+        result = _appliance_create(mac, release, "--no-setup")
+        assert result.returncode == 0, result.stdout + result.stderr
+        state = _state_text(mac)
+        assert f"APPLIANCE={_resolved(release.dir)}\n" in state
+        assert f"DEPLOYED_TAG={APPLIANCE_TAG}\n" in state
 
 
 class TestTheScriptsRefresh:
@@ -2590,6 +2673,40 @@ class TestUpdateFromARelease:
         result = made.run("update", "--appliance", str(newer))
         assert result.returncode == 65
         assert f"APPLIANCE={_resolved(release.dir)}\n" in _state_text(made)
+
+    def test_an_older_release_is_refused(self, made, release):
+        """The database a newer release migrated may not open on an older
+        one (SchemaTooNew), and the VM's update has no schema check (ISSUE-940)."""
+        older = self._another(release.root / "v1.2.0")
+        result = made.run("update", "--appliance", str(older))
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert APPLIANCE_TAG in result.stderr
+        assert made.stack_calls() == []
+        assert f"APPLIANCE={_resolved(release.dir)}\n" in _state_text(made)
+
+    def test_an_unsigned_deployed_tag_is_not_ordered(self, made, release):
+        made.set(vm={**made.state()["vm"], "tag": "main-0a1b2c3", "unsigned": "1"})
+        state = made.home / ".config" / "istota-stack" / "istota.env"
+        state.write_text(state.read_text().replace("DEPLOYED_UNSIGNED=\n", "DEPLOYED_UNSIGNED=1\n"))
+        older = self._another(release.root / "v1.2.0")
+        assert made.run("update", "--appliance", str(older)).returncode == 0
+        assert made.stack_calls()[0][:2] == ["update", "v1.2.0"]
+
+    def test_an_update_read_back_from_nowhere_still_records_its_release(self, made, release):
+        newer = self._another(release.root / "v1.4.0")
+        made.set(probe_rc=1)
+        result = made.run("update", "--appliance", str(newer))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "DEPLOYED_TAG=v1.4.0\n" in _state_text(made)
+
+    def test_the_release_rolled_back_to_installs_again(self, made, release):
+        newer = self._another(release.root / "v1.4.0")
+        assert made.run("update", "--appliance", str(newer)).returncode == 0
+        assert made.run("rollback").returncode == 0
+        made.calls_path.unlink()
+        result = made.run("update", "--appliance", str(release.dir))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert made.stack_calls()[0][:2] == ["update", APPLIANCE_TAG]
 
     def test_a_vm_made_from_a_release_tag_has_no_release_mount(self, mac, release):
         assert _create(mac, "--no-setup").returncode == 0

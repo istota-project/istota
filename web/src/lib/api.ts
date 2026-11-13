@@ -8286,11 +8286,27 @@ export interface PushDevice {
   created_at: string;
   last_seen_at: string | null;
   last_error: string | null;
+  /** What this device is sent now: plaintext, the fixed alert, or a sealed preview. */
+  content: 'legacy' | 'generic' | 'encrypted';
+  /** Enrolled under an earlier sender key, so it gets the fixed alert until it enrolls again. */
+  stale_key: boolean;
 }
 
 export function listPushDevices(): Promise<{ devices: PushDevice[] }> {
   return apiFetch('/push/devices');
 }
+
+/** The `private` field of a registration (docs/reference/private-push-v1.md). */
+export type PrivatePushEnrollment =
+  | {
+      version: 1;
+      content: 'encrypted';
+      encryption_public_key: string;
+      encryption_key_id: string;
+      sender_key_id: string;
+      generation: string;
+    }
+  | { version: 1; content: 'generic'; generation: string };
 
 export function registerPushDevice(device: {
   token: string;
@@ -8300,8 +8316,29 @@ export function registerPushDevice(device: {
   /** The generic shell's native connection (0.12.0 and later); older shells send neither. */
   connection_binding?: string;
   connection_generation?: number;
+  private?: PrivatePushEnrollment;
 }): Promise<{ id: number }> {
   return apiFetch('/push/devices', { method: 'POST', body: JSON.stringify(device) });
+}
+
+export interface PushSenderKey {
+  version: 1;
+  key_id: string;
+  public_key: string;
+}
+
+export function getPushSenderKey(): Promise<PushSenderKey> {
+  return apiFetch('/push/sender-key');
+}
+
+/** The push half of the mobile discovery document the native shell reads. */
+export interface MobilePushCapabilities {
+  delivery: 'direct' | 'unavailable';
+  private?: { versions: number[] };
+}
+
+export async function getMobilePushCapabilities(): Promise<MobilePushCapabilities> {
+  return (await apiFetch<{ push: MobilePushCapabilities }>('/mobile/config')).push;
 }
 
 export function deletePushDevice(id: number): Promise<{ ok: boolean }> {
