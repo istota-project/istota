@@ -43,6 +43,24 @@ export function plainBackup(view: AdminConfigView, at: Date = new Date()): Plain
   return { ok: true, bytes, filename: `istota-config-${backupStamp(at)}.toml` };
 }
 
+/** Base64 of bytes the page sends, built in chunks so an 8 MiB file does not
+ *  overflow the argument list of `String.fromCharCode`. */
+export function toBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
+/** A KDBX file's first four bytes. The server decides; this only picks which
+ *  questions the restore dialog asks. */
+const KDBX_SIGNATURE = [0x03, 0xd9, 0xa2, 0x9a];
+
+export function looksEncrypted(bytes: Uint8Array): boolean {
+  return KDBX_SIGNATURE.every((byte, i) => bytes[i] === byte);
+}
+
 /** The bytes of a base64 string the server sent. */
 export function fromBase64(text: string): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(atob(text), (char) => char.charCodeAt(0));

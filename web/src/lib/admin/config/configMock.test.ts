@@ -97,6 +97,40 @@ it('walks a change from preview to applied and moves started_at', async () => {
     });
     expect(broken).toMatchObject({ status: 400, body: { error: 'invalid_change' } });
     expect(broken.body.errors[0]).toMatch(/does not parse.*line 1/);
+
+    // An uploaded encrypted backup previews its credentials without values and
+    // is queued only with the digests its preview returned.
+    const upload = {
+      format: 'kdbx',
+      file: btoa('\x03\xd9\xa2\x9amock'),
+      password: 'any',
+      keyfile: null,
+      base_digest: (await request('GET', '/admin/config')).body.document_digest,
+      restore_config: false,
+      selected: ['istota_brave_api_key'],
+    };
+    const opened = await request('POST', '/admin/config/restore/preview', upload);
+    expect(opened.status).toBe(200);
+    expect(opened.body).not.toHaveProperty('__changeSet');
+    expect(opened.body.preview.secret_names).toEqual(['istota_brave_api_key']);
+    expect(opened.body.credentials.find((c: any) => c.status === 'host_only').selectable).toBe(
+      false,
+    );
+    const proof = { request_id: 'mock-step-up', code: '123456' };
+    const reviewed = {
+      ...upload,
+      input_digest: opened.body.input_digest,
+      preview_digest: opened.body.preview_digest,
+      confirm: [],
+      step_up: proof,
+    };
+    const otherSelection = await request('POST', '/admin/config/restore/requests', {
+      ...reviewed,
+      selected: [],
+    });
+    expect(otherSelection).toMatchObject({ status: 409, body: { error: 'preview_changed' } });
+    const queued = await request('POST', '/admin/config/restore/requests', reviewed);
+    expect(queued.status).toBe(202);
   } finally {
     vi.useRealTimers();
   }

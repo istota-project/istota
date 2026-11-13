@@ -1338,3 +1338,80 @@ describe('backup', () => {
     expect(screen.getByRole('button', { name: 'Download' })).toBeDisabled();
   });
 });
+
+describe('restore from a file', () => {
+  const plain = '[email]\nimap_host = "restored"\n';
+  const restorePreview = (preview = configPreview()) => ({
+    preview,
+    input_digest: 'input-1',
+    preview_digest: 'preview-1',
+    credentials: [],
+    note: 'A plain backup restores the configuration only.',
+  });
+
+  async function previewPlain() {
+    await fireEvent.click(await screen.findByRole('button', { name: 'Restore configuration' }));
+    await fireEvent.change(screen.getByLabelText('Backup file', { selector: 'input' }), {
+      target: { files: [new File([plain], 'istota-config.toml')] },
+    });
+    await fireEvent.click(await screen.findByRole('button', { name: 'Preview' }));
+  }
+
+  it('is held back while edits are pending or a change is open', async () => {
+    mount(configView([imapHost]));
+    const button = await screen.findByRole('button', { name: 'Restore configuration' });
+    expect(button).toBeEnabled();
+    await fireEvent.input(screen.getByLabelText('imap_host'), { target: { value: 'new' } });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute('title', expect.stringMatching(/pending changes/));
+    cleanup();
+
+    api.getConfigRequest.mockResolvedValue(configRequest({ id: 21, status: 'taken' }));
+    mount(configView([imapHost]), [configRequest({ id: 21, status: 'taken' })]);
+    await screen.findByText('Change #21');
+    expect(screen.getByRole('button', { name: 'Restore configuration' })).toBeDisabled();
+  });
+
+  it('reviews an uploaded file and follows the request it creates', async () => {
+    api.previewConfigRestore.mockResolvedValue(
+      restorePreview(configPreview({ diff: ['+imap_host = "restored"'] })),
+    );
+    api.submitConfigRestore.mockResolvedValue({ id: 40 });
+    api.getConfigRequest.mockResolvedValue(configRequest({ id: 40, status: 'pending' }));
+    api.startStepUp.mockResolvedValue({
+      request_id: 'step-1',
+      method: 'email' as const,
+      email_hint: 'a•••@example.com',
+      expires_at: 'later',
+    });
+    mount(configView([imapHost]));
+    await previewPlain();
+    expect(await screen.findByText(/\+imap_host = "restored"/)).toBeInTheDocument();
+    expect(api.previewConfigRestore.mock.calls[0][0]).toMatchObject({
+      format: 'toml',
+      base_digest: 'digest-1',
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Apply…' }));
+    await screen.findByText(/a•••@example.com/);
+    await fireEvent.input(screen.getByLabelText('Confirmation code'), {
+      target: { value: '123456' },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByText('Change #40')).toBeInTheDocument();
+    await waitFor(() => expect(api.getConfigRequest).toHaveBeenCalledWith(40));
+    expect(screen.getByRole('button', { name: 'Restore configuration' })).toBeDisabled();
+  });
+
+  it('can be inspected on a read-only installation, without Apply', async () => {
+    api.previewConfigRestore.mockResolvedValue(restorePreview());
+    mount(
+      configView([imapHost], {
+        editable: false,
+        applier: { kind: 'none', available: false, reason: 'No host applier here.' },
+      }),
+    );
+    await previewPlain();
+    expect(await screen.findAllByText('No host applier here.')).not.toHaveLength(0);
+    expect(screen.getByRole('button', { name: 'Apply…' })).toBeDisabled();
+  });
+});

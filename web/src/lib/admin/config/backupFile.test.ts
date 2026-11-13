@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { configView } from '$lib/test/adminConfig';
-import { backupStamp, fromBase64, plainBackup } from './backupFile';
+import { backupStamp, fromBase64, looksEncrypted, plainBackup, toBase64 } from './backupFile';
 
 const at = new Date('2026-11-13T09:15:00.123Z');
 const preamble = '# header\n\n';
@@ -53,4 +53,15 @@ describe('plainBackup', () => {
 it('stamps and decodes as the server does', () => {
   expect(backupStamp(at)).toBe('20261113T091500Z');
   expect(Array.from(fromBase64(btoa('\u0000ÿ')))).toEqual([0, 255]);
+});
+
+it('encodes an upload larger than one chunk, byte for byte', () => {
+  const bytes = Uint8Array.from({ length: 0x8000 * 2 + 3 }, (_, i) => i % 256);
+  expect(Array.from(fromBase64(toBase64(bytes)))).toEqual(Array.from(bytes));
+});
+
+it('tells a KDBX file from TOML by its first bytes', () => {
+  expect(looksEncrypted(new Uint8Array([0x03, 0xd9, 0xa2, 0x9a, 0x67]))).toBe(true);
+  expect(looksEncrypted(new TextEncoder().encode('[web]\n'))).toBe(false);
+  expect(looksEncrypted(new Uint8Array([0x03, 0xd9]))).toBe(false);
 });

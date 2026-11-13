@@ -27,6 +27,7 @@
   import HistoryList from '$lib/admin/config/HistoryList.svelte';
   import RawEditor from '$lib/admin/config/RawEditor.svelte';
   import RequestProgress from '$lib/admin/config/RequestProgress.svelte';
+  import RestoreDialog from '$lib/admin/config/RestoreDialog.svelte';
   import ReviewDialog from '$lib/admin/config/ReviewDialog.svelte';
   import ConfigSecretField from '$lib/admin/config/ConfigSecretField.svelte';
   import ServarrAppsEditor from '$lib/admin/config/ServarrAppsEditor.svelte';
@@ -78,6 +79,7 @@
   let draft = $state<ConfigDraft>(emptyDraft());
   let reviewing = $state(false);
   let backingUp = $state(false);
+  let uploading = $state(false);
   let requestId = $state<number | null>(null);
   let pageNotice = $state('');
   let history = $state<ConfigRequest[] | null>(null);
@@ -209,6 +211,27 @@
           : count > 0
             ? 'Review or discard your pending changes to restore an earlier configuration.'
             : null,
+  );
+
+  /** Why a backup file cannot be restored now. Managed resources are left
+   *  to the server: a credentials-only restore of a managed config may go. */
+  let uploadBlockedReason = $derived(
+    !view?.document_digest
+      ? 'config.toml could not be read, so there is nothing to restore onto.'
+      : requestId !== null
+        ? 'A change is in progress.'
+        : count > 0
+          ? 'Review or discard your pending changes to restore a backup.'
+          : null,
+  );
+
+  /** Why a restore can be inspected but not applied here. */
+  let applyBlockedReason = $derived(
+    !view || editable
+      ? null
+      : view.applier.available
+        ? 'This process has no config.toml to change.'
+        : view.applier.reason,
   );
 
   /** File credentials no config key reads, so no section field shows them. */
@@ -485,8 +508,16 @@
     void loadHistory();
   }
 
+  function onRestoreSubmitted(id: number) {
+    uploading = false;
+    pageNotice = '';
+    requestId = id;
+    void loadHistory();
+  }
+
   function onRequestOpen(id: number) {
     closeReview();
+    uploading = false;
     pageNotice = 'Another change is already waiting for the host. It is shown below.';
     requestId = id;
   }
@@ -645,6 +676,12 @@
         <Button variant="secondary" class="backup-button" onclick={() => (backingUp = true)}
           >Back up configuration</Button
         >
+        <Button
+          variant="secondary"
+          disabled={!!uploadBlockedReason}
+          title={uploadBlockedReason ?? undefined}
+          onclick={() => (uploading = true)}>Restore configuration</Button
+        >
       </div>
 
       {#if backingUp}
@@ -654,6 +691,17 @@
           encryptedAvailable={!!view.backup_encrypted_available}
           limitsAvailable={!!view.backup_limits}
           onClose={() => (backingUp = false)}
+        />
+      {/if}
+
+      {#if uploading && view.document_digest}
+        <RestoreDialog
+          baseDigest={view.document_digest}
+          {applyBlockedReason}
+          onClose={() => (uploading = false)}
+          onSubmitted={onRestoreSubmitted}
+          onConflict={load}
+          {onRequestOpen}
         />
       {/if}
 

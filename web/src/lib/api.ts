@@ -1033,6 +1033,70 @@ export function exportConfigBackup(
   return configChangeWrite<ConfigBackupExport>('/backup', { keyfile, step_up }, signal);
 }
 
+export type ConfigRestoreStatus = 'new' | 'changed' | 'unchanged' | 'host_only';
+
+/** A credential an uploaded backup holds, compared with this installation.
+ *  Never a value. Only a `selectable` one (`new` or `changed`) can be restored. */
+export interface ConfigRestoreCredential {
+  /** The destination, which `selected` names. */
+  id: string;
+  kind: 'file' | 'inline';
+  name: string;
+  /** Where the backed-up value was saved: a secret file or config.toml. */
+  source: 'file' | 'inline';
+  status: ConfigRestoreStatus;
+  /** Why a `host_only` credential is not restored from here. */
+  reason: string | null;
+  selectable: boolean;
+}
+
+/** An uploaded backup and what to restore from it. `file` and `keyfile` are
+ *  base64. A plain (`toml`) backup takes no password, key file or selection. */
+export interface ConfigRestoreUpload {
+  format: 'toml' | 'kdbx';
+  file: string;
+  password: string | null;
+  keyfile: string | null;
+  base_digest: string;
+  restore_config: boolean;
+  selected: string[];
+}
+
+export interface ConfigRestorePreview {
+  preview: ConfigPreview;
+  /** What the preview was made from; a submit sends both digests back. */
+  input_digest: string;
+  preview_digest: string;
+  credentials: ConfigRestoreCredential[];
+  note: string;
+}
+
+export interface ConfigRestoreSubmit extends ConfigRestoreUpload {
+  input_digest: string;
+  preview_digest: string;
+  confirm: string[];
+  step_up: StepUpProof;
+}
+
+/** What restoring an uploaded backup would do. Stores nothing, needs no
+ *  step-up, and returns no credential value. */
+export function previewConfigRestore(
+  upload: ConfigRestoreUpload,
+  signal?: AbortSignal,
+): Promise<ConfigRestorePreview> {
+  return configChangeWrite<ConfigRestorePreview>('/restore/preview', upload, signal);
+}
+
+/** Queue a reviewed restore as a config change request. The server opens the
+ *  upload again and refuses with `preview_changed` when it no longer matches
+ *  the preview. Needs step-up action `admin_config_change`. */
+export function submitConfigRestore(
+  body: ConfigRestoreSubmit,
+  signal?: AbortSignal,
+): Promise<{ id: number }> {
+  return configChangeWrite<{ id: number }>('/restore/requests', body, signal);
+}
+
 /** Withdraw a request the host has not taken yet. */
 export function cancelConfigRequest(id: number): Promise<{ id: number; status: 'cancelled' }> {
   return configChangeWrite(`/requests/${id}/cancel`, {});
