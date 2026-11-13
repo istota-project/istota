@@ -33,7 +33,8 @@
     limitsAvailable = false,
   }: Props = $props();
 
-  const RUNBOOK_URL = 'https://istota.cynium.com/docs/deployment/running-the-stack/';
+  const RUNBOOK_URL =
+    'https://istota.cynium.com/docs/deployment/running-the-stack/#recovering-a-lost-installation';
   const SCOPE =
     'Configuration and installation credentials only; keep database/workspace backups and the ' +
     'original master key separately.';

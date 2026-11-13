@@ -154,6 +154,25 @@ describe('the plain download', () => {
     expect(
       screen.getByText(/keep database\/workspace backups and the original master key separately/),
     ).toBeInTheDocument();
+    expect(screen.queryByText(/Disaster recovery ready/i)).toBeNull();
+  });
+
+  it('links the lost-installation runbook from the options and the saved-password screen', async () => {
+    const runbook = /\/docs\/deployment\/running-the-stack\/#recovering-a-lost-installation$/;
+    mount();
+    const [options] = screen.getAllByRole('link', { name: 'Recovering an installation' });
+    expect(options.getAttribute('href')).toMatch(runbook);
+    await fireEvent.click(secretsBox());
+    await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await confirmCode();
+    await screen.findByText(password);
+    const links = screen.getAllByRole('link', { name: 'Recovering an installation' });
+    expect(links.length).toBeGreaterThan(0);
+    for (const link of links) expect(link.getAttribute('href')).toMatch(runbook);
+    expect(
+      screen.getAllByText(/keep database\/workspace backups and the original master key separately/)
+        .length,
+    ).toBeGreaterThan(0);
   });
 });
 

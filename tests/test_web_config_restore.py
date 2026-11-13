@@ -189,6 +189,103 @@ class TestTheRoundTrip:
         assert json.loads(row["secret_names_json"]) == []
 
 
+SESSION_KEY = "fixture-session-signing-key-3f6d"
+TOKEN_KEY = "fixture-web-token-key-c81e"
+
+
+def _archive_text(kp) -> str:
+    """Every field, property and attachment of an opened archive, as one text."""
+    parts = []
+    for entry in kp.entries:
+        parts += [entry.title or "", entry.username or "", entry.password or "", entry.notes or ""]
+        parts += [f"{key}={value}" for key, value in entry.custom_properties.items()]
+        parts += [attachment.data.decode("utf-8", "replace") for attachment in entry.attachments]
+    return "\n".join(parts)
+
+
+class TestTheExportRoundTrip:
+    """The backup the export route hands out is the one the restore routes take:
+    `POST /backup`, the installation moves on, then preview, submit,
+    `requests.take` and `handoff.build` with the downloaded file and the
+    password the export generated."""
+
+    async def test_an_exported_backup_reaches_the_host_handoff(self, alice, install, monkeypatch, caplog):
+        from tests.test_web_config_backup import BACKUP, EXPORT_PASSWORD, _open, _proof
+
+        caplog.set_level(logging.INFO)
+        monkeypatch.setattr(config_check, "run_check", _REAL_RUN_CHECK)
+        install["file"].write_text(CURRENT + f'\n[web.map]\napi_key = "{MAP_KEY}"\n', encoding="utf-8")
+        secrets_dir = install["secrets"]
+        (secrets_dir / "istota_nextcloud_app_password").write_text(NC_PASSWORD, encoding="utf-8")
+        (secrets_dir / "istota_web_session_secret_key").write_text(SESSION_KEY, encoding="utf-8")
+        monkeypatch.setenv("ISTOTA_WEB_TOKEN_KEY", TOKEN_KEY)
+        master_key = "a" * 64  # the fixture's ISTOTA_SECRET_KEY
+
+        response = await alice.post(BACKUP, json={"step_up": await _proof(alice, install)}, headers=ORIGIN)
+        assert response.status_code == 200, response.text
+        exported = response.json()
+        assert exported["password"] == EXPORT_PASSWORD
+
+        # The manifest names what a rebuild needs beyond this file, and no
+        # runtime key is anywhere in it.
+        kp = _open(exported)
+        [root] = kp.root_group.subgroups
+        manifest = next(entry for entry in root.entries if entry.title == "Backup manifest")
+        assert manifest.custom_properties["istota.recovery_scope"] == backup.RECOVERY_SCOPE
+        requires = json.loads(manifest.custom_properties["istota.recovery_requires"])
+        assert requires == list(backup.RECOVERY_REQUIRES)
+        assert "the original credential-store master key" in requires
+        text = _archive_text(kp)
+        for value in (FILE_VALUE, MAP_KEY, NC_PASSWORD):
+            assert value in text
+        for runtime_key in (SESSION_KEY, TOKEN_KEY, master_key):
+            assert runtime_key not in text
+
+        # The installation moves on after the backup.
+        install["file"].write_text(CURRENT.replace("old.example.org", "new.example.org"), encoding="utf-8")
+        (secrets_dir / "istota_email_imap_password").write_text(ROTATED, encoding="utf-8")
+
+        upload = {
+            "format": "kdbx", "file": exported["file"], "password": exported["password"],
+            "base_digest": _digest(install), "restore_config": True, "selected": [IMAP, MAP],
+        }
+        seen = [response]
+        response = await alice.post(PREVIEW, json=upload, headers=ORIGIN)
+        seen.append(response)
+        assert response.status_code == 200, response.text
+        reviewed = response.json()
+        statuses = {row["id"]: row["status"] for row in reviewed["credentials"]}
+        assert statuses == {IMAP: "changed", HEADERS: "unchanged", MAP: "new", NEXTCLOUD: "host_only"}
+        assert reviewed["preview"]["errors"] == [] and reviewed["preview"]["problems"]["blocking"] == []
+
+        response = await alice.post(SUBMIT, headers=ORIGIN, json={
+            **upload, "input_digest": reviewed["input_digest"], "preview_digest": reviewed["preview_digest"],
+            "step_up": await _step_up(alice, install),
+        })
+        seen.append(response)
+        assert response.status_code == 202, response.text
+
+        live = install["file"].read_bytes()
+        with db.get_db(install["config"].db_path) as conn:
+            taken = config_requests.take(conn, _digest(install))
+        plan, files, _ = handoff.build(taken, tomllib.loads(live.decode()), environ={})
+        assert plan["config"]["email"]["imap_host"] == "old.example.org"
+        assert plan["config"]["web"]["map"]["api_key"] == MAP_KEY
+        assert files["secrets"] == {"istota_email_imap_password": FILE_VALUE}
+
+        # Values only inside the encrypted file and the sealed column; the
+        # export password nowhere the server keeps.
+        public = [json.dumps({k: v for k, v in seen[0].json().items() if k not in ("file", "password")})]
+        public += [r.text for r in seen[1:]]
+        for text in public + [caplog.text]:
+            for value in (FILE_VALUE, MAP_KEY, NC_PASSWORD, SESSION_KEY, TOKEN_KEY, EXPORT_PASSWORD):
+                assert value not in text
+        with db.get_db(install["config"].db_path) as conn:
+            dump = "\n".join(conn.iterdump())
+        for value in (EXPORT_PASSWORD, SESSION_KEY, TOKEN_KEY, FILE_VALUE, MAP_KEY, NC_PASSWORD):
+            assert value not in dump
+
+
 class TestSelection:
     async def test_host_only_unchanged_and_unknown_selections_are_refused(self, alice, archive):
         for selected in ([NEXTCLOUD], [HEADERS], ["file:../../etc/passwd"]):
