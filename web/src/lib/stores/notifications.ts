@@ -20,7 +20,7 @@
  * itself on the first `AuthError` rather than grinding on through an expired
  * session.
  */
-import { writable, type Readable, type Writable } from 'svelte/store';
+import { get, writable, type Readable, type Writable } from 'svelte/store';
 import {
   AuthError,
   getNotificationCounts,
@@ -77,6 +77,27 @@ export const notificationsLoading: Writable<boolean> = writable(false);
  * it can stay put and be re-read, and that reaching for a transient notice
  * there is a sign the surface is missing a banner. The panel now has one. */
 export const notificationsError: Writable<string> = writable('');
+
+const panelRequest = writable(false);
+
+/** Whether something outside the bell has asked for the panel to open: a push
+ *  tap routed to the inbox (#949). A flag rather than an event, so a request
+ *  made before the bell has mounted still opens it once it does. */
+export const notificationPanelRequested: Readable<boolean> = {
+  subscribe: panelRequest.subscribe,
+};
+
+export function requestNotificationPanel(): void {
+  panelRequest.set(true);
+}
+
+/** Clear the request, saying whether there was one. The panel calls this as it
+ *  opens, so one request opens it once. */
+export function takeNotificationPanelRequest(): boolean {
+  const requested = get(panelRequest);
+  panelRequest.set(false);
+  return requested;
+}
 
 let timer: ReturnType<typeof setTimeout> | null = null;
 let polling = false;
@@ -391,6 +412,7 @@ export function resetNotifications(): void {
   notificationsError.set('');
   consecutiveFailures = 0;
   activeFilter = 'all';
+  panelRequest.set(false);
 }
 
 /** The pairs to report for a rendered list. Exported so the panel and its test
