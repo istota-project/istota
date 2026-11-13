@@ -18,6 +18,7 @@ import binascii
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
 from dataclasses import dataclass
@@ -30,6 +31,8 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.hpke import AEAD, KDF, KEM, Suite
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+from istota.lib.atomic_write import write_bytes_atomic
 
 VERSION = 1
 SUITE = Suite(KEM.X25519, KDF.HKDF_SHA256, AEAD.AES_128_GCM)
@@ -197,6 +200,34 @@ def load_public_key(path) -> bytes:
     if len(raw) != 32:
         raise KeyFileError("the push public key is not 32 bytes")
     return raw
+
+
+def public_key_path(signing_key_path) -> Path:
+    return Path(f"{signing_key_path}.pub")
+
+
+def write_signing_key(path, *, force: bool = False) -> Ed25519PrivateKey:
+    """Write a fresh key to `path` (0600) and its `.pub` sibling (0644).
+
+    Refuses with `FileExistsError` when either file exists, unless `force`.
+    Each file is replaced atomically, the private key first, so a crash
+    between the two leaves a pair doctor reports as mismatched rather than a
+    public key with no private half.
+    """
+    path = Path(path)
+    pub = public_key_path(path)
+    if not force and (path.exists() or pub.exists()):
+        raise FileExistsError(str(path))
+    if not path.parent.is_dir():
+        path.parent.mkdir(parents=True, mode=0o700)
+        os.chmod(path.parent, 0o700)
+    key = Ed25519PrivateKey.generate()
+    pem = key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+    )
+    write_bytes_atomic(path, pem, mode=0o600, fsync=True)
+    write_bytes_atomic(pub, public_key_line(key).encode("ascii"), mode=0o644, fsync=True)
+    return key
 
 
 # --- Validation shared by seal and open -----------------------------------------------

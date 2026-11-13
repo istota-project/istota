@@ -11133,12 +11133,51 @@ def check_push_credentials(config: "Config", probe: bool) -> CheckResult:
         return CheckResult(name, FAIL, f"APNs key metadata unavailable ({type(exc).__name__})", "Install the signing key at apns_key_path, owned by the service account with mode 0600.")
 
 
+def check_push_signing_key(config: "Config", probe: bool) -> CheckResult:
+    """The private push key: a 0600 file this account owns that parses, with a matching `.pub`.
+
+    Unlike ``push.credentials`` this one opens the key, since a key that does
+    not parse is the failure that matters here. It reports only the key ID.
+    """
+    from istota.push import envelope
+
+    name = "push.signing_key"
+    push = config.push
+    if not push.enabled:
+        return CheckResult(name, SKIP, "Push notifications are disabled")
+    if push.content != "private":
+        return CheckResult(name, SKIP, "Private push is off ([push] content is legacy)")
+    keygen = "Run `istota push keygen` (with --force to replace a broken key; devices must then re-enroll)."
+    path = Path(push.signing_key_path)
+    try:
+        metadata = path.stat()
+    except OSError as exc:
+        return CheckResult(name, FAIL, f"Push signing key unavailable ({type(exc).__name__})", keygen)
+    if not stat.S_ISREG(metadata.st_mode):
+        return CheckResult(name, FAIL, "Push signing key is not a regular file", "Point signing_key_path at the key file.")
+    if stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_uid != os.geteuid():
+        return CheckResult(name, FAIL, "Push signing key permissions or owner differ from the service account", "Set mode 0600 and make the service account the owner of the push signing key.")
+    try:
+        key = envelope.load_signing_key(path)
+    except envelope.KeyFileError as exc:
+        return CheckResult(name, FAIL, str(exc), keygen)
+    try:
+        published = envelope.load_public_key(envelope.public_key_path(path))
+    except envelope.KeyFileError as exc:
+        return CheckResult(name, FAIL, str(exc), "Restore the .pub file beside the key, or run `istota push keygen --force`.")
+    raw = key.public_key().public_bytes_raw()
+    if published != raw:
+        return CheckResult(name, FAIL, "The push public key file does not match the signing key", "Restore the matching .pub file, or run `istota push keygen --force`.")
+    return CheckResult(name, OK, f"Push signing key parses and matches its public key (key ID {envelope.key_id(raw)})")
+
+
 # The name is part of the registry rather than only of the result, so `only=`
 # can select *before* invoking. Filtering afterwards would mean running every
 # check to discard most of them — which is exactly what the config-load path
 # cannot afford.
 CHECKS: tuple[tuple[str, Check], ...] = (
     ("push.credentials", check_push_credentials),
+    ("push.signing_key", check_push_signing_key),
     ("runtime.platform", check_platform),
     ("runtime.bwrap", check_bwrap),
     ("runtime.model_cli", check_model_cli),
@@ -11254,6 +11293,7 @@ line for the same reason.
 # and a unit test enforces that.
 CHECK_SCOPES: dict[str, str] = {
     "push.credentials": DEPLOYMENT,
+    "push.signing_key": DEPLOYMENT,
     "runtime.platform": IMAGE,
     "runtime.bwrap": IMAGE,
     "runtime.model_cli": IMAGE,

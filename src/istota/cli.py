@@ -3699,6 +3699,34 @@ def cmd_push_test(args):
         return 1
 
 
+def cmd_push_keygen(args):
+    """Write the private push signing key; prints its key ID, never the key."""
+    from istota.push import envelope
+
+    config = load_config(Path(args.config) if args.config else None)
+    path = config.push.signing_key_path.strip()
+    if not path:
+        print("Set [push] signing_key_path (or ISTOTA_PUSH_SIGNING_KEY_PATH) first.", file=sys.stderr)
+        return 1
+    try:
+        key = envelope.write_signing_key(path, force=args.force)
+    except FileExistsError:
+        print(f"A push signing key already exists at {path}; pass --force to replace it.", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"Could not write the push signing key ({type(exc).__name__}).", file=sys.stderr)
+        return 1
+    print(f"Wrote the push signing key to {path} and its public half to {envelope.public_key_path(path)}.")
+    print(f"Key ID: {envelope.key_id(key.public_key().public_bytes_raw())}")
+    if args.force:
+        print("The key was replaced: every enrolled device must re-enroll before it shows private previews again.")
+    return 0
+
+
+def cmd_push(args):
+    return {"test": cmd_push_test, "keygen": cmd_push_keygen}[args.push_action](args)
+
+
 def cmd_calendar_test(args):
     """Test calendar access."""
     from .skills.calendar import (
@@ -5369,6 +5397,13 @@ def main():
     push_test = push_commands.add_parser("test", help="Send a test alert to a user's registered devices")
     push_test.add_argument("--user", required=True)
     push_test.add_argument("--message", default="Push notifications are connected.")
+    push_keygen = push_commands.add_parser(
+        "keygen", help="Write the private push signing key to [push] signing_key_path",
+    )
+    push_keygen.add_argument(
+        "--force", action="store_true",
+        help="Replace an existing key; every enrolled device must re-enroll",
+    )
 
     # apply
     apply_parser = subparsers.add_parser(
@@ -6389,7 +6424,7 @@ def main():
         setup_logging(config, verbose=args.verbose)
 
     commands = {
-        "push": cmd_push_test,
+        "push": cmd_push,
         "apply": cmd_apply,
         "snapshot": cmd_snapshot,
         "migrate": cmd_migrate,

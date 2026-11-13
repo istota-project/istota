@@ -1797,3 +1797,13 @@ timezone = "America/Los_Angeles"
 # chat_delay_seconds = 15
 # max_age_seconds = 300
 # alert_batch_limit = 200
+#
+# Private previews: "private" encrypts each alert for devices that enrolled a
+# device key and sends every other device a fixed alert with no preview.
+# "legacy" (the default) sends plaintext previews Apple can read. "private"
+# needs signing_key_path; create the key with `istota push keygen`, which also
+# writes the public half to <signing_key_path>.pub. Check it with
+# `istota doctor --only push.signing_key`. ISTOTA_PUSH_SIGNING_KEY_PATH
+# overrides the path.
+# content = "legacy"
+# signing_key_path = "/data/config/push/signing.pem"

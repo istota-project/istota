@@ -2639,6 +2639,32 @@ class PushConfig:
     chat_delay_seconds: int = 15
     max_age_seconds: int = 300
     alert_batch_limit: int = 200
+    # `legacy` sends today's plaintext payloads; `private` seals previews for
+    # enrolled devices and sends every other device a fixed generic alert.
+    content: str = "legacy"
+    # Ed25519 PKCS8 PEM; its public half is the sibling `<path>.pub`.
+    signing_key_path: str = ""
+
+
+PUSH_CONTENT_MODES = ("legacy", "private")
+
+
+def _validate_push_content(push: PushConfig) -> None:
+    """Raise on a `[push] content` the dispatcher could not honour.
+
+    A hard failure, like ``outbound_approval_floor``: falling back to
+    ``legacy`` would send plaintext previews an operator asked to keep private.
+    """
+    if push.content not in PUSH_CONTENT_MODES:
+        raise ValueError(
+            f"[push] content={push.content!r} is not valid. "
+            f"Use one of: {', '.join(PUSH_CONTENT_MODES)}."
+        )
+    if push.content == "private" and not push.signing_key_path.strip():
+        raise ValueError(
+            '[push] content = "private" needs signing_key_path (or '
+            "ISTOTA_PUSH_SIGNING_KEY_PATH); run `istota push keygen` to create the key."
+        )
 
 
 @dataclass
@@ -5831,6 +5857,7 @@ FIELD_CHOICES: dict[tuple[str, ...], tuple[str, ...]] = {
     ("speech_gate", "mode"): SPEECH_GATE_MODES,
     ("web", "map", "provider"): map_provider_names(),
     ("logging", "output"): LOGGING_OUTPUTS,
+    ("push", "content"): PUSH_CONTENT_MODES,
 }
 """Closed vocabularies, by path: a field whose value must be one of these.
 
@@ -5927,6 +5954,7 @@ ENV_OVERRIDES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # Web auth-mode override. Same validation as the TOML parse.
     ("ISTOTA_WEB_AUTH", ("web", "auth")),
     ("ISTOTA_APNS_KEY_PATH", ("push", "apns_key_path")),
+    ("ISTOTA_PUSH_SIGNING_KEY_PATH", ("push", "signing_key_path")),
 )
 """``(env var, path)``: non-secret settings the environment sets over the file.
 
@@ -5937,6 +5965,7 @@ overrides, not an override of the file.
 
 _ENV_OVERRIDE_PARSERS: dict[str, Callable[[str], object]] = {
     "ISTOTA_APNS_KEY_PATH": lambda raw: raw.strip() or _KEEP,
+    "ISTOTA_PUSH_SIGNING_KEY_PATH": lambda raw: raw.strip() or _KEEP,
     "ISTOTA_WEB_TOKEN_STORAGE": _token_storage_from_env,
     "ISTOTA_WEB_AUTH": lambda raw: normalize_auth_methods(raw, kind="warning") or _KEEP,
 }
@@ -6444,6 +6473,9 @@ def load_config(
         for part in path[:-1]:
             section = getattr(section, part)
         setattr(section, path[-1], value)
+
+    # After the overrides, so a key path the environment supplies counts.
+    _validate_push_content(config.push)
 
     # Provider keys are keyed by provider id, so they don't fit the flat table
     # above; the legacy native sources are folded in here too.
