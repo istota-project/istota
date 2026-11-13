@@ -118,7 +118,7 @@ KeePass URL fields bind a credential to its site. Custom fields `istota_hosts` a
 
 **Export to KeePass** creates a fresh KDBX4 file with Argon2id. Every web export needs a confirmation, on both email and Nextcloud sessions: a one-time code sent to your native sign-in email address, or, where the install has no mail set up, your account password. An account with no sign-in address cannot export until an operator adds one, and one with no password on an install without mail needs a password link from the operator (`istota auth reset <user> --print-link`, which works only where `[web] auth` includes `email`) or mail set up. Each export is announced by email and in the bell. Istota generates a random password and shows it once; save it before closing the dialog. You may also generate a browser-side key file, which you must keep with the password to open the export. Merge the downloaded file into your own password database if wanted. Istota never modifies that database.
 
-Exports contain Settings → Credentials entries, including generated passwords, OTP seeds and recovery codes. Connected-service secrets and wallet cards are excluded. The host CLI uses the same importer and exporter:
+Exports contain Settings → Credentials entries, including generated passwords, OTP seeds and recovery codes. Connected-service secrets and wallet cards are excluded. The installation's own credentials are backed up separately, by an admin at Admin → Configuration ([Backing up and restoring the configuration](web-editor.md#backing-up-and-restoring-the-configuration)); that file cannot be imported here, and a user export cannot be restored there. The host CLI uses the same importer and exporter:
 
 ```bash
 istota secret export --user alice --out credentials.kdbx
@@ -149,6 +149,8 @@ The daemon attempts one final non-deleting import for each configured legacy fil
 `ISTOTA_SECRET_KEY` opens the encrypted database. Losing it loses every stored credential unless you have an independent export. Keep a copy outside the storage and backups that hold the database.
 
 The stack keeps it at `/data/.secret_key`, which is `/srv/app/istota/data/.secret_key` on the VM. The local VM also copies it into the Mac's login Keychain (service `istota.local`), which is what `istota-stack restore` reads. Database snapshots under `Backups/db/snapshots` do not include the key. A backup of all of `/data` may contain both the database and its key, so it does not provide that separation.
+
+The installation backup from Admin → Configuration does not hold this key either, and its password is not this key. [Recovering a lost installation](../deployment/running-the-stack.md#recovering-a-lost-installation) lists what a rebuild needs.
 
 An age credential backup is an independent recovery path: decrypt it with the private age key you keep elsewhere, then open its KeePass file with the enclosed password. It needs no server secret key. `security.key_separation` checks file locations, and reports when scheduled credential backups are off.
 

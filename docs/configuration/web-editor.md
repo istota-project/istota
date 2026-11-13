@@ -56,6 +56,21 @@ Keys the loader does not recognise, retired keys, and a credential set in `confi
 
 Applied, refused and cancelled requests are kept for 180 days with their redacted diff and the host's output. Restoring an earlier request previews its configuration as a new change, which the admin then submits. A restore brings back configuration only: credentials and the admin list stay as they are, and a credential cleared since that request stays cleared.
 
+## Backing up and restoring the configuration
+
+Back up configuration, above the fields, downloads the saved `config.toml`, never unsaved edits on the page. It works on a read-only or managed install too.
+
+- **Without installation secrets** (the default) it is `istota-config-<UTC time>.toml`: the file as the raw editor shows it, every credential replaced by `"<unchanged>"`, under a comment saying what is left out. It needs no confirmation.
+- **With Include installation secrets** it is `istota-config-<UTC time>.kdbx`, a KeePass file holding the same redacted `config.toml` as an attachment and one entry per installation credential: each deployment secret file, and each credential written in `config.toml` itself. It needs the same confirmation as a credential export, counts against the same daily export limit, and is announced to every admin. Istota generates the file's password and shows it once; you may also ask for a key file, which you need with the password to open the backup. Neither is kept on the server, so a lost password cannot be shown again.
+
+The encrypted backup leaves out the master key, the web session and token keys, the browser API token, the Anthropic model-listing key (the web process cannot read it), users' own credentials and everything in the databases, the admin list, `host.env` and `.env`, TLS certificates, and the workspace. A credential set only by an environment variable from outside the stack is listed as left out, not exported. The completion screen and the file's manifest list what is missing. A configuration or credential set over 256 KiB is refused rather than cut down.
+
+The `.kdbx` opens in KeePassXC without Istota (checked with `keepassxc-cli` 2.8): the group `Istota installation backup` has a `Backup manifest` entry, a `Configuration` entry whose attachment is `config.toml`, and the credentials under `Deployment credentials` and `Inline credentials`, each titled with its setting. `keepassxc-cli` prints a "Maximum depth of replacement" warning for the manifest, whose values hold braces; the values are intact. The file is not a user vault: Settings → Credentials refuses to import it.
+
+Restore configuration takes either file back. It is offered when the page holds no unsaved edits and no request is open. For a `.kdbx` it asks for the password and the key file, then lists each credential in it as new, changed, unchanged or host only, without values. The configuration is restored and no credential is, unless you select them; only new and changed credentials can be selected, and a changed one replaces the value the install holds now. The restore is reviewed, confirmed and applied like any other change, and every check above still applies: a host-only credential such as the Nextcloud app password is shown but not applied, and a key a plan manages is refused. The file and its password stay in the browser and are sent again with the submit; nothing decrypted is kept on the server.
+
+A configuration restore replaces the whole document, so a key the backup lacks goes back to its default, and a credential written in `config.toml` that the backup does not hold is dropped and named in the review. A plain `.toml` holding a real credential value is refused: use the `.kdbx` or the raw editor. A credential file written on the host after the review is not noticed, as for every change from this page. A restore from a lost installation's backup is part of [Recovering a lost installation](../deployment/running-the-stack.md#recovering-a-lost-installation), which also lists what to keep outside the install.
+
 ## Comments in config.toml
 
 Every write goes through the same TOML writer `istota apply` uses, so comments in a hand-written `config.toml` are not kept. The page warns when the file has comments. The previous text is in the newest `config.toml.bak.<timestamp>`.
