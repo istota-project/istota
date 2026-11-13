@@ -17509,9 +17509,10 @@ _ADMIN_STEP_UP_ACTIONS = frozenset({"admin_config_change", "admin_briefing_delet
 # second factor, since a phished password must not export or reveal it
 # (credentials-single-store's decision). Without mail every action takes the
 # password, the only proof left.
-# The installation backup carries credentials, so it takes the code like a
-# vault export.
-_PASSWORD_STEP_UP_ACTIONS = _ADMIN_STEP_UP_ACTIONS - {"admin_config_backup"}
+# The installation backup takes the password too, unlike a vault export: it is
+# the recovery file, and an install whose mail is configured but not
+# delivering would otherwise have no way to make one.
+_PASSWORD_STEP_UP_ACTIONS = _ADMIN_STEP_UP_ACTIONS
 
 
 def _step_up_session(request: Request) -> str:

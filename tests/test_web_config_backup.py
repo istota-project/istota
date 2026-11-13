@@ -215,17 +215,35 @@ class TestTheGates:
         assert response.json()["field"] == "code"
         assert _exports(install) == [] and _notices(install) == []
 
-    async def test_the_password_does_not_confirm_it_where_mail_can_send(self, alice, install):
+    async def test_the_password_confirms_it_where_mail_can_send(self, alice, install, monkeypatch):
+        """Mail that is configured but not delivered must not leave an admin
+        unable to make the recovery file: the password is offered first, as
+        for the other admin actions, and the code stays the alternative."""
+        password = "a long example passphrase"
+        monkeypatch.setattr(web_auth, "_N", 1024)
         with db.get_db(install["config"].db_path) as conn:
-            conn.execute("UPDATE web_auth_identities SET password_hash='x' WHERE user_id='alice'")
-        response = await alice.post(
+            conn.execute("UPDATE web_auth_identities SET password_hash=? WHERE user_id='alice'",
+                         (web_auth.hash_password(password),))
+        mailed = len(install["mail"])
+        started = await alice.post(
             "/istota/api/settings/step-up", json={"action": "admin_config_backup"}, headers=ORIGIN,
         )
-        assert response.json()["methods"] == ["email"]
-        change = await alice.post(
-            "/istota/api/settings/step-up", json={"action": "admin_config_change"}, headers=ORIGIN,
-        )
-        assert change.json()["methods"] == ["password", "email"]
+        assert started.status_code == 200, started.text
+        assert started.json()["method"] == "password"
+        assert started.json()["methods"] == ["password", "email"]
+        request_id = started.json()["request_id"]
+        wrong = await alice.post(BACKUP, headers=ORIGIN, json={
+            "step_up": {"request_id": request_id, "password": "not the password"}})
+        assert wrong.status_code == 403
+        assert wrong.json()["field"] == "password" and wrong.json()["reason"] == "bad"
+        assert _exports(install) == []
+        response = await alice.post(BACKUP, headers=ORIGIN, json={
+            "step_up": {"request_id": request_id, "password": password}})
+        assert response.status_code == 200, response.text
+        assert FILE_VALUE in {entry.password for entry in _open(response.json()).entries}
+        assert password not in response.text
+        assert len(install["mail"]) == mailed
+        assert len(_exports(install)) == 1
 
 
 class TestRefusalsAfterTheStepUp:
@@ -284,4 +302,4 @@ def test_the_backup_action_is_an_admin_step_up():
 
     assert "admin_config_backup" in web_auth.STEP_UP_ACTIONS
     assert "admin_config_backup" in mod._ADMIN_STEP_UP_ACTIONS
-    assert "admin_config_backup" not in mod._PASSWORD_STEP_UP_ACTIONS
+    assert "admin_config_backup" in mod._PASSWORD_STEP_UP_ACTIONS

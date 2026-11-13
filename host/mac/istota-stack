@@ -40,10 +40,11 @@
 #   istota-stack destroy [--force] [--purge]
 #                               delete the VM; the folder and the Keychain key stay;
 #                               --purge deletes them too, with the saved settings
-#   istota-stack restore [--date YYYY-MM-DD] [--force] [create's options]
+#   istota-stack restore [--date YYYY-MM-DD] [--force] [--no-start] [create's options]
 #                               a new VM from the folder's backups and the Keychain's
 #                               key, the old VM deleted first; --force restores an
-#                               empty database snapshot
+#                               empty database snapshot; --no-start leaves the stack
+#                               stopped, and off at the VM's next boot
 #   istota-stack import-standalone [--from DIR] [--config FILE] [--dry-run] [create's options]
 #                               move a standalone install (~/.istota) into a new VM: its
 #                               databases, files, settings and keys; ~/.istota is left as it is
@@ -1587,13 +1588,14 @@ require_backups() {
 # Keychain on stdin, the config copy and the databases, and the stack started.
 # Every refusal that does not need the VM comes before the delete.
 cmd_restore() {
-    local date="" force="" folder="" create_args=()
+    local date="" force="" no_start="" folder="" create_args=()
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --date)
                 [ "$#" -ge 2 ] || usage_error "--date needs a value"
                 date="$2"; shift 2 ;;
             --force) force=1; shift ;;
+            --no-start) no_start=1; shift ;;
             --workspace|--port|--cpus|--memory|--disk|--tag|--repo|--signing-key|--appliance)
                 [ "$#" -ge 2 ] || usage_error "$1 needs a value"
                 [ "$1" != --workspace ] || folder="$2"
@@ -1653,6 +1655,22 @@ cmd_restore() {
     # The backup's host.env may predate the key, or name an older VM's port.
     write_forward_port
     become_the_apps
+    if [ -n "$no_start" ]; then
+        # The VM's restore enabled the unit for the next boot, which would start
+        # the restored credentials before the operator's checks.
+        run_step "keep the stack stopped" "systemctl disable istota-stack" \
+            vm systemctl disable istota-stack </dev/null
+        local image_rc=0
+        vm_stack check-image </dev/null || image_rc=$?
+        if [ "$image_rc" -eq 2 ]; then
+            log "the restored config needs more than this VM's image has (Claude Code, or a local layer); \`istota-stack create\` builds it, and starts the stack."
+        elif [ "$image_rc" -ne 0 ]; then
+            log "WARNING: \`istota-stack check-image\` failed (exit ${image_rc}), so whether the image has what the restored config needs is unknown."
+        fi
+        log "restored from ${folder}, with the stack stopped (--no-start). secrets/ is not in the backups: write the stack's own credentials with \`istota-stack put-files\`."
+        log "start it with \`istota-stack up\` when you are ready; once it checks out, \`istota-stack create\` starts it with the VM again."
+        return 0
+    fi
     rebuild_if_lacking
     run_step "start the stack" "systemctl enable --now istota-stack" \
         vm systemctl enable --now istota-stack </dev/null
