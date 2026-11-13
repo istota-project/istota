@@ -65,6 +65,47 @@ def test_unavailable_store_does_not_raise_or_log_token(caplog):
     conn.close()
 
 
+ENCRYPTED = {
+    "private_version": 1, "private_content": "encrypted",
+    "encryption_public_key": "k" * 43, "encryption_key_id": "e" * 43,
+    "sender_key_id": "s" * 43, "push_generation": "g" * 22,
+}
+
+
+def _private_row(conn):
+    return tuple(conn.execute(
+        "SELECT private_version, private_content, encryption_public_key, encryption_key_id, sender_key_id,"
+        " push_generation FROM push_devices").fetchone())
+
+
+def test_private_enrollment_is_stored_and_plain_reregistration_clears_it(conn):
+    binding = {"connection_binding": "0f8e4b0c-2a6d-4c4e-9a43-6d2f1b8e7c51", "connection_generation": 1}
+    device_id = devices.register_device(conn, "alice", TOKEN, "sandbox", **binding, **ENCRYPTED)
+    assert _private_row(conn) == tuple(ENCRYPTED.values())
+    private, = devices.devices_for_user(conn, "alice")
+    assert private["encryption_public_key"] == "k" * 43
+    assert devices.register_device(conn, "alice", TOKEN, "sandbox", **binding) == device_id
+    assert _private_row(conn) == (None,) * 6
+
+
+@pytest.mark.parametrize("installation,enrollment,sender,expected", [
+    ("legacy", ENCRYPTED, "s" * 43, ("legacy", False)),
+    ("private", ENCRYPTED, "s" * 43, ("encrypted", False)),
+    ("private", ENCRYPTED, "x" * 43, ("generic", True)),
+    ("private", ENCRYPTED, None, ("encrypted", False)),
+    ("private", {"private_version": 1, "private_content": "generic", "push_generation": "g" * 22},
+     "s" * 43, ("generic", False)),
+    ("private", {}, "s" * 43, ("generic", False)),
+])
+def test_device_list_reports_effective_content(conn, installation, enrollment, sender, expected):
+    devices.register_device(conn, "alice", TOKEN, "sandbox", **enrollment)
+    listed, = devices.list_devices(conn, "alice", content_mode=installation, sender_key_id=sender)
+    assert (listed["content"], listed["stale_key"]) == expected
+    for secret in ("k" * 43, "e" * 43, "s" * 43, "g" * 22):
+        assert secret not in str(listed)
+    assert not set(listed) & {"encryption_public_key", "encryption_key_id", "sender_key_id", "push_generation"}
+
+
 def test_registration_generation_changes_with_same_clock(conn, monkeypatch):
     monkeypatch.setattr(devices, "iso_utc_now", lambda: "2026-01-01T00:00:00.000Z")
     device_id = devices.register_device(conn, "alice", TOKEN, "sandbox")

@@ -1,5 +1,9 @@
 """Push registration uses the existing session and origin guards."""
 
+import base64
+import hashlib
+import json
+
 import pytest
 
 from istota import db
@@ -206,3 +210,205 @@ async def test_invalid_binding_is_400(client, patch):  # noqa: F811
     assert response.status_code == 400
     with db.get_db(_db_path()) as conn:
         assert conn.execute("SELECT COUNT(*) FROM push_devices").fetchone()[0] == 0
+
+
+# --- Private enrollment ---------------------------------------------------------
+
+SENDER_URL = "/istota/api/push/sender-key"
+DEVICE_KEY = bytes(range(32))
+_OTHER_KEY = bytes(range(1, 33))
+
+
+def _b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _kid(raw: bytes) -> str:
+    return _b64(hashlib.sha256(raw).digest())
+
+
+GENERATION = _b64(b"\x01" * 16)
+
+
+@pytest.fixture
+def private_push(tmp_path):
+    from istota.push import envelope
+    import istota.webui.app as mod
+
+    key_path = tmp_path / "push" / "signing.key"
+    signing_key = envelope.write_signing_key(key_path)
+    raw = signing_key.public_key().public_bytes_raw()
+    mod._config.push.content = "private"
+    mod._config.push.signing_key_path = str(key_path)
+    return {"path": key_path, "raw": raw, "kid": _kid(raw)}
+
+
+def _encrypted(sender_kid, **patch):
+    private = {"version": 1, "content": "encrypted", "encryption_public_key": _b64(DEVICE_KEY),
+               "encryption_key_id": _kid(DEVICE_KEY), "sender_key_id": sender_kid, "generation": GENERATION}
+    return {**BOUND, "private": {**private, **patch}}
+
+
+def _private_columns():
+    with db.get_db(_db_path()) as conn:
+        return tuple(conn.execute(
+            "SELECT private_version, private_content, encryption_public_key, encryption_key_id, sender_key_id,"
+            " push_generation FROM push_devices").fetchone())
+
+
+def _device_count():
+    with db.get_db(_db_path()) as conn:
+        return conn.execute("SELECT COUNT(*) FROM push_devices").fetchone()[0]
+
+
+async def test_sender_key_requires_auth(client):  # noqa: F811
+    assert (await client.get(SENDER_URL)).status_code == 401
+
+
+async def test_sender_key_is_not_offered_on_a_legacy_install(client):  # noqa: F811
+    cookies = await _login(client, "alice")
+    response = await client.get(SENDER_URL, cookies=cookies)
+    assert response.status_code == 404
+    assert response.json()["detail"] == "private push not offered"
+    assert response.headers["cache-control"] == "no-store"
+
+
+async def test_sender_key_serves_the_public_half(client, private_push):  # noqa: F811
+    cookies = await _login(client, "alice")
+    response = await client.get(SENDER_URL, cookies=cookies)
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {"version": 1, "key_id": private_push["kid"], "public_key": _b64(private_push["raw"])}
+
+
+@pytest.mark.parametrize("damage", ["missing", "malformed"])
+async def test_sender_key_file_problems_are_503(client, private_push, damage):  # noqa: F811
+    from istota.push import envelope
+
+    pub = envelope.public_key_path(private_push["path"])
+    if damage == "missing":
+        pub.unlink()
+    else:
+        pub.write_text("not a key\n")
+    cookies = await _login(client, "alice")
+    response = await client.get(SENDER_URL, cookies=cookies)
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "no-store"
+
+
+async def test_encrypted_enrollment_is_stored_listed_and_cleared(client, private_push):  # noqa: F811
+    cookies = await _login(client, "alice")
+    response = await client.post(URL, cookies=cookies, headers=ORIGIN, json=_encrypted(private_push["kid"]))
+    assert response.status_code == 200
+    assert _private_columns() == (1, "encrypted", _b64(DEVICE_KEY), _kid(DEVICE_KEY), private_push["kid"], GENERATION)
+    listed, = (await client.get(URL, cookies=cookies)).json()["devices"]
+    assert (listed["content"], listed["stale_key"]) == ("encrypted", False)
+    assert _b64(DEVICE_KEY) not in str(listed) and GENERATION not in str(listed)
+    plain = await client.post(URL, cookies=cookies, headers=ORIGIN, json=BOUND)
+    assert plain.json() == response.json()
+    assert _private_columns() == (None,) * 6
+    listed, = (await client.get(URL, cookies=cookies)).json()["devices"]
+    assert (listed["content"], listed["stale_key"]) == ("generic", False)
+
+
+async def test_generic_enrollment_is_stored(client, private_push):  # noqa: F811
+    cookies = await _login(client, "alice")
+    body = {**BOUND, "private": {"version": 1, "content": "generic", "generation": GENERATION}}
+    assert (await client.post(URL, cookies=cookies, headers=ORIGIN, json=body)).status_code == 200
+    assert _private_columns() == (1, "generic", None, None, None, GENERATION)
+    listed, = (await client.get(URL, cookies=cookies)).json()["devices"]
+    assert (listed["content"], listed["stale_key"]) == ("generic", False)
+
+
+async def test_rotated_key_marks_the_device_stale(client, private_push):  # noqa: F811
+    from istota.push import envelope
+
+    cookies = await _login(client, "alice")
+    assert (await client.post(URL, cookies=cookies, headers=ORIGIN,
+                              json=_encrypted(private_push["kid"]))).status_code == 200
+    envelope.public_key_path(private_push["path"]).unlink()
+    private_push["path"].unlink()
+    envelope.write_signing_key(private_push["path"])
+    listed, = (await client.get(URL, cookies=cookies)).json()["devices"]
+    assert (listed["content"], listed["stale_key"]) == ("generic", True)
+
+
+async def test_legacy_list_reports_legacy_content(client):  # noqa: F811
+    cookies = await _login(client, "alice")
+    await client.post(URL, cookies=cookies, headers=ORIGIN, json=BODY)
+    listed, = (await client.get(URL, cookies=cookies)).json()["devices"]
+    assert (listed["content"], listed["stale_key"]) == ("legacy", False)
+
+
+async def test_changed_sender_key_is_409(client, private_push):  # noqa: F811
+    cookies = await _login(client, "alice")
+    response = await client.post(URL, cookies=cookies, headers=ORIGIN, json=_encrypted(_kid(_OTHER_KEY)))
+    assert response.status_code == 409
+    assert response.json()["detail"] == "sender key changed"
+    assert _device_count() == 0
+
+
+async def test_private_field_on_a_legacy_install_is_409(client):  # noqa: F811
+    cookies = await _login(client, "alice")
+    response = await client.post(URL, cookies=cookies, headers=ORIGIN, json=_encrypted(_kid(_OTHER_KEY)))
+    assert response.status_code == 409
+    assert response.json()["detail"] == "private push not offered"
+    assert _device_count() == 0
+
+
+async def test_private_enrollment_with_unreadable_sender_key_is_503(client, private_push):  # noqa: F811
+    from istota.push import envelope
+
+    envelope.public_key_path(private_push["path"]).unlink()
+    cookies = await _login(client, "alice")
+    response = await client.post(URL, cookies=cookies, headers=ORIGIN, json=_encrypted(private_push["kid"]))
+    assert response.status_code == 503
+    assert _device_count() == 0
+
+
+async def test_private_enrollment_requires_a_binding(client, private_push):  # noqa: F811
+    cookies = await _login(client, "alice")
+    body = {**BODY, "private": _encrypted(private_push["kid"])["private"]}
+    response = await client.post(URL, cookies=cookies, headers=ORIGIN, json=body)
+    assert response.status_code == 400
+    assert response.json()["detail"] == "invalid private enrollment"
+
+
+@pytest.mark.parametrize("patch", [
+    {"version": 2}, {"version": True}, {"version": "1"},
+    {"content": "plain"}, {"content": None},
+    {"extra": 1},
+    {"encryption_public_key": _b64(DEVICE_KEY[:31])}, {"encryption_public_key": _b64(DEVICE_KEY) + "A"},
+    {"encryption_public_key": _b64(DEVICE_KEY) + "="}, {"encryption_public_key": 7},
+    {"encryption_key_id": _kid(_OTHER_KEY)}, {"encryption_key_id": "x"},
+    {"sender_key_id": 5}, {"sender_key_id": "short"},
+    {"generation": "a" * 21}, {"generation": "a" * 23}, {"generation": "a" * 21 + "+"},
+    {"generation": 12},
+])
+async def test_invalid_encrypted_enrollment_is_400(client, private_push, patch):  # noqa: F811
+    cookies = await _login(client, "alice")
+    response = await client.post(URL, cookies=cookies, headers=ORIGIN, json=_encrypted(private_push["kid"], **patch))
+    assert response.status_code == 400
+    assert response.json()["detail"] == "invalid private enrollment"
+    assert _device_count() == 0
+
+
+@pytest.mark.parametrize("private", [
+    None, [], "encrypted", {},
+    {"version": 1, "content": "generic"},
+    {"version": 1, "content": "generic", "generation": GENERATION, "encryption_public_key": _b64(DEVICE_KEY)},
+    {"version": 1, "content": "encrypted", "generation": GENERATION},
+])
+async def test_invalid_private_shapes_are_400(client, private_push, private):  # noqa: F811
+    cookies = await _login(client, "alice")
+    response = await client.post(URL, cookies=cookies, headers=ORIGIN, json={**BOUND, "private": private})
+    assert response.status_code == 400
+    assert _device_count() == 0
+
+
+async def test_largest_valid_registration_fits_the_body_bound(client, private_push):  # noqa: F811
+    cookies = await _login(client, "alice")
+    body = {**_encrypted(private_push["kid"]), "token": "ab" * 100, "app_version": "x" * 100,
+            "connection_generation": 2**53 - 1}
+    assert len(json.dumps(body).encode()) < 4096
+    assert (await client.post(URL, cookies=cookies, headers=ORIGIN, json=body)).status_code == 200

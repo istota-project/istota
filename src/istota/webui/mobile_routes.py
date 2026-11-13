@@ -38,6 +38,10 @@ async def mobile_config(request: Request) -> JSONResponse:
         and bool(push.apns_key_path.strip()) and bool(push.apns_key_id.strip())
         and bool(push.apns_team_id.strip()) and bool(push.apns_topic.strip())
     )
+    push_capabilities = {"delivery": "direct" if direct_push else "unavailable"}
+    # A separate key, never a third `delivery` value: shells 0.12 to 0.14 refuse one.
+    if push.content == "private" and push.signing_key_path.strip():
+        push_capabilities["private"] = {"versions": [1]}
     # No config strings are serialized: both capability branches stay below
     # 512 bytes, well within the client's 64 KiB discovery limit.
     return JSONResponse({
@@ -47,7 +51,7 @@ async def mobile_config(request: Request) -> JSONResponse:
         "web_base_path": "/istota/",
         "auth": {"mode": "browser_handoff", "version": 1},
         "location_ingest_path": "/webhooks/location" if config.location.enabled else None,
-        "push": {"delivery": "direct" if direct_push else "unavailable"},
+        "push": push_capabilities,
     }, headers={"Cache-Control": "no-store"})
 
 

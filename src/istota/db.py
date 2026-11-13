@@ -9920,6 +9920,8 @@ def _migrate_push_tables(conn: sqlite3.Connection) -> None:
     _add_columns(conn, "push_devices", {
         "auth_method": "TEXT", "auth_epoch": "INTEGER", "auth_session_id": "TEXT",
         "connection_binding": "TEXT", "connection_generation": "INTEGER",
+        "private_version": "INTEGER", "private_content": "TEXT", "encryption_public_key": "TEXT",
+        "encryption_key_id": "TEXT", "sender_key_id": "TEXT", "push_generation": "TEXT",
     })
     conn.execute("CREATE INDEX IF NOT EXISTS idx_push_devices_user ON push_devices (user_id)")
     conn.execute("""

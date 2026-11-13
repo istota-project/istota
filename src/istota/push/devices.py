@@ -19,11 +19,15 @@ def register_device(
     auth_method: str | None = None, auth_epoch: int | None = None,
     auth_session_id: str | None = None,
     connection_binding: str | None = None, connection_generation: int | None = None,
+    private_version: int | None = None, private_content: str | None = None,
+    encryption_public_key: str | None = None, encryption_key_id: str | None = None,
+    sender_key_id: str | None = None, push_generation: str | None = None,
 ) -> int | None:
     """Move a token to its current account and seed only a new user's watermark.
 
     A registration without a connection binding clears any earlier one: the same
-    token from an older binary is a legacy enrollment again.
+    token from an older binary is a legacy enrollment again. The private
+    enrollment columns follow the same rule.
     """
     try:
         # One savepoint makes the registration and watermark atomic, including
@@ -42,8 +46,9 @@ def register_device(
         row = conn.execute(
             """INSERT INTO push_devices
                 (user_id, token, environment, platform, app_version, created_at, updated_at, auth_method, auth_epoch,
-                 auth_session_id, connection_binding, connection_generation)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 auth_session_id, connection_binding, connection_generation, private_version, private_content,
+                 encryption_public_key, encryption_key_id, sender_key_id, push_generation)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(token, environment) DO UPDATE SET
                     user_id = excluded.user_id, platform = excluded.platform,
                     app_version = excluded.app_version, last_badge = -1,
@@ -51,11 +56,16 @@ def register_device(
                     auth_session_id = excluded.auth_session_id,
                     connection_binding = excluded.connection_binding,
                     connection_generation = excluded.connection_generation,
+                    private_version = excluded.private_version, private_content = excluded.private_content,
+                    encryption_public_key = excluded.encryption_public_key,
+                    encryption_key_id = excluded.encryption_key_id, sender_key_id = excluded.sender_key_id,
+                    push_generation = excluded.push_generation,
                     last_error = NULL, last_seen_at = NULL,
                     created_at = excluded.created_at, updated_at = excluded.updated_at
                 RETURNING id""",
             (user_id, token, environment, platform, app_version, now, now, auth_method, auth_epoch, auth_session_id,
-             connection_binding, connection_generation),
+             connection_binding, connection_generation, private_version, private_content, encryption_public_key,
+             encryption_key_id, sender_key_id, push_generation),
         ).fetchone()
         conn.execute(
             """INSERT INTO push_state (user_id, last_pushed_message_id)
@@ -77,14 +87,42 @@ def register_device(
         return None
 
 
-def list_devices(conn: sqlite3.Connection, user_id: str) -> list[dict]:
-    """Public device details; the full token never leaves the server."""
+def device_content(content_mode: str, device: dict, sender_key_id: str | None) -> tuple[str, bool]:
+    """The content mode a device gets, and whether its enrollment names an old sender key.
+
+    `content_mode` is the installation's `[push] content`; `sender_key_id` is the
+    current key's ID, or None when it cannot be read, which marks nothing stale.
+    A stale encrypted enrollment gets generic content until the device re-enrolls.
+    """
+    if content_mode != "private":
+        return "legacy", False
+    if device.get("private_content") != "encrypted" or not device.get("encryption_public_key"):
+        return "generic", False
+    if sender_key_id is not None and device.get("sender_key_id") != sender_key_id:
+        return "generic", True
+    return "encrypted", False
+
+
+def list_devices(
+    conn: sqlite3.Connection, user_id: str, *, content_mode: str = "legacy", sender_key_id: str | None = None,
+) -> list[dict]:
+    """Public device details; the full token, keys and generations never leave the server."""
     try:
-        return [dict(row) for row in conn.execute(
+        listed = []
+        for row in conn.execute(
             """SELECT id, platform, app_version, environment,
-                substr(token, -6) AS token_tail, created_at, last_seen_at, last_error
+                substr(token, -6) AS token_tail, created_at, last_seen_at, last_error,
+                private_content, encryption_public_key, sender_key_id
                 FROM push_devices WHERE user_id = ? ORDER BY id""", (user_id,),
-        )]
+        ):
+            device = dict(row)
+            content, stale = device_content(content_mode, device, sender_key_id)
+            for private in ("private_content", "encryption_public_key", "sender_key_id"):
+                del device[private]
+            device["content"] = content
+            device["stale_key"] = stale
+            listed.append(device)
+        return listed
     except Exception as exc:
         logger.warning("Push device listing failed: %s", type(exc).__name__)
         return []

@@ -2827,6 +2827,14 @@ CREATE TABLE IF NOT EXISTS push_devices (
     -- Set only by the generic iOS shell: the native connection that enrolled, echoed in alert routing.
     connection_binding TEXT,
     connection_generation INTEGER,
+    -- Private push enrollment (docs/reference/private-push-v1.md): all NULL for none.
+    -- private_content is 'encrypted' or 'generic'; push_generation is the shell's per-enrollment value.
+    private_version INTEGER,
+    private_content TEXT,
+    encryption_public_key TEXT,
+    encryption_key_id TEXT,
+    sender_key_id TEXT,
+    push_generation TEXT,
     last_badge INTEGER NOT NULL DEFAULT -1,
     last_error TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
