@@ -7,36 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Group members can now change their group's files: upload, make folders, edit text files and delete from Files or the group's Shared files card, which also lists recent changes. iPhone push notifications can keep their content from Apple, with the phone decrypting the preview itself. Istota also ships a worldview, the positions it judges from, as an optional prompt layer that is on by default.
+
+With full Nextcloud integration the daemon now reads your files only after they change, and the scheduler, feeds poll and status file make far fewer requests. The daily backup stops downloading old snapshots from the mount. This release has 48 commits, against 474 in 0.48.0 and 562 in 0.47.0; the rest are fixes to the Mac CLI's release checks, `istota-stack reclaim`, the browser's Chrome version and the Money overview.
+
+**Before you upgrade.**
+
+- Existing group folders become writable by every current member, and members who joined earlier are not told. Check who is in each group first (`docs/features/groups.md`).
+- `istota-stack update` reprovisions the VM, which restarts the Nextcloud mount and the stack once. The daily backup now needs free local disk beside the databases for the largest one.
+- A reader of `status.json` that treats an `updated_at` older than a minute as a stopped daemon needs a threshold above five minutes.
+
 ### Added
 
-- **Private push notifications.** With `[push] content = "private"`, Apple sees only a fixed alert and the badge count: an iOS 17 phone on app 0.15.0 opens an encrypted preview itself, and other devices get the fixed alert. Notifications settings shows each device's mode. See docs/features/notifications.md.
-- **A worldview layer.** Istota now ships the positions it judges from, taken from the Common Task manifesto, and loads them between emissaries and the persona for every task except briefings. It is on by default; `worldview_enabled = false` turns it off. See docs/configuration/persona.md.
+- **Private push notifications.** With `[push] content = "private"`, Apple sees only a fixed alert and the badge count, and an iOS 17 phone on app 0.15.0 decrypts the preview itself. Notifications settings shows each device's mode. See docs/features/notifications.md.
+- **A worldview layer.** Istota ships the positions it judges from, taken from the Common Task manifesto, loaded between emissaries and the persona for every task except briefings. `worldview_enabled = false` turns it off. See docs/configuration/persona.md.
 
 ### Changed
 
-- **Group members can change their group's files.** Every current member can upload, create folders, edit text files and delete files and empty folders in the group's folder from Files, and upload from the group's Shared files card, which also lists recent changes. Existing group folders became member-writable with this change, and members who joined earlier were not told; the All users folder stays admin-only, and `GROUP.md` and `memories` at the top of the folder cannot be changed from Files. See docs/features/groups.md.
-- Recent searches in the search dialog are a list you can move through with the arrow keys and open with Enter, instead of a row of buttons with no space between them.
-- An invoice that bank sync marked paid shows a small "synced" badge after its paid date, instead of repeating the same date as "paid by sync on".
-
-- The feeds poll no longer queues a task every five minutes for each user. The scheduler checks the user's feeds first and queues the poll only when a feed is due, so the admin task list and the daemon log carry far fewer empty runs.
-
-- Scheduled skill jobs no longer look up the user's calendars on Nextcloud before every run. Only the calendar and location skills read that list, so the other module jobs, such as the feeds and money polls, now make no CalDAV requests.
-
-- The scheduler syncs the money, feeds and health module jobs every ten minutes instead of every minute, so it no longer reads each user's module folders on Nextcloud once a minute. After a module is enabled, a user is added or Garmin is connected, the first feeds poll or Garmin backfill can now take up to ten minutes to start. Turning a module off still stops its jobs at once.
-
-- **The daemon reads your Nextcloud files only after they change.** With full Nextcloud integration, the TASKS.md poll, the CRON.md sync and the shared-file organizer used to read the mount every 30 to 120 seconds, and each read re-listed the folders from the root. The daemon now asks Nextcloud every 30 seconds whether anything under its root changed, follows only the changed folders, and tells the mount which listings to drop, so the mount keeps the rest for ten minutes. An edit you make in Nextcloud still reaches the bot within about a minute, and each poller also runs once an hour regardless. `[scheduler] tree_watch_interval` sets the interval. **Upgrade note:** `istota-stack update` reprovisions the VM, which writes a password for the mount's new control socket and restarts the mount and the stack once; nothing else is needed. `istota doctor` checks the socket as `nextcloud.rclone_rc`.
-
-- The daemon no longer rewrites `status.json` on Nextcloud every minute. It writes the file when the worker or queue counts change, and otherwise every five minutes, so a status that has not changed now has an `updated_at` up to five minutes old instead of one minute. A reader that treats an older `updated_at` as a stopped daemon needs a threshold above five minutes.
+- **Group members can change their group's files.** Every current member can upload, create folders, edit text files and delete in the group's folder from Files, and upload from the Shared files card. The All users folder stays admin-only. See docs/features/groups.md.
+- **The daemon reads your Nextcloud files only after they change.** It asks Nextcloud every 30 seconds what changed and follows only those folders, and the mount keeps the rest for ten minutes. An edit still reaches the bot within about a minute. `istota doctor` checks the mount's new control socket.
+- **Fewer background requests.** The feeds poll is queued only when a feed is due, only the calendar and location skills look up calendars, module jobs sync every ten minutes, and `status.json` is written on change or every five minutes. A newly enabled module's first poll can take up to ten minutes.
+- Smaller changes: recent searches are a list you move through with the arrow keys, and an invoice bank sync marked paid shows a "synced" badge.
 
 ### Fixed
 
-- On a Mac, `istota-stack update --appliance` now refuses a release older than the one the stack last ran, as `create --appliance` already did. Before, it installed the older release, whose image may not open a database the newer one had migrated.
-- On a Mac, `create`, `restore` and `update --appliance` now check which release the running VM has before they pick one, so they see a release that `istota-stack rollback` went back to. Before, the Mac still had the newer release on record: `restore` installed it again, and the downgrade check compared against it.
-- `istota-stack reclaim` no longer misses that a compose file names a volume. The check piped into `grep -q` under `pipefail`, so on a match it could read as no match, and `reclaim --apply` could then remove a volume the stack still declares.
-- The browser image installs Google's current stable Chrome on every `istota-stack update`. Before, Docker's build cache kept the Chrome from an earlier build until something else in the browser image changed, so Chrome could fall weeks behind. `istota doctor` now reports the running Chrome and warns when a newer stable release has been out for more than a week.
-- Files no longer says your tasks can read and change the All users folder from your private chat. Tasks reach it only from a room linked to All users, and its note in Files now says so.
-- The P&L and P&L % columns of the Money overview's holdings are green and red again. An amount under a cent now shows no sign or colour, and a zero P&L % no longer shows a "+".
-- The daily database backup no longer downloads the previous day's snapshots back from the Nextcloud mount. Each snapshot is now taken and checked on local disk, compared against the row counts the last run recorded in a `manifest.json` beside the snapshots, and uploaded once. Before a manifest exists, a prior snapshot is downloaded only when the new one comes back empty, in one sequential read rather than SQLite's scattered reads, which pulled several times the file's size. The server needs free local disk beside its databases for the largest one.
+- The daily database backup checks each snapshot on local disk against the row counts the last run recorded, then uploads it once, instead of downloading the previous day's snapshots back from the mount.
+- On a Mac, `update --appliance` refuses a release older than the one the stack last ran, and `create`, `restore` and `update --appliance` see a release that `istota-stack rollback` went back to.
+- `istota-stack reclaim --apply` could remove a volume a compose file still names, because the check could read a match as no match.
+- The browser image installs Google's current stable Chrome on every update, and `istota doctor` warns when a newer stable release has been out for more than a week.
+- Files no longer says your private chat can reach the All users folder, and the Money overview's P&L columns are green and red again.
 
 ## [0.48.0] - 2026-11-02
 
