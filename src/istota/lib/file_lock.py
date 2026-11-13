@@ -58,8 +58,13 @@ def exclusive_lock(
     poll_seconds: float = 0.05,
     on_timeout: Callable[[str], BaseException] | None = None,
     nofollow: bool = False,
-) -> Iterator[None]:
+) -> Iterator[int]:
     """Hold an exclusive flock on ``lock_path`` for the duration of the context.
+
+    Yields the held descriptor's number, for a caller that hands the lock to a
+    child through ``pass_fds``; callers that ignore it are unaffected. Such a
+    caller must reap the child before leaving the context: the exit's
+    ``LOCK_UN`` releases the lock for every copy of the descriptor.
 
     Raises whatever ``on_timeout`` returns for the anchor path, or
     ``TimeoutError`` when it is None. The caller owns the anchor's parent
@@ -94,7 +99,7 @@ def exclusive_lock(
                     raise on_timeout(str(lock_path)) from None
                 time.sleep(poll_seconds)
         try:
-            yield
+            yield fd.fileno()
         finally:
             try:
                 fcntl.flock(fd.fileno(), fcntl.LOCK_UN)

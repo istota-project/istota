@@ -329,8 +329,22 @@ class VaultRead:
         )
 
 
-def parse_vault(data: bytes, passphrase: str, *, keyfile: bytes | None = None) -> VaultRead:
-    """``data`` opened with ``passphrase``, mapped, or a mapped ``VaultError``."""
+#: The reserved root group and manifest marker of an installation backup
+#: (`config_editor/backup.py`). Named here so a user import can refuse one.
+INSTALLATION_BACKUP_GROUP = "Istota installation backup"
+INSTALLATION_FORMAT_PROPERTY = "istota.format"
+INSTALLATION_FORMAT = "installation-backup"
+
+INSTALLATION_BACKUP_REFUSAL = "Use Admin → Configuration to restore an installation backup."
+
+
+class InstallationBackupRefused(VaultError):
+    """An installation backup offered to a user's vault import."""
+
+
+def open_database(data: bytes, passphrase: str | None, *, keyfile: bytes | None = None):
+    """``data`` opened in memory, or a mapped ``VaultError``. Nothing is read
+    from the database here, and no exception text leaves."""
     try:
         from pykeepass import PyKeePass
         from pykeepass.exceptions import (
@@ -344,9 +358,8 @@ def parse_vault(data: bytes, passphrase: str, *, keyfile: bytes | None = None) -
         ) from exc
 
     try:
-        kp = PyKeePass(io.BytesIO(data), password=passphrase,
-                       keyfile=io.BytesIO(keyfile) if keyfile is not None else None)
-        return _map_groups(kp, _digest(data))
+        return PyKeePass(io.BytesIO(data), password=passphrase,
+                         keyfile=io.BytesIO(keyfile) if keyfile is not None else None)
     except CredentialsError as exc:
         raise VaultLocked(
             "the supplied credentials do not open this vault — check the passphrase "
@@ -361,6 +374,40 @@ def parse_vault(data: bytes, passphrase: str, *, keyfile: bytes | None = None) -
             type(exc).__name__,
         )
         raise VaultCorrupt("the file is not a readable KeePass database") from None
+
+
+def is_installation_backup(kp) -> bool:
+    """Whether an open database carries the installation backup's group at
+    its root or its manifest marker on any entry, renamed group or not."""
+    for group in kp.root_group.subgroups:
+        if str(group.name or "").strip().casefold() == INSTALLATION_BACKUP_GROUP.casefold():
+            return True
+    for entry in kp.entries:
+        marker = entry.custom_properties.get(INSTALLATION_FORMAT_PROPERTY)
+        if str(marker or "").strip() == INSTALLATION_FORMAT:
+            return True
+    return False
+
+
+def parse_vault(data: bytes, passphrase: str, *, keyfile: bytes | None = None) -> VaultRead:
+    """``data`` opened with ``passphrase``, mapped, or a mapped ``VaultError``.
+
+    An installation backup is refused before anything is mapped, so its
+    credentials never become names in a user's namespace.
+    """
+    kp = open_database(data, passphrase, keyfile=keyfile)
+    try:
+        refused = is_installation_backup(kp)
+        if not refused:
+            return _map_groups(kp, _digest(data))
+    except Exception as exc:
+        logger.warning(
+            "vault: parse failed (%s.%s)",
+            type(exc).__module__,
+            type(exc).__name__,
+        )
+        raise VaultCorrupt("the file is not a readable KeePass database") from None
+    raise InstallationBackupRefused(INSTALLATION_BACKUP_REFUSAL)
 
 
 def _digest(data: bytes) -> str:

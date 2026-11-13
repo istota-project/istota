@@ -59,6 +59,33 @@ def keyfile_refusal(keyfile: bytes) -> str | None:
     return None
 
 
+def new_database(*, password: str | None, keyfile: bytes | None, options: ExportOptions):
+    """An empty in-memory KeePass database with Argon2id at `options`.
+
+    The caller validates `keyfile` with `keyfile_refusal` first, so a refusal
+    comes before any work it would waste.
+    """
+    try:
+        import pykeepass
+    except ImportError:
+        raise kdbx_import.VaultLibraryMissing("Install the vault extra") from None
+    kp = pykeepass.create_database(io.BytesIO(), password=password,
+                                   keyfile=io.BytesIO(keyfile) if keyfile is not None else None)
+    params = kp.kdbx.header.value.dynamic_header.kdf_parameters.data.dict
+    params["$UUID"].value = bytes.fromhex("9e298b1956db4773b23dfc3ec6f0a1e6")
+    params["M"].value = options.argon2_memory_kib * 1024
+    params["I"].value = options.argon2_iterations
+    params["P"].value = options.argon2_parallelism
+    return kp
+
+
+def serialize(kp) -> bytes:
+    """The encrypted file, built in memory and never written to disk."""
+    out = io.BytesIO()
+    kp.save(out)
+    return out.getvalue()
+
+
 def _write_generated_entry(entry, values: dict[str, str]) -> None:
     """Write generated fields to a new export entry."""
     entry.password = values.get("password") or ""
@@ -83,7 +110,7 @@ def _write_generated_entry(entry, values: dict[str, str]) -> None:
 def build_kdbx(db_path, user_id, *, password: str, keyfile: bytes | None,
                options: ExportOptions) -> tuple[bytes, ExportSummary]:
     try:
-        import pykeepass
+        import pykeepass  # noqa: F401 - the missing extra refuses before any read
     except ImportError:
         raise kdbx_import.VaultLibraryMissing("Install the vault extra") from None
     if keyfile is not None and keyfile_refusal(keyfile):
@@ -125,13 +152,7 @@ def build_kdbx(db_path, user_id, *, password: str, keyfile: bytes | None,
                 entries.append((owner, members, kinds, binding, declined, recovery_format))
     if not entries:
         raise ValueError("export_empty")
-    kp = pykeepass.create_database(io.BytesIO(), password=password,
-                                   keyfile=io.BytesIO(keyfile) if keyfile is not None else None)
-    params = kp.kdbx.header.value.dynamic_header.kdf_parameters.data.dict
-    params["$UUID"].value = bytes.fromhex("9e298b1956db4773b23dfc3ec6f0a1e6")
-    params["M"].value = options.argon2_memory_kib * 1024
-    params["I"].value = options.argon2_iterations
-    params["P"].value = options.argon2_parallelism
+    kp = new_database(password=password, keyfile=keyfile, options=options)
     root = kp.add_group(kp.root_group, kdbx_import.VAULT_ROOT_GROUP)
     generated_group = None
     generated_count = otp_count = recovery_count = 0
@@ -169,6 +190,4 @@ def build_kdbx(db_path, user_id, *, password: str, keyfile: bytes | None,
         for name, value in members.items():
             if name not in known:
                 entry.set_custom_property(name.removeprefix(owner + "_"), value, protect=True)
-    out = io.BytesIO()
-    kp.save(out)
-    return out.getvalue(), ExportSummary(len(entries), generated_count, otp_count, recovery_count)
+    return serialize(kp), ExportSummary(len(entries), generated_count, otp_count, recovery_count)
