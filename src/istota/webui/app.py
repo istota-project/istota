@@ -81,6 +81,7 @@ from istota.config import (
     Config, load_config, local_login_hosts, no_auth_hosts, no_auth_origins, refresh_user_profiles_if_changed,
 )
 from istota.lib.image_sniff import SNIFF_BYTES, sniff_raster
+from istota.lib.rate_limit import SlidingWindow
 from istota.lib.workspace_marker import storage_mode
 from istota.workspace.preview import PREVIEW_MAX_BYTES, classify as classify_preview
 from istota.storage import NOTES_MAX_BYTES
@@ -6330,6 +6331,12 @@ _CONFIG_RESTORE_SUBMIT_KEYS = _CONFIG_RESTORE_PREVIEW_KEYS | {
 }
 _CONFIG_RESTORE_PASSWORD_MAX_CHARS = 4096
 _CONFIG_RESTORE_SELECTED_MAX_CHARS = 1024
+# A restore preview says whether an uploaded value equals the current one, and
+# the uploader picks the KDF cost, so each request is a guess. Both routes and
+# every refusal count, a wrong password included.
+_CONFIG_RESTORE_WINDOW_SECONDS = 600
+_CONFIG_RESTORE_MAX_PER_ADMIN = 10
+_config_restore_window = SlidingWindow(_CONFIG_RESTORE_WINDOW_SECONDS, _CONFIG_RESTORE_MAX_PER_ADMIN)
 # An opened or read backup's refusal, keyed by `BackupError.code`.
 _CONFIG_RESTORE_STATUS = {
     "too_large": 413,
@@ -6419,6 +6426,14 @@ def _read_restore_input(body: dict) -> _RestoreInput:
     if not password and keyfile is None:
         raise _ConfigRefusal(400, "backup_locked", "Wrong password or key file.")
     return _RestoreInput(fmt, data, password, keyfile, restore_config, selected)
+
+
+def _admit_restore(user_id: str) -> None:
+    if not _config_restore_window.admit(user_id, time.monotonic()):
+        raise _ConfigRefusal(
+            429, "restore_rate_limited",
+            f"Too many restore attempts; try again within {_CONFIG_RESTORE_WINDOW_SECONDS // 60} minutes.",
+        )
 
 
 def _restore_refusal(exc) -> _ConfigRefusal:
@@ -6515,13 +6530,16 @@ async def admin_config_restore_preview(
 ):
     """What restoring an uploaded backup would do, previewed.
 
-    Read-only: nothing is stored and no step-up is asked. Returns the editor's
+    Read-only: nothing is stored and no step-up is asked, but each request
+    spends the admin's restore budget (`_admit_restore`), shared with the
+    submit route. Returns the editor's
     preview, each credential the backup holds with its status and no value,
     and the two digests a submit must send back. Blocking problems answer 200
     in the body, as the ordinary preview does.
     """
     user_id = user["username"]
     try:
+        _admit_restore(user_id)
         body = await _read_restore_body(request, _CONFIG_RESTORE_PREVIEW_KEYS)
         await _require_config_identity(user_id, "Restoring the configuration")
         inp = _read_restore_input(body)
@@ -6553,6 +6571,7 @@ async def admin_config_restore_submit(
     """
     user_id = user["username"]
     try:
+        _admit_restore(user_id)
         body = await _read_restore_body(request, _CONFIG_RESTORE_SUBMIT_KEYS)
         await _require_config_identity(user_id, "Restoring the configuration")
         _require_config_applier()

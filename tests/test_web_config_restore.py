@@ -49,6 +49,18 @@ NEXTCLOUD = "file:istota_nextcloud_app_password"
 VALUES = (FILE_VALUE, INLINE_SECRET, MAP_KEY, ROTATED, NC_PASSWORD, RESTORE_PASSWORD)
 
 
+@pytest.fixture(autouse=True)
+def restore_limit(monkeypatch):
+    """A fresh per-admin restore budget for each test, which the module-level
+    window would otherwise carry from one test to the next."""
+    import istota.webui.app as mod
+    from istota.lib.rate_limit import SlidingWindow
+
+    window = SlidingWindow(mod._CONFIG_RESTORE_WINDOW_SECONDS, mod._CONFIG_RESTORE_MAX_PER_ADMIN)
+    monkeypatch.setattr(mod, "_config_restore_window", window)
+    return window
+
+
 @pytest.fixture
 def archive(install):
     """A backup of the installation as it was, then the installation moved on:
@@ -420,6 +432,32 @@ class TestTheGates:
         assert response.status_code == 409
         assert response.json()["error"] == "managed"
         assert (await _preview(alice, archive, restore_config=False, selected=[IMAP])).status_code == 200
+
+
+class TestTheRestoreLimit:
+    """A restore preview reports whether an uploaded value equals the current
+    one, so a stolen admin session could test guesses with it. Every restore
+    request counts, refused or not, previews and submits alike."""
+
+    async def test_the_budget_is_per_admin_and_counts_refusals(self, alice, archive, monkeypatch):
+        import istota.webui.app as mod
+
+        for _ in range(mod._CONFIG_RESTORE_MAX_PER_ADMIN):
+            response = await _preview(alice, archive, password="not the password")
+            assert response.status_code == 400 and response.json()["error"] == "backup_locked"
+        for path in (PREVIEW, SUBMIT):
+            response = await alice.post(path, json=_body(archive, archive["kdbx"]), headers=ORIGIN)
+            assert response.status_code == 429, response.text
+            assert response.json()["error"] == "restore_rate_limited"
+            assert response.headers["cache-control"] == "no-store"
+            _no_value_in(response.text)
+
+        monkeypatch.setattr(archive["config"], "admin_users", {"alice", "bob", "dave"})
+        bob = await _client("bob")
+        try:
+            assert (await _preview(bob, archive)).status_code == 200
+        finally:
+            await bob.aclose()
 
 
 class TestStaleReviews:
