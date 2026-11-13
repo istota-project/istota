@@ -167,7 +167,8 @@ def _sealed(config: Config, device: dict, logical: LogicalPush, now: float, sign
             binding=device["connection_binding"], generation=device["push_generation"], now=now,
             alert_title=_sanitize(config.bot_name, _ALERT_TITLE_MAX),
             title=_sanitize(logical.title, _ALERT_TITLE_MAX), body=_sanitize(logical.body, _ALERT_BODY_MAX),
-            badge=logical.badge, logical_group=logical.group, target=target, mid=mid,
+            badge=None if logical.badge is None else min(logical.badge, envelope.MAX_BADGE),
+            logical_group=logical.group, target=target, mid=mid,
         )
     except envelope.PayloadTooLarge as error:
         raise DeliveryError("payload_too_large", type(error).__name__) from error

@@ -81,6 +81,13 @@ async def test_private_push_is_a_separate_discovery_key(client, configured, cont
     assert len(response.content) < 512
 
 
+async def test_private_push_is_not_advertised_without_direct_delivery(client, configured):
+    config = configured._config
+    config.push = PushConfig(enabled=False, content="private", signing_key_path="/data/config/push/signing.key")
+    push = (await client.get(URL)).json()["push"]
+    assert push == {"delivery": "unavailable"}
+
+
 @pytest.mark.parametrize("field,value", [
     ("apns_key_path", ""), ("apns_key_id", ""), ("apns_team_id", ""),
     ("apns_topic", ""), ("dispatch_interval_seconds", 0),

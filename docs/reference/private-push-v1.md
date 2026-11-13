@@ -96,8 +96,8 @@ The plaintext is a JSON object with exactly these fields:
 | Field | Type | Rule |
 |---|---|---|
 | `v`, `binding`, `generation`, `mid`, `exp`, `badge` | as in the header | must equal the header's value and type |
-| `title` | string | at most 80 characters |
-| `body` | string | at most 180 characters; empty when previews are off |
+| `title` | string | at most 80 Unicode code points |
+| `body` | string | at most 180 Unicode code points; empty when previews are off |
 | `group` | string or null | the collapse ID, used as the local thread identifier |
 | `target` | object | the routing target, with a string `kind` |
 

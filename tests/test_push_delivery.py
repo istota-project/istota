@@ -455,3 +455,33 @@ def test_cli_push_test_refuses_a_private_deployment_without_its_key(private_swee
     assert cli.cmd_push_test(SimpleNamespace(config=None, user=ACCOUNT, message=BODY)) == 1
     assert not requests
     assert "signing key" in capsys.readouterr().err
+
+
+def test_a_badge_past_the_envelope_range_is_clamped_not_refused(private):
+    config, signing_key, device_key = private
+    device = encrypted_device(signing_key, device_key)
+    logical = chat_alert(badge=12345)
+    prepared = delivery.build_delivery(config, device, logical, now=NOW, signing_key=signing_key)
+    opened = envelope.open_for_tests(prepared.payload, device_private_key=device_key,
+                                     sender_public_key=signing_key.public_key(), now=NOW,
+                                     binding=BINDING, generation=GENERATION)
+    assert json.loads(prepared.payload)["aps"]["badge"] == opened.header["badge"] == 9999
+    assert opened.plaintext["badge"] == 9999
+
+
+def test_envelopes_are_stamped_when_the_user_is_built_not_when_the_sweep_began(private_sweep, monkeypatch):
+    config, signing_key, device_key, requests, ids, room = private_sweep
+    calls = []
+
+    def clock():
+        calls.append(None)
+        return NOW if len(calls) == 1 else NOW + 200
+
+    monkeypatch.setattr(dispatch.time, "time", clock)
+    dispatch.run_push_dispatch(config)
+    sealed = [r for r in requests if r.url.path.endswith("ab" * 32)]
+    assert sealed
+    for request in sealed:
+        opened = envelope.open_for_tests(request.content, device_private_key=device_key,
+                                         sender_public_key=signing_key.public_key(), now=NOW + 200)
+        assert opened.header["iat"] == int(NOW + 200)

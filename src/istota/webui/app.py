@@ -14031,7 +14031,7 @@ def _private_enrollment(private) -> dict:
         raw = envelope.b64url_decode(public_key)
     except ValueError:
         raise refused from None
-    if len(raw) != 32 or key_id != envelope.key_id(raw):
+    if len(raw) != 32 or key_id != envelope.key_id(raw) or not envelope.usable_device_key(raw):
         raise refused
     try:
         sender_digest = envelope.b64url_decode(sender_key_id)

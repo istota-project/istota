@@ -133,7 +133,7 @@ With `[push] content = "private"` and a signing key from `istota push keygen`, n
 
 What Apple still sees: when each notification is sent, its size rounded up to one of four padding sizes, the badge count, the device token, and opaque identifiers that change with the signing key. It does not see room names, room tokens, notification IDs, routes or account names. Badge-only updates are the same as on a standard installation, since they carry only the count.
 
-If the signing key goes missing or cannot be read, the dispatcher logs one warning and sends nothing until it can read the key again. Waiting notifications stay waiting. A device whose stored key cannot be used records `private_payload` as its last error and the other devices are still sent. Switching back to `content = "legacy"` returns every device to plaintext previews, and is the operator's choice. The wire format is [private push v1](../reference/private-push-v1.md).
+If the signing key goes missing or cannot be read, the dispatcher logs one warning and sends nothing until it can read the key again. Notifications stay pending while it is missing; once the key is back, those older than `max_age_seconds` are acknowledged without an alert and the badge catches up on the next sweep. A device whose stored key cannot be used records `private_payload` as its last error and the other devices are still sent. Switching back to `content = "legacy"` returns every device to plaintext previews, and is the operator's choice. The wire format is [private push v1](../reference/private-push-v1.md).
 
 ## Safety notes
 

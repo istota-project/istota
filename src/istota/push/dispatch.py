@@ -143,11 +143,13 @@ def _dispatch_user(config: Config, user_id: str, pending: list[dict], ceiling: i
     alerts = list(_notification_pushes(enabled, badge, preview, oldest))
     if chat:
         alerts.extend(_chat_pushes(chat, badge, preview, oldest))
+    # Sealed with this user's own build time: earlier users' sends can outlast an envelope's 300 s.
+    sealed_at = time.time()
     outgoing = []
     for device in registered:
-        builds = [_prepare(config, device, logical, now, signing_key) for logical in alerts]
+        builds = [_prepare(config, device, logical, sealed_at, signing_key) for logical in alerts]
         if not alerts and device["last_badge"] != badge:
-            builds.append(_prepare(config, device, delivery.badge_only(badge), now, signing_key))
+            builds.append(_prepare(config, device, delivery.badge_only(badge), sealed_at, signing_key))
         outgoing.append((device, builds))
     for device, builds in outgoing:
         for prepared in builds:
@@ -169,12 +171,14 @@ def _signing_key(config: Config):
     if config.push.content != "private":
         return None
     try:
-        return envelope.load_signing_key(config.push.signing_key_path)
+        key = envelope.load_signing_key(config.push.signing_key_path)
     except envelope.KeyFileError as exc:
         if not _warned_signing_key:
             logger.warning("Private push unavailable, nothing is sent until the key can be read: %s", exc)
             _warned_signing_key = True
         return None
+    _warned_signing_key = False
+    return key
 
 
 def run_push_dispatch(config: Config) -> None:

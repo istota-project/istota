@@ -412,3 +412,13 @@ async def test_largest_valid_registration_fits_the_body_bound(client, private_pu
             "connection_generation": 2**53 - 1}
     assert len(json.dumps(body).encode()) < 4096
     assert (await client.post(URL, cookies=cookies, headers=ORIGIN, json=body)).status_code == 200
+
+
+async def test_an_unusable_device_key_is_refused_at_enrollment(client, private_push):  # noqa: F811
+    zero = bytes(32)
+    cookies = await _login(client, "alice")
+    body = _encrypted(private_push["kid"], encryption_public_key=_b64(zero), encryption_key_id=_kid(zero))
+    response = await client.post(URL, cookies=cookies, headers=ORIGIN, json=body)
+    assert response.status_code == 400
+    assert response.json()["detail"] == "invalid private enrollment"
+    assert _device_count() == 0

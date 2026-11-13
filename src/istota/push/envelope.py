@@ -89,6 +89,8 @@ class Opened:
 # --- Encodings ---------------------------------------------------------------
 
 
+MAX_BADGE = 9999
+
 def b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
@@ -138,6 +140,15 @@ def _strict_json(data: bytes, reason: str):
 
 
 # --- Identifiers ---------------------------------------------------------------
+
+
+def usable_device_key(raw_public_key: bytes) -> bool:
+    """Whether HPKE can seal to this X25519 key; a low-order point gives an all-zero secret and fails."""
+    try:
+        X25519PrivateKey.generate().exchange(X25519PublicKey.from_public_bytes(raw_public_key))
+    except ValueError:
+        return False
+    return True
 
 
 def key_id(raw_public_key: bytes) -> str:
@@ -251,7 +262,7 @@ def _check_header(header: dict) -> None:
     if collapse is not None and (not isinstance(collapse, str) or not _ID16.fullmatch(collapse)):
         raise EnvelopeError("header_invalid", "collapse")
     badge = header["badge"]
-    if badge is not None and (not _is_int(badge) or not 0 <= badge <= 9999):
+    if badge is not None and (not _is_int(badge) or not 0 <= badge <= MAX_BADGE):
         raise EnvelopeError("header_invalid", "badge")
     if not _is_int(header["iat"]) or not _is_int(header["exp"]) or header["iat"] < 0:
         raise EnvelopeError("header_invalid", "timestamps")

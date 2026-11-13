@@ -1,5 +1,4 @@
 import {
-  deletePushDevice,
   getMobilePushCapabilities,
   getPushSenderKey,
   listPushDevices,
@@ -103,9 +102,18 @@ async function savePrivateEnrollment(context: NativeConnectionContext): Promise<
     try {
       await commitPrivateRegistration({ ...pending, deviceId: saved.id });
     } catch (e) {
-      // The server holds a key the app no longer has; remove the row so nothing is sealed to it.
+      // The server holds a key the app no longer has. Re-register without it rather than
+      // deleting: the upsert reused the row id, so a DELETE would remove the working row too.
       await cancelPrivateRegistration(pending).catch(() => {});
-      await deletePushDevice(saved.id).catch(() => {});
+      const plain = await registerPushDevice({
+        token: prepared.token,
+        environment: prepared.environment,
+        platform: 'ios',
+        app_version: shellVersion() ?? '',
+        connection_binding: binding,
+        connection_generation: context.generation,
+      }).catch(() => null);
+      if (plain) await recordPushRegistration(plain.id, context).catch(() => {});
       throw e;
     }
     await recordPushRegistration(saved.id, context);

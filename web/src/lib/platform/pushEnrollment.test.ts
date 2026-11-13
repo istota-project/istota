@@ -294,7 +294,7 @@ it('does not retry any other conflict', async () => {
   expect(privatePush.cancelPrivateRegistration).toHaveBeenCalledOnce();
 });
 
-it('cancels and removes the server row when the native commit fails', async () => {
+it('keeps the device registered without its key when the native commit fails', async () => {
   onPrivateShell();
   privatePush.commitPrivateRegistration.mockRejectedValueOnce(
     Object.assign(new Error('CONNECTION_CHANGED'), { code: 'CONNECTION_CHANGED' }),
@@ -304,8 +304,17 @@ it('cancels and removes the server row when the native commit fails', async () =
     binding,
     generation: 'G'.repeat(22),
   });
-  expect(urls()).toContain('DELETE /istota/api/push/devices/41');
-  expect(connection.recordPushRegistration).not.toHaveBeenCalled();
+  // The upsert reuses the row id, so a DELETE would also remove the working registration.
+  expect(urls().some((u) => u.startsWith('DELETE'))).toBe(false);
+  const bodies = postedBodies() as Record<string, unknown>[];
+  expect(bodies).toHaveLength(2);
+  expect(bodies[1]).not.toHaveProperty('private');
+  expect(bodies[1]).toMatchObject({ connection_binding: binding });
+  expect(connection.recordPushRegistration).toHaveBeenCalledWith({
+    registrationId: 41,
+    connectionBinding: binding,
+    generation: 3,
+  });
 });
 
 it('cancels without posting when the app returns an encrypted enrollment with no key', async () => {

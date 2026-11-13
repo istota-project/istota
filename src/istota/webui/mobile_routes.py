@@ -40,7 +40,7 @@ async def mobile_config(request: Request) -> JSONResponse:
     )
     push_capabilities = {"delivery": "direct" if direct_push else "unavailable"}
     # A separate key, never a third `delivery` value: shells 0.12 to 0.14 refuse one.
-    if push.content == "private" and push.signing_key_path.strip():
+    if direct_push and push.content == "private" and push.signing_key_path.strip():
         push_capabilities["private"] = {"versions": [1]}
     # No config strings are serialized: both capability branches stay below
     # 512 bytes, well within the client's 64 KiB discovery limit.
