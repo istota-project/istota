@@ -2644,9 +2644,89 @@ class PushConfig:
     content: str = "legacy"
     # Ed25519 PKCS8 PEM; its public half is the sibling `<path>.pub`.
     signing_key_path: str = ""
+    # `relay` sends through `relay_url` with each device's send capability and
+    # no APNs key here; it requires `content = "private"`.
+    delivery: str = "direct"
+    # A base URL that may carry a path; normalized once at load.
+    relay_url: str = ""
+    relay_timeout_seconds: int = 15
 
 
 PUSH_CONTENT_MODES = ("legacy", "private")
+PUSH_DELIVERY_MODES = ("direct", "relay")
+RELAY_URL_MAX_LENGTH = 256
+
+
+def normalize_relay_url(raw: str) -> str:
+    """The one form of a relay base URL, or ``ValueError`` naming what is wrong.
+
+    Scheme and host lowercased, the default port and a trailing slash dropped,
+    the path kept as written since it is the relay's prefix for this app. The
+    app compares this form, path included, with its compiled-in relay URL, and
+    endpoints are appended to it, so anything that could make two spellings
+    reach different places is refused rather than cleaned up.
+    """
+    value = raw.strip()
+    if not value:
+        raise ValueError("it is empty")
+    if len(value) > RELAY_URL_MAX_LENGTH:
+        raise ValueError(f"it is longer than {RELAY_URL_MAX_LENGTH} characters")
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F or ch == "\\" for ch in value):
+        raise ValueError("it contains whitespace, a control character or a backslash")
+    if "?" in value or "#" in value:
+        raise ValueError("it has a query or a fragment")
+    parts = urlsplit(value)
+    if parts.scheme.lower() != "https":
+        raise ValueError("it is not https://")
+    if "@" in parts.netloc:
+        raise ValueError("it carries userinfo")
+    host = parts.hostname or ""
+    if not host:
+        raise ValueError("it has no host")
+    try:
+        port = parts.port
+    except ValueError:
+        raise ValueError("its port is not a number") from None
+    if port == 0:
+        raise ValueError("its port is 0")
+    path = parts.path
+    lowered = path.lower()
+    if ".." in path or "//" in path or "%2f" in lowered or "%2e" in lowered:
+        raise ValueError("its path contains '..', '//', '%2f' or '%2e'")
+    if ":" in host:
+        host = f"[{host}]"
+    authority = host if port in (None, 443) else f"{host}:{port}"
+    return f"https://{authority}{path.rstrip('/')}"
+
+
+def _validate_push_delivery(push: PushConfig) -> None:
+    """Raise on a `[push] delivery` that could forward plaintext or reach the wrong relay.
+
+    Normalizes ``relay_url`` in place, so the form checked here is the only one
+    any later reader sees. Runs after ``_validate_push_content``, so a relay
+    without a signing key has already been refused there.
+    """
+    if push.delivery not in PUSH_DELIVERY_MODES:
+        raise ValueError(
+            f"[push] delivery={push.delivery!r} is not valid. "
+            f"Use one of: {', '.join(PUSH_DELIVERY_MODES)}."
+        )
+    if push.delivery != "relay":
+        return
+    if push.content != "private":
+        raise ValueError(
+            '[push] delivery = "relay" needs content = "private": the relay '
+            "forwards only encrypted envelopes, never plaintext previews."
+        )
+    try:
+        push.relay_url = normalize_relay_url(push.relay_url)
+    except ValueError as exc:
+        raise ValueError(
+            f'[push] delivery = "relay" needs relay_url (or ISTOTA_PUSH_RELAY_URL) '
+            f"to be an https:// base URL with no userinfo, query or fragment: {exc}."
+        ) from None
+    if push.relay_timeout_seconds < 1:
+        raise ValueError("[push] relay_timeout_seconds must be at least 1.")
 
 
 def _validate_push_content(push: PushConfig) -> None:
@@ -5858,6 +5938,7 @@ FIELD_CHOICES: dict[tuple[str, ...], tuple[str, ...]] = {
     ("web", "map", "provider"): map_provider_names(),
     ("logging", "output"): LOGGING_OUTPUTS,
     ("push", "content"): PUSH_CONTENT_MODES,
+    ("push", "delivery"): PUSH_DELIVERY_MODES,
 }
 """Closed vocabularies, by path: a field whose value must be one of these.
 
@@ -5955,6 +6036,7 @@ ENV_OVERRIDES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("ISTOTA_WEB_AUTH", ("web", "auth")),
     ("ISTOTA_APNS_KEY_PATH", ("push", "apns_key_path")),
     ("ISTOTA_PUSH_SIGNING_KEY_PATH", ("push", "signing_key_path")),
+    ("ISTOTA_PUSH_RELAY_URL", ("push", "relay_url")),
 )
 """``(env var, path)``: non-secret settings the environment sets over the file.
 
@@ -5966,6 +6048,7 @@ overrides, not an override of the file.
 _ENV_OVERRIDE_PARSERS: dict[str, Callable[[str], object]] = {
     "ISTOTA_APNS_KEY_PATH": lambda raw: raw.strip() or _KEEP,
     "ISTOTA_PUSH_SIGNING_KEY_PATH": lambda raw: raw.strip() or _KEEP,
+    "ISTOTA_PUSH_RELAY_URL": lambda raw: raw.strip() or _KEEP,
     "ISTOTA_WEB_TOKEN_STORAGE": _token_storage_from_env,
     "ISTOTA_WEB_AUTH": lambda raw: normalize_auth_methods(raw, kind="warning") or _KEEP,
 }
@@ -6476,6 +6559,7 @@ def load_config(
 
     # After the overrides, so a key path the environment supplies counts.
     _validate_push_content(config.push)
+    _validate_push_delivery(config.push)
 
     # Provider keys are keyed by provider id, so they don't fit the flat table
     # above; the legacy native sources are folded in here too.

@@ -1807,3 +1807,13 @@ timezone = "America/Los_Angeles"
 # overrides the path.
 # content = "legacy"
 # signing_key_path = "/data/config/push/signing.pem"
+#
+# Delivery: "direct" (the default) sends to APNs with the key above. "relay"
+# sends each device's pushes through the push relay with that device's send
+# capability, and needs no APNs key here; it requires content = "private" and
+# signing_key_path. relay_url is the relay's https:// base URL and may carry a
+# path; endpoints are appended to it. ISTOTA_PUSH_RELAY_URL overrides it.
+# `istota doctor --only push.relay` checks the URL and asks the relay's /healthz.
+# delivery = "direct"
+# relay_url = "https://relay.example.com/istota"
+# relay_timeout_seconds = 15

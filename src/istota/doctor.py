@@ -11146,6 +11146,8 @@ def check_push_credentials(config: "Config", probe: bool) -> CheckResult:
         push = config.push
         if not push.enabled:
             return CheckResult(name, SKIP, "Push notifications are disabled")
+        if push.delivery == "relay":
+            return CheckResult(name, SKIP, "Relay delivery uses no APNs key on this installation; see push.relay")
         if not all((push.apns_key_path, push.apns_key_id, push.apns_team_id, push.apns_topic)):
             return CheckResult(name, FAIL, "APNs configuration is incomplete", "Set the key path, key id, team id and topic in [push].")
         if importlib.util.find_spec("h2") is None:
@@ -11199,6 +11201,69 @@ def check_push_signing_key(config: "Config", probe: bool) -> CheckResult:
     return CheckResult(name, OK, f"Push signing key parses and matches its public key (key ID {envelope.key_id(raw)})")
 
 
+def check_push_relay(config: "Config", probe: bool) -> CheckResult:
+    """Relay delivery: the relay URL's shape, and under ``probe`` its ``/healthz``.
+
+    The URL is the operator's own configured value, so it is shown, and the
+    probe is a plain ``httpx.get`` with redirects off, as ``sharing.ocm``'s is.
+    A relay that is down is an outage (WARN); one that answers the path with a
+    redirect or a 4xx is a wrong URL (FAIL). Never the relay's body or the
+    exception's text.
+    """
+    from istota.config import normalize_relay_url
+
+    name = "push.relay"
+    push = config.push
+    if not push.enabled:
+        return CheckResult(name, SKIP, "Push notifications are disabled")
+    if push.delivery != "relay":
+        return CheckResult(name, SKIP, "Push is delivered directly to APNs ([push] delivery is direct)")
+    url_remedy = ("Set [push] relay_url (or ISTOTA_PUSH_RELAY_URL) to the relay's https:// base URL, "
+                  "for example https://relay.example.com/istota.")
+    try:
+        normalized = normalize_relay_url(push.relay_url)
+    except ValueError as exc:
+        return CheckResult(name, FAIL, f"The relay URL is not usable: {exc}", url_remedy)
+    if normalized != push.relay_url:
+        return CheckResult(name, FAIL, "The relay URL is not in its normalized form", url_remedy)
+
+    notes = []
+    if any(value.strip() for value in (push.apns_key_path, push.apns_key_id, push.apns_team_id)):
+        notes.append("APNs settings are set and ignored under relay delivery")
+
+    if probe:
+        import httpx
+
+        try:
+            response = httpx.get(f"{normalized}/healthz", timeout=push.relay_timeout_seconds,
+                                 follow_redirects=False)
+        except httpx.HTTPError as exc:
+            return CheckResult(
+                name, WARN, f"The relay at {normalized} did not answer ({type(exc).__name__})",
+                "Check that the relay is running and that this host can reach it.",
+            )
+        status = response.status_code
+        if status >= 500:
+            return CheckResult(
+                name, WARN, f"The relay at {normalized} answered /healthz with HTTP {status}",
+                "The relay is unavailable; pushes are lost until it answers. Check the relay's status.",
+            )
+        if status != 200:
+            return CheckResult(
+                name, FAIL, f"The relay at {normalized} answered /healthz with HTTP {status}", url_remedy,
+            )
+        reached = f"Relay at {normalized} answers /healthz"
+    else:
+        reached = f"Relay delivery to {normalized} (not probed)"
+
+    if notes:
+        return CheckResult(
+            name, WARN, f"{reached}; " + "; ".join(notes),
+            "Remove apns_key_path, apns_key_id and apns_team_id from [push]; relay delivery does not read them.",
+        )
+    return CheckResult(name, OK, reached)
+
+
 # The name is part of the registry rather than only of the result, so `only=`
 # can select *before* invoking. Filtering afterwards would mean running every
 # check to discard most of them — which is exactly what the config-load path
@@ -11206,6 +11271,7 @@ def check_push_signing_key(config: "Config", probe: bool) -> CheckResult:
 CHECKS: tuple[tuple[str, Check], ...] = (
     ("push.credentials", check_push_credentials),
     ("push.signing_key", check_push_signing_key),
+    ("push.relay", check_push_relay),
     ("runtime.platform", check_platform),
     ("runtime.bwrap", check_bwrap),
     ("runtime.model_cli", check_model_cli),
@@ -11323,6 +11389,7 @@ line for the same reason.
 CHECK_SCOPES: dict[str, str] = {
     "push.credentials": DEPLOYMENT,
     "push.signing_key": DEPLOYMENT,
+    "push.relay": DEPLOYMENT,
     "runtime.platform": IMAGE,
     "runtime.bwrap": IMAGE,
     "runtime.model_cli": IMAGE,

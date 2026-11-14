@@ -117,8 +117,9 @@ These skip when the developer skill has no forge token configured.
 | `email.sender_flags` | Whether suspected-injection flags can be recorded against a sender on this deployment |
 | `mail.connect_verified` | The TLS context every IMAP and SMTP connection uses verifies the server. *image* |
 | `mail.account_isolation` | One user's task is kept away from another user's mail account passwords |
-| `push.credentials` | The APNs signing key's metadata, without opening the key or sending |
+| `push.credentials` | The APNs signing key's metadata, without opening the key or sending. Skipped under relay delivery |
 | `push.signing_key` | With `[push] content = "private"`: the private push signing key is a regular file, mode 0600, owned by the service user, parses as Ed25519, and matches its `.pub` file. Reports the key ID. Skipped when push is disabled or content is legacy |
+| `push.relay` | With `[push] delivery = "relay"`: the relay URL is a normalized `https://` base URL, and the relay answers `GET <relay_url>/healthz` with 200. An unreachable relay or a 5xx is a warning, a redirect or a 4xx a failure. Warns when APNs settings are set, since relay delivery ignores them. Skipped when push is disabled or delivery is direct |
 
 ## Web
 
