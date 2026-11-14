@@ -291,14 +291,18 @@ def test_a_private_credentials_directory_passes(tmp_path):
     assert doctor.check_push_relay(caps_config(directory), False).status == doctor.OK
 
 
-def test_the_default_directory_is_beside_the_signing_key(tmp_path):
-    key_dir = tmp_path / "push"
-    (key_dir / "relay").mkdir(parents=True, mode=0o755)
-    (key_dir / "relay").chmod(0o755)
-    config = relay_config(signing_key_path=str(key_dir / "signing.pem"))
+def test_the_default_directory_is_under_the_database_directory(tmp_path):
+    state = tmp_path / "state"
+    default = state / "push" / "relay"
+    default.mkdir(parents=True)
+    default.chmod(0o755)
+    config = relay_config(signing_key_path=str(tmp_path / "config" / "push" / "signing.pem"))
+    config.db_path = state / "istota.db"
     result = doctor.check_push_relay(config, False)
     assert result.status == doctor.FAIL
-    assert str(key_dir / "relay") in result.detail
+    assert str(default) in result.detail
+    default.chmod(0o700)
+    assert doctor.check_push_relay(config, False).status == doctor.OK
 
 
 @pytest.mark.parametrize("mode", [0o750, 0o705, 0o755])

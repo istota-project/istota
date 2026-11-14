@@ -14431,7 +14431,7 @@ def _push_device_register(
     with db.get_db(_config.db_path) as conn:
         device_id = devices.register_device(
             conn, username, **body, auth_method=auth["method"], auth_epoch=auth["epoch"],
-            auth_session_id=session_id, credentials_dir=devices.relay_credentials_dir(_config.push), **private,
+            auth_session_id=session_id, credentials_dir=devices.relay_credentials_dir(_config), **private,
         )
         if device_id is None:
             return None

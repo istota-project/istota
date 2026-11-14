@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from istota.config import PushConfig
+    from istota.config import Config
     from istota.push.apns import ApnsResult
 
 from istota.db import iso_utc_now
@@ -26,13 +26,17 @@ logger = logging.getLogger(__name__)
 _CREDENTIAL_REF = re.compile(r"[0-9]+\.cap")
 
 
-def relay_credentials_dir(push: "PushConfig") -> Path | None:
-    """`push_credentials_dir`, else `relay/` beside the signing key, else None."""
-    if push.push_credentials_dir.strip():
-        return Path(push.push_credentials_dir)
-    if push.signing_key_path.strip():
-        return Path(push.signing_key_path).parent / "relay"
-    return None
+def relay_credentials_dir(config: "Config") -> Path:
+    """`[push] push_credentials_dir`, else `push/relay` beside the framework database.
+
+    Not beside the signing key: the stack mounts the config directory read-only
+    for every running service, and the web process writes these files at
+    registration. The database's directory is writable by web and daemon alike
+    and already masked from every sandbox.
+    """
+    if config.push.push_credentials_dir.strip():
+        return Path(config.push.push_credentials_dir)
+    return Path(config.db_path).parent / "push" / "relay"
 
 
 def write_relay_capability(directory: Path | None, device_id: int, capability: str) -> str:

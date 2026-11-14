@@ -26,10 +26,17 @@ RELAY = {"route_id": ROUTE_ID, "send_capability": CAPABILITY, "lease_expires_at"
 @pytest.fixture
 def relay_push(private_push):  # noqa: F811
     import istota.webui.app as mod
+    from istota.push import envelope
 
+    # The signing key in a config directory of its own, as on the stack, so a
+    # file written beside it rather than beside the database is told apart.
+    key_path = mod._config.db_path.parent / "config" / "push" / "signing.key"
+    raw = envelope.write_signing_key(key_path).public_key().public_bytes_raw()
+    mod._config.push.signing_key_path = str(key_path)
     mod._config.push.delivery = "relay"
     mod._config.push.relay_url = RELAY_URL
-    return {**private_push, "dir": private_push["path"].parent / "relay"}
+    return {"path": key_path, "raw": raw, "kid": _kid(raw),
+            "dir": mod._config.db_path.parent / "push" / "relay"}
 
 
 def _relay_body(kid, **relay_patch):
@@ -64,6 +71,7 @@ async def test_relay_registration_stores_the_route_and_a_private_capability_file
     assert _relay_columns() == (ROUTE_ID, ref, LEASE, "active")
     cap = relay_push["dir"] / ref
     assert cap.read_text("ascii") == CAPABILITY
+    assert not (relay_push["path"].parent / "relay").exists()
     assert _mode(cap) == 0o600
     assert _mode(relay_push["dir"]) == 0o700
     listed = (await client.get(URL, cookies=cookies)).json()["devices"]
@@ -137,7 +145,7 @@ async def test_a_route_under_direct_delivery_is_400(client, private_push):  # no
     response = await client.post(URL, cookies=cookies, headers=ORIGIN, json=_relay_body(private_push["kid"]))
     assert response.status_code == 400
     assert _device_count() == 0
-    assert not (private_push["path"].parent / "relay").exists()
+    assert not (_db_path().parent / "push" / "relay").exists()
 
 
 async def test_generic_is_not_offered_under_relay(client, relay_push):  # noqa: F811
@@ -201,13 +209,22 @@ async def test_largest_relay_registration_fits_the_body_bound(client, relay_push
 # --- The credentials directory ---------------------------------------------------
 
 
-def test_credentials_dir_defaults_beside_the_signing_key():
+def test_credentials_dir_defaults_under_the_state_root_not_the_config_dir():
+    # The stack mounts /data/config read-only for every running service, and the
+    # web process writes the capability at registration, so the default is
+    # beside the framework database, which the sandbox already masks.
+    from istota.config import Config
     from istota.push import devices
 
-    push = PushConfig(signing_key_path="/data/config/push/signing.key")
-    assert devices.relay_credentials_dir(push) == Path("/data/config/push/relay")
-    push.push_credentials_dir = "/srv/caps"
-    assert devices.relay_credentials_dir(push) == Path("/srv/caps")
+    config = Config(db_path=Path("/data/istota.db"),
+                    push=PushConfig(signing_key_path="/data/config/push/signing.key"))
+    directory = devices.relay_credentials_dir(config)
+    assert directory == Path("/data/push/relay")
+    assert directory.is_relative_to(config.db_path.parent)
+    assert not directory.is_relative_to(Path(config.push.signing_key_path).parent)
+    assert not directory.is_relative_to(Path("/data/config"))
+    config.push.push_credentials_dir = "/srv/caps"
+    assert devices.relay_credentials_dir(config) == Path("/srv/caps")
 
 
 def test_push_credentials_dir_loads_from_toml(tmp_path):
@@ -235,10 +252,10 @@ def test_snapshot_and_config_view_never_carry_the_capability(install, tmp_path, 
             conn, "alice", "ab" * 32, "sandbox", private_version=1, private_content="encrypted",
             encryption_public_key=_b64(DEVICE_KEY), encryption_key_id=_kid(DEVICE_KEY),
             sender_key_id=_kid(DEVICE_KEY), push_generation=GENERATION,
-            relay=RELAY, credentials_dir=devices.relay_credentials_dir(config.push),
+            relay=RELAY, credentials_dir=devices.relay_credentials_dir(config),
         )
     assert device_id is not None
-    assert (tmp_path / "push" / "relay" / f"{device_id}.cap").read_text("ascii") == CAPABILITY
+    assert (config.db_path.parent / "push" / "relay" / f"{device_id}.cap").read_text("ascii") == CAPABILITY
     code, stdout, stderr = invoke(monkeypatch, capsys, path, "snapshot")
     assert code == 0, stderr
     assert CAPABILITY not in stdout and CAPABILITY not in stderr

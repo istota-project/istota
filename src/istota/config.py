@@ -2651,7 +2651,7 @@ class PushConfig:
     relay_url: str = ""
     relay_timeout_seconds: int = 15
     # Where each relay device's send capability is written (`<device id>.cap`);
-    # empty means `relay/` beside signing_key_path.
+    # empty means `push/relay` beside the framework database.
     push_credentials_dir: str = ""
 
 

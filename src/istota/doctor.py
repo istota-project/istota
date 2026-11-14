@@ -11227,7 +11227,7 @@ def check_push_relay(config: "Config", probe: bool) -> CheckResult:
     if normalized != push.relay_url:
         return CheckResult(name, FAIL, "The relay URL is not in its normalized form", url_remedy)
 
-    directory_problem = _relay_credentials_dir_problem(push)
+    directory_problem = _relay_credentials_dir_problem(config)
     if directory_problem is not None and directory_problem.status == FAIL:
         return directory_problem
 
@@ -11271,7 +11271,7 @@ def check_push_relay(config: "Config", probe: bool) -> CheckResult:
     return CheckResult(name, OK, reached)
 
 
-def _relay_credentials_dir_problem(push) -> CheckResult | None:
+def _relay_credentials_dir_problem(config: "Config") -> CheckResult | None:
     """What is wrong with the directory holding relay send capabilities, if anything.
 
     Looser modes than 0700 on the directory or 0600 on a `.cap` file FAIL, since
@@ -11282,12 +11282,9 @@ def _relay_credentials_dir_problem(push) -> CheckResult | None:
     from istota.push.devices import relay_credentials_dir
 
     name = "push.relay"
-    directory = relay_credentials_dir(push)
+    directory = relay_credentials_dir(config)
     dir_remedy = ("Set [push] push_credentials_dir to a directory the web process can write, "
                   "outside the workspace, or create it with mode 0700.")
-    if directory is None:
-        return CheckResult(name, FAIL, "No push credentials directory: set signing_key_path or push_credentials_dir",
-                           dir_remedy)
     try:
         info = os.lstat(directory)
     except FileNotFoundError:
