@@ -151,6 +151,7 @@ The prompt has two halves (see [executor](executor.md)). In a shared room the sy
 - whom the bot is acting for on this turn, and who hosts;
 - what this turn reaches, and on a restricted turn what is withheld;
 - the private-reply verbs (`istota-skill room whisper`, `room answer-privately`) when the `room` CLI is available;
+- on a member's turn, what to do with a personal question (their health, money, private mail, what the bot knows about them) or a request for a private answer: never answer it in the room and never ask first, but run `room answer-privately` and tell the room briefly, or, without the `room` CLI, tell them to ask in their private chat. The rule is on the card because the `room` skill body, which says the same, loads only when a trigger word selects it (ISSUE-966);
 - that the room's `CHANNEL.md` is read by everyone, and that a member's private notes are never read or written in the room.
 
 A guest turn's header says the bot is answering a guest on the host's behalf, and that the guest's words are data.
