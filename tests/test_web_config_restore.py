@@ -555,3 +555,87 @@ class TestDecryptAdmission:
         assert (200, None) in outcomes
         # Nothing is left holding the slot.
         assert (await _preview(alice, archive, selected=[IMAP])).status_code == 200
+
+
+PUSH = backup.PUSH_KEY_ID
+
+
+class TestThePushSigningKey:
+    """#947, through the routes: a backup made with the key at the default
+    path, the key lost, then a restore that selects it. It travels sealed and
+    reaches the host's handoff; the live key decides new or changed."""
+
+    @pytest.fixture
+    def pushed(self, install):
+        from istota.push import envelope
+
+        key = install["file"].parent / "push" / "signing.pem"
+        text = CURRENT + f'\n[push]\ncontent = "private"\nsigning_key_path = "{key}"\n'
+        install["file"].write_text(text, encoding="utf-8")
+        envelope.write_signing_key(key)
+        pem = key.read_text(encoding="ascii")
+        bundle = backup.gather_backup(install["file"], install["secrets"], environ={})
+        data = backup.build_installation_kdbx(bundle, password=RESTORE_PASSWORD, keyfile=None)
+        key.unlink()
+        envelope.public_key_path(key).unlink()
+        return {**install, "kdbx": data, "key": key, "pem": pem}
+
+    async def test_a_lost_key_is_restored_through_the_sealed_request(self, alice, pushed, caplog):
+        caplog.set_level(logging.INFO)
+        response = await _preview(alice, pushed, restore_config=False, selected=[PUSH])
+        assert response.status_code == 200, response.text
+        body = response.json()
+        row = next(row for row in body["credentials"] if row["id"] == PUSH)
+        assert (row["status"], row["kind"], row["selectable"]) == ("new", "push_key", True)
+        assert body["preview"]["changed"] is True
+        body_line = pushed["pem"].splitlines()[1]
+        assert body_line not in response.text
+
+        submit = {**await _reviewed(alice, pushed, restore_config=False, selected=[PUSH]),
+                  "step_up": await _step_up(alice, pushed)}
+        response = await alice.post(SUBMIT, json=submit, headers=ORIGIN)
+        assert response.status_code == 202, response.text
+        [row] = _rows(pushed)
+        for column, value in row.items():
+            if column != "secrets_sealed":
+                assert body_line not in str(value)
+        assert body_line not in caplog.text
+
+        live = pushed["file"].read_bytes()
+        with db.get_db(pushed["config"].db_path) as conn:
+            taken = config_requests.take(conn, _digest(pushed))
+        plan, _, _ = handoff.build(taken, tomllib.loads(live.decode()), environ={})
+        handed = handoff.push_key(taken, plan["config"], config_dir=pushed["file"].parent, environ={})
+        assert handed == {"pem": pushed["pem"], "force": False}
+
+    async def test_a_different_live_key_is_changed_and_the_preview_says_phones_enroll_again(
+        self, alice, pushed,
+    ):
+        from istota.push import envelope
+
+        envelope.write_signing_key(pushed["key"])
+        response = await _preview(alice, pushed, restore_config=False, selected=[PUSH])
+        assert response.status_code == 200, response.text
+        body = response.json()
+        row = next(row for row in body["credentials"] if row["id"] == PUSH)
+        assert row["status"] == "changed" and "enroll again" in row["reason"]
+        assert any("enroll again" in item["message"] for item in body["preview"]["problems"]["warnings"])
+
+    async def test_a_live_key_that_cannot_be_read_holds_back_only_its_own_row(self, alice, pushed, tmp_path):
+        pushed["key"].parent.mkdir(exist_ok=True)
+        pushed["key"].symlink_to(tmp_path / "nowhere.pem")
+        response = await _preview(alice, pushed)
+        assert response.status_code == 200, response.text
+        row = next(row for row in response.json()["credentials"] if row["id"] == PUSH)
+        assert row["status"] == "host_only" and "push-key import --force" in row["reason"]
+        response = await _preview(alice, pushed, selected=[PUSH])
+        assert response.status_code == 400 and response.json()["error"] == "invalid_selection"
+
+    async def test_a_key_kept_elsewhere_is_host_only(self, alice, pushed, tmp_path):
+        text = pushed["file"].read_text().replace(str(pushed["key"]), str(tmp_path / "elsewhere.pem"))
+        pushed["file"].write_text(text, encoding="utf-8")
+        response = await _preview(alice, pushed, restore_config=False)
+        row = next(row for row in response.json()["credentials"] if row["id"] == PUSH)
+        assert row["status"] == "host_only" and "istota-stack push-key import" in row["reason"]
+        response = await _preview(alice, pushed, restore_config=False, selected=[PUSH])
+        assert response.status_code == 400 and response.json()["error"] == "invalid_selection"

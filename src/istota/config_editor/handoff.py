@@ -15,6 +15,12 @@ binds at `/out`, which is on the host's `/run` tmpfs:
 - `claude-code`: `1` or `0`, whether the new config needs Claude Code in the
   image (`needs_claude_code`).
 
+A request restoring the push signing key (#947) adds two more: `push-key.pem`,
+the private key the host pipes into `istota push import-key`, and
+`push-key-force`, `1` when that replaces the live key the preview saw.
+`push_key` decides them, and refuses a key whose path is not the default or
+whose live key changed since the preview.
+
 `finish` stores the host's output with every line holding one of those
 credential values removed, a second pass behind the redaction the writers do
 at source.
@@ -33,6 +39,8 @@ from istota.config_editor import secrets
 PLAN_FILE = "plan.json"
 FILES_FILE = "files.json"
 CLAUDE_CODE_FILE = "claude-code"
+PUSH_KEY_FILE = "push-key.pem"
+PUSH_KEY_FORCE_FILE = "push-key-force"
 
 #: The most of the host's output a request row keeps, from the end.
 MAX_OUTPUT_CHARS = 64 * 1024
@@ -133,7 +141,7 @@ def build(
     `environ` defaults to the process's own, which `take` runs with the secret
     files loaded, so it says what each one holds now.
     """
-    from istota.config_editor.edits import UNREADABLE_CONFIG, _unset_everywhere
+    from istota.config_editor.edits import PUSH_KEY_SECRET, UNREADABLE_CONFIG, _unset_everywhere
     from istota.setup_wizard import SECRET_NAMES
 
     if current is None:
@@ -142,8 +150,9 @@ def build(
         document = tomllib.loads(taken.document_toml)
     except tomllib.TOMLDecodeError as exc:
         raise HandoffError(f"the stored document does not parse: {exc}") from None
-    file_secrets = {name: value for name, value in taken.secrets.items() if name in SECRET_NAMES}
-    inline = {name: value for name, value in taken.secrets.items() if name not in SECRET_NAMES}
+    values = {name: value for name, value in taken.secrets.items() if name != PUSH_KEY_SECRET}
+    file_secrets = {name: value for name, value in values.items() if name in SECRET_NAMES}
+    inline = {name: value for name, value in values.items() if name not in SECRET_NAMES}
     try:
         document = secrets.restore_sentinels(document, current, values=inline)
     except secrets.SentinelError as exc:
@@ -176,6 +185,56 @@ def build(
     return plan, files, needs_claude_code(document)
 
 
+def push_key(
+    taken: Any, document: dict, *, config_dir: Path, environ: Mapping[str, str] | None = None,
+) -> dict | None:
+    """The restored push signing key for the host, `{pem, force}`, or None.
+
+    None when the request restores no key, or the key at the default path is
+    already the restored one. `document` is the plan's new `config.toml`, the
+    one `istota push import-key` will load. Refuses a key whose effective path
+    there is not the default under `config_dir`, and a live key that is not
+    the one the preview saw (`replaces`, None for no key), so a key written on
+    the host since is never replaced unseen.
+    """
+    from istota.config_editor import backup
+    from istota.config_editor.edits import PUSH_KEY_SECRET
+
+    raw = taken.secrets.get(PUSH_KEY_SECRET)
+    if raw is None:
+        return None
+    environ = os.environ if environ is None else environ
+    try:
+        record = json.loads(raw)
+        pem, replaces = record["value"], record["replaces"]
+    except (ValueError, TypeError, KeyError):
+        raise HandoffError("the request's push signing key cannot be read") from None
+    if not backup._valid_push_key(pem):
+        raise HandoffError("the request's push signing key is not an Ed25519 key")
+    refusal = backup.push_key_refusal(document, environ, config_dir)
+    if refusal is not None:
+        raise HandoffError(refusal)
+    from istota.push import envelope
+
+    path = backup.default_push_key_path(config_dir)
+    try:
+        live = backup.current_push_key(path)
+    except backup.BackupError as exc:
+        raise HandoffError(str(exc)) from None
+    if live == pem:
+        return None
+    live_id = backup.push_key_id(live) if live is not None else None
+    if live_id != replaces:
+        raise HandoffError(
+            "the push signing key on the host changed since the restore was previewed; preview it again"
+        )
+    # A `.pub` left with no private key holds nothing that can sign, so it is
+    # replaced too; without --force import-key would refuse it after the
+    # config was written.
+    stray_pub = os.path.lexists(envelope.public_key_path(path))
+    return {"pem": pem, "force": live is not None or stray_pub}
+
+
 def _write_private(path: Path, text: str) -> None:
     path.unlink(missing_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
@@ -184,13 +243,17 @@ def _write_private(path: Path, text: str) -> None:
         stream.write(text)
 
 
-def write(out_dir: Path, plan: dict, files: dict, claude_code: bool) -> None:
-    """The three files, each 0400, in `out_dir`."""
+def write(out_dir: Path, plan: dict, files: dict, claude_code: bool, push: dict | None = None) -> None:
+    """The three files, each 0400, in `out_dir`, and the two push key files
+    when `push` (`push_key`'s answer) names a key."""
     if not out_dir.is_dir():
         raise HandoffError(f"{out_dir} is not a directory")
     _write_private(out_dir / PLAN_FILE, json.dumps(plan, indent=2, sort_keys=True) + "\n")
     _write_private(out_dir / FILES_FILE, json.dumps(files, indent=2, sort_keys=True) + "\n")
     _write_private(out_dir / CLAUDE_CODE_FILE, "1\n" if claude_code else "0\n")
+    if push is not None:
+        _write_private(out_dir / PUSH_KEY_FILE, push["pem"])
+        _write_private(out_dir / PUSH_KEY_FORCE_FILE, "1\n" if push["force"] else "0\n")
 
 
 def _credential_values(staging: Path) -> set[str]:
@@ -211,6 +274,12 @@ def _credential_values(staging: Path) -> set[str]:
     if isinstance(document, dict):
         _, inline = secrets.extract_inline_secrets(document)
         found.update(str(value) for value in inline.values())
+    try:
+        pem = (staging / PUSH_KEY_FILE).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        pem = ""
+    # Line by line: a PEM is several lines, and any one of them is the key.
+    found.update(line for line in pem.splitlines() if not line.startswith("-----"))
     return {value for value in found if value.strip()}
 
 

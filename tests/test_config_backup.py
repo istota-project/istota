@@ -256,11 +256,12 @@ class TestReads:
         assert caught.value.code == "request_open"
 
 
-def _bundle(config_toml="", file_credentials=(), inline_credentials=()):
+def _bundle(config_toml="", file_credentials=(), inline_credentials=(), push_key=None):
     return Bundle(
         config_toml=config_toml,
         file_credentials=list(file_credentials),
         inline_credentials=list(inline_credentials),
+        push_key=push_key,
     )
 
 
@@ -577,10 +578,16 @@ class TestTheEncryptedLayout:
         assert caught.value.code == "keyfile_invalid"
 
     def test_the_finished_file_is_held_to_the_import_cap(self, install, cheap, monkeypatch):
-        from istota.credentials import kdbx_import
+        from istota.credentials import kdbx_export, kdbx_import
 
         bundle = _full_bundle(install)
-        size = len(_export(bundle, cheap))
+        first = _export(bundle, cheap)
+        size = len(first)
+        # Two exports of one bundle differ in size by a few bytes, so every
+        # later export is given the first one's bytes.
+        monkeypatch.setattr(kdbx_export, "serialize", lambda kp: first)
+        monkeypatch.setattr(kdbx_import, "VAULT_READ_CAP_BYTES", size)
+        assert _export(bundle, cheap) == first
         monkeypatch.setattr(kdbx_import, "VAULT_READ_CAP_BYTES", size - 1)
         with pytest.raises(BackupError) as caught:
             _export(bundle, cheap)
@@ -769,7 +776,7 @@ class TestTheStrictParser:
         elif change == "two_groups":
             opened["matches"] = 2
         elif change == "version":
-            manifest["properties"]["istota.version"] = "2"
+            manifest["properties"]["istota.version"] = "3"
         elif change == "digest":
             manifest["properties"]["istota.config_sha256"] = "0" * 64
         elif change == "no_manifest":
@@ -981,3 +988,226 @@ class TestRestoreDigests:
     def test_the_preview_digest_is_canonical(self):
         assert backup.preview_digest({"a": 1, "b": [1, "é"]}) == backup.preview_digest({"b": [1, "é"], "a": 1})
         assert backup.preview_digest({"a": 1}) != backup.preview_digest({"a": 2})
+
+
+# --- the private push signing key (#947) ---------------------------------------
+
+
+def _push_pair(path):
+    """A fresh key written as `istota push keygen` writes it; its PEM text."""
+    from istota.push import envelope
+
+    envelope.write_signing_key(path)
+    return path.read_text(encoding="ascii")
+
+
+def _push_config(path) -> str:
+    return f'[push]\ncontent = "private"\nsigning_key_path = "{path}"\n'
+
+
+def _not_a_key(body: str) -> str:
+    """PEM armour around a body that is no key. Built here, since gitleaks
+    reads a literal header as the start of a private key."""
+    label = "PRIVATE " + "KEY"
+    return f"-----BEGIN {label}-----\n{body}\n-----END {label}-----\n"
+
+
+def _push_row(rows):
+    [row] = [row for row in rows if row["id"] == backup.PUSH_KEY_ID]
+    return row
+
+
+def _key_id(pem: str) -> str:
+    from istota.push import envelope
+
+    return envelope.key_id(envelope.parse_signing_key(pem.encode()).public_key().public_bytes_raw())
+
+
+class TestThePushSigningKey:
+    """The private push key is in the backup as one credential, the private
+    half only. A restore writes it only to the default path under the config
+    directory, and replaces a different live key only when the admin selects
+    the `changed` row."""
+
+    def _default(self, install):
+        return install[0].parent / "push" / "signing.pem"
+
+    def test_the_key_at_signing_key_path_is_gathered_and_kept_out_of_every_summary(self, install):
+        key_path = self._default(install)
+        pem = _push_pair(key_path)
+        bundle = _gather(install, _push_config(key_path))
+        assert bundle.push_key is not None
+        assert bundle.push_key.value == pem
+        assert bundle.push_key.destination == backup.PUSH_KEY_ID
+        assert pem not in repr(bundle)
+        assert pem.splitlines()[1] not in json.dumps(bundle.summary())
+        assert bundle.summary()["push_signing_key"] is True
+
+    def test_the_environment_override_names_the_key(self, install, tmp_path):
+        other = tmp_path / "elsewhere" / "signing.pem"
+        pem = _push_pair(other)
+        bundle = _gather(install, _push_config("/nowhere/signing.pem"),
+                         environ={"ISTOTA_PUSH_SIGNING_KEY_PATH": str(other)})
+        assert bundle.push_key.value == pem
+
+    def test_no_path_is_no_entry_and_a_missing_file_is_an_omission(self, install):
+        assert _gather(install, "").push_key is None
+        bundle = _gather(install, _push_config(self._default(install)))
+        assert bundle.push_key is None
+        assert _omitted(bundle, "push_signing_key") == {"push.signing_key_path"}
+        assert bundle.summary()["push_signing_key"] is False
+
+    def test_a_symlinked_key_file_refuses_and_a_foreign_one_is_left_out(self, install, tmp_path):
+        key_path = self._default(install)
+        real = tmp_path / "real.pem"
+        _push_pair(real)
+        key_path.parent.mkdir()
+        key_path.symlink_to(real)
+        with pytest.raises(BackupError) as caught:
+            _gather(install, _push_config(key_path))
+        assert caught.value.code == "unreadable_secret"
+        key_path.unlink()
+        key_path.write_text(_not_a_key("not-a-key"))
+        bundle = _gather(install, _push_config(key_path))
+        assert bundle.push_key is None
+        [omission] = [item for item in bundle.omissions if item.category == "push_signing_key"]
+        assert "Ed25519" in omission.reason
+        assert "not-a-key" not in json.dumps(bundle.summary())
+
+    async def test_it_round_trips_through_the_encrypted_file(self, install, cheap, tmp_path):
+        key_path = self._default(install)
+        pem = _push_pair(key_path)
+        bundle = _gather(install, _push_config(key_path))
+        data = _export(bundle, cheap)
+        root = _keepass(data).root_group.subgroups[0]
+        [group] = [group for group in root.subgroups if group.name == backup.PUSH_GROUP]
+        [entry] = group.entries
+        assert entry.password == pem
+        assert entry.custom_properties["istota.kind"] == "push_key"
+        # A release before the key reads "2" as a format too new, not a broken file.
+        manifest = next(entry for entry in root.entries if entry.title == "Backup manifest")
+        assert manifest.custom_properties["istota.version"] == backup.PUSH_KEY_FORMAT_VERSION == "2"
+        opened = await _open(data, tmp_path / "db.sqlite")
+        assert opened.push_key.value == pem
+        assert opened.manifest.version == "2"
+
+    def test_a_bundle_holding_something_else_as_the_key_is_invalid(self):
+        bad = _bundle(push_key=backup.PushSigningKey(_not_a_key("x")))
+        with pytest.raises(BackupError) as caught:
+            backup.validate_bundle(bad)
+        assert caught.value.code == "invalid_backup"
+
+    def _statuses(self, install, bundle, current, *, restore_config=True, live=None, environ=None):
+        return backup.credential_statuses(
+            bundle, current, {}, restore_config=restore_config,
+            config_dir=install[0].parent, current_push_key=live, environ=environ or {},
+        )
+
+    def test_new_unchanged_and_changed_against_the_live_key(self, install, tmp_path):
+        key_path = self._default(install)
+        pem = _push_pair(key_path)
+        bundle = _gather(install, _push_config(key_path))
+        text = _push_config(key_path)
+
+        row = _push_row(self._statuses(install, bundle, text, live=None))
+        assert (row["status"], row["selectable"], row["kind"]) == ("new", True, "push_key")
+        assert _push_row(self._statuses(install, bundle, text, live=pem))["status"] == "unchanged"
+        other = _push_pair(tmp_path / "other.pem")
+        row = _push_row(self._statuses(install, bundle, text, live=other))
+        assert row["status"] == "changed" and row["selectable"]
+        assert "enroll again" in row["reason"]
+        assert pem not in json.dumps(row) and other not in json.dumps(row)
+
+    def test_a_path_other_than_the_default_is_host_only(self, install, tmp_path):
+        key_path = self._default(install)
+        _push_pair(key_path)
+        bundle = _gather(install, _push_config(key_path))
+        elsewhere = _push_config(tmp_path / "keys" / "push.pem")
+        # The configuration restored with it names the default; kept, it does not.
+        assert _push_row(self._statuses(install, bundle, elsewhere))["status"] == "new"
+        row = _push_row(self._statuses(install, bundle, elsewhere, restore_config=False))
+        assert row["status"] == "host_only" and not row["selectable"]
+        assert "istota-stack push-key import" in row["reason"]
+        # Unset in the configuration the restore leaves, there is nowhere to put it.
+        row = _push_row(self._statuses(install, bundle, "", restore_config=False))
+        assert row["status"] == "host_only"
+        assert "istota-stack push-key import" in row["reason"]
+        # The override wins over the file, as it does at load.
+        row = _push_row(self._statuses(install, bundle, _push_config(key_path), restore_config=False,
+                                       environ={"ISTOTA_PUSH_SIGNING_KEY_PATH": "/srv/other.pem"}))
+        assert row["status"] == "host_only"
+
+    def test_a_new_key_restores_with_nothing_to_replace(self, install):
+        key_path = self._default(install)
+        pem = _push_pair(key_path)
+        text = _push_config(key_path)
+        bundle = _gather(install, text)
+        change_set, warnings = backup.restore_change_set(
+            bundle, text, restore_config=True, selected=[backup.PUSH_KEY_ID], base_digest="d" * 64,
+            config_dir=install[0].parent, current_push_key=None, environ={},
+        )
+        assert change_set["push_key"] == {"value": pem, "replaces": None}
+        assert pem not in change_set["raw"]
+        assert warnings == []
+        found = _preview(text, change_set)
+        assert not found.blocked, (found.errors, found.blocking)
+        assert found.changed
+        assert edits.PUSH_KEY_SECRET in found.secret_names
+        assert json.loads(found.secrets[edits.PUSH_KEY_SECRET]) == {"value": pem, "replaces": None}
+        assert pem.splitlines()[1] not in json.dumps(found.as_json())
+
+    def test_a_changed_key_names_the_key_it_replaces_and_says_phones_enroll_again(self, install, tmp_path):
+        key_path = self._default(install)
+        pem = _push_pair(key_path)
+        text = _push_config(key_path)
+        bundle = _gather(install, text)
+        live = _push_pair(tmp_path / "live.pem")
+        change_set, warnings = backup.restore_change_set(
+            bundle, text, restore_config=False, selected=[backup.PUSH_KEY_ID], base_digest="d" * 64,
+            config_dir=install[0].parent, current_push_key=live, environ={},
+        )
+        assert change_set["push_key"] == {"value": pem, "replaces": _key_id(live)}
+        assert any("enroll again" in item["message"] for item in warnings)
+        found = _preview(text, change_set)
+        assert json.loads(found.secrets[edits.PUSH_KEY_SECRET])["replaces"] == _key_id(live)
+
+    def test_the_live_key_restores_nothing(self, install):
+        key_path = self._default(install)
+        pem = _push_pair(key_path)
+        text = _push_config(key_path)
+        bundle = _gather(install, text)
+        change_set, _ = backup.restore_change_set(
+            bundle, text, restore_config=False, selected=[backup.PUSH_KEY_ID], base_digest="d" * 64,
+            config_dir=install[0].parent, current_push_key=pem, environ={},
+        )
+        assert "push_key" not in change_set
+        assert not _preview(text, change_set).changed
+
+    def test_a_host_only_key_cannot_be_put_in_a_change_set(self, install):
+        key_path = self._default(install)
+        _push_pair(key_path)
+        bundle = _gather(install, _push_config(key_path))
+        with pytest.raises(ChangeError):
+            backup.restore_change_set(
+                bundle, "", restore_config=False, selected=[backup.PUSH_KEY_ID], base_digest="d" * 64,
+                config_dir=install[0].parent, current_push_key=None, environ={},
+            )
+
+    @pytest.mark.parametrize("push_key", [
+        "a string", {"value": "not a key", "replaces": None}, {"value": 1},
+        {"replaces": None}, {"value": "x", "replaces": "short", "extra": 1},
+    ])
+    def test_preview_refuses_a_malformed_push_key(self, push_key):
+        with pytest.raises(ChangeError):
+            _preview("", {"ops": [], "push_key": push_key})
+
+    def test_the_current_key_is_read_without_following_a_link(self, install, tmp_path):
+        key_path = self._default(install)
+        assert backup.current_push_key(key_path) is None
+        pem = _push_pair(key_path)
+        assert backup.current_push_key(key_path) == pem
+        key_path.unlink()
+        key_path.symlink_to(tmp_path / "x")
+        with pytest.raises(BackupError) as caught:
+            backup.current_push_key(key_path)
+        assert caught.value.code == "unreadable_secret"

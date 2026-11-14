@@ -15,6 +15,13 @@ Two kinds of credential entry:
 - **inline**: any other secret leaf (`secrets.is_secret_path`) held in the
   file, restored at its path with its TOML type.
 
+One more, the private push signing key (#947), read from the effective
+`[push] signing_key_path`. Only the private half is kept; the `.pub` is
+derived when it is written. A restore hands it to the host applier, which
+writes it with `istota push import-key`, and only to the default path under
+the config directory (`push_key_refusal`): it makes no host path writable,
+so `destination_refusal` does not name it.
+
 `build_installation_kdbx` writes a bundle as the encrypted backup and
 `open_installation_backup` reads one back through the disposable decrypt
 worker (`credentials/kdbx_worker.py`), behind the installation-wide decrypt
@@ -45,6 +52,7 @@ from pathlib import Path
 from typing import Any, Collection, Mapping
 
 from istota.config_editor import secrets
+from istota.config_editor.edits import PUSH_KEY_SECRET
 from istota.lib import toml_write
 
 #: Inclusive maxima, in UTF-8 bytes.
@@ -98,6 +106,25 @@ class InlineCredential:
         return f"inline:{secrets.label(self.path)}"
 
 
+#: The push signing key's destination id, which is also its name among a
+#: request's sealed values.
+PUSH_KEY_ID = PUSH_KEY_SECRET
+PUSH_KEY_LABEL = "push.signing_key_path"
+#: The most a push key file is read to; a PEM Ed25519 key is about 120 bytes.
+PUSH_KEY_MAX_BYTES = 64 * 1024
+
+
+@dataclasses.dataclass(frozen=True)
+class PushSigningKey:
+    """The private push signing key, as unencrypted PKCS8 PEM text."""
+
+    value: str = dataclasses.field(repr=False)
+
+    @property
+    def destination(self) -> str:
+        return PUSH_KEY_ID
+
+
 @dataclasses.dataclass(frozen=True)
 class Omission:
     """A credential the backup does not hold, and why. Never a value."""
@@ -127,18 +154,26 @@ class Bundle:
     secrets_dir_available: bool = True
     #: A parsed backup's manifest; None for a gather.
     manifest: "Manifest | None" = None
+    push_key: PushSigningKey | None = None
 
     @property
-    def credentials(self) -> list[FileCredential | InlineCredential]:
-        return [*self.file_credentials, *self.inline_credentials]
+    def credentials(self) -> list["Credential"]:
+        found: list[Credential] = [*self.file_credentials, *self.inline_credentials]
+        if self.push_key is not None:
+            found.append(self.push_key)
+        return found
 
     def summary(self) -> dict:
         return {
             "file_credentials": len(self.file_credentials),
             "inline_credentials": len(self.inline_credentials),
+            "push_signing_key": self.push_key is not None,
             "omissions": [omission.as_json() for omission in self.omissions],
             "secrets_dir_available": self.secrets_dir_available,
         }
+
+
+Credential = FileCredential | InlineCredential | PushSigningKey
 
 
 # --- the destination policy -------------------------------------------------
@@ -216,16 +251,147 @@ def host_only_reason(credential: FileCredential | InlineCredential) -> str | Non
     return schema.read_only_reason(credential.path)
 
 
+# --- the push signing key -----------------------------------------------------
+
+PUSH_KEY_ENV = "ISTOTA_PUSH_SIGNING_KEY_PATH"
+_PUSH_KEY_ON_THE_HOST = (
+    "Write it on the host with `istota-stack push-key import`, the key on stdin."
+)
+REENROLL_NOTE = (
+    "Replaces the push signing key this installation has now: phones enrolled under that key "
+    "must enroll again before they show private previews. Phones enrolled under the restored "
+    "key keep working."
+)
+
+
+def push_key_path(document: Any, environ: Mapping[str, str]) -> str:
+    """The effective `[push] signing_key_path` of `document`, as `load_config`
+    reads it: `ISTOTA_PUSH_SIGNING_KEY_PATH` wins when it is not blank."""
+    override = environ.get(PUSH_KEY_ENV, "").strip()
+    if override:
+        return override
+    push = document.get("push") if isinstance(document, dict) else None
+    value = push.get("signing_key_path") if isinstance(push, dict) else None
+    return value.strip() if isinstance(value, str) else ""
+
+
+def default_push_key_path(config_dir: Path) -> Path:
+    """Where a restore may write the push key: `push/signing.pem` in the
+    config directory, the path the management role and the runbook use."""
+    return Path(config_dir) / "push" / "signing.pem"
+
+
+def push_key_refusal(document: Any, environ: Mapping[str, str], config_dir: Path | None) -> str | None:
+    """Why a restore may not write the push key under `document`, or None.
+
+    Only to the default path, so a backup never makes another host path
+    writable; any other is the operator's, on the host.
+    """
+    path = push_key_path(document, environ)
+    if not path:
+        return (
+            "[push] signing_key_path is not set in the configuration this restore leaves, "
+            "so the key has nowhere to go. " + _PUSH_KEY_ON_THE_HOST
+        )
+    if config_dir is None or Path(path) != default_push_key_path(config_dir):
+        return (
+            "A restore writes the push signing key only to push/signing.pem in the config "
+            "directory, and [push] signing_key_path names another file. " + _PUSH_KEY_ON_THE_HOST
+        )
+    return None
+
+
+def _push_key_pem(key) -> str:
+    from cryptography.hazmat.primitives import serialization
+
+    return key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption(),
+    ).decode("ascii")
+
+
+def push_key_id(pem: str) -> str:
+    """The key ID (`envelope.key_id`) of a PEM the bundle holds."""
+    from istota.push import envelope
+
+    key = envelope.parse_signing_key(pem.encode("ascii"))
+    return envelope.key_id(key.public_key().public_bytes_raw())
+
+
+def _read_push_key_file(path: Path) -> bytes | None:
+    """The key file's bytes, or None when there is none. A link at the leaf,
+    a non-regular file, an oversized one or a failed read refuses."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    what = "The push signing key at [push] signing_key_path"
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        reason = "is a symlink" if exc.errno == errno.ELOOP else "could not be read"
+        raise BackupError("unreadable_secret", f"{what} {reason}.") from None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise BackupError("unreadable_secret", f"{what} is not a regular file.")
+        chunks: list[bytes] = []
+        size = 0
+        while size <= PUSH_KEY_MAX_BYTES:
+            chunk = os.read(fd, PUSH_KEY_MAX_BYTES + 1 - size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+    except OSError:
+        raise BackupError("unreadable_secret", f"{what} could not be read.") from None
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    if len(data) > PUSH_KEY_MAX_BYTES:
+        raise _too_large("push signing key", PUSH_KEY_MAX_BYTES)
+    return data
+
+
+def _push_key_text(data: bytes) -> str:
+    from istota.push import envelope
+
+    try:
+        key = envelope.parse_signing_key(data)
+    except envelope.KeyFileError:
+        raise BackupError(
+            "invalid_saved_credential",
+            "The push signing key at [push] signing_key_path is not an unencrypted Ed25519 key.",
+        ) from None
+    return _push_key_pem(key)
+
+
+def current_push_key(path: Path) -> str | None:
+    """The key at `path` now, as a gather reads it, or None when there is none."""
+    data = _read_push_key_file(Path(path))
+    return None if data is None else _push_key_text(data)
+
+
+def _valid_push_key(value: Any) -> bool:
+    from istota.push import envelope
+
+    if not isinstance(value, str):
+        return False
+    try:
+        return _push_key_pem(envelope.parse_signing_key(value.encode("ascii"))) == value
+    except (envelope.KeyFileError, UnicodeEncodeError):
+        return False
+
+
 # --- limits -------------------------------------------------------------------
 
 
-def _value_bytes(credential: FileCredential | InlineCredential) -> int:
-    if isinstance(credential, FileCredential):
+def _value_bytes(credential: Credential) -> int:
+    if isinstance(credential, (FileCredential, PushSigningKey)):
         return len(credential.value.encode("utf-8"))
     return len(json.dumps(credential.value, ensure_ascii=False, allow_nan=False).encode("utf-8"))
 
 
-def _record(credential: FileCredential | InlineCredential) -> dict:
+def _record(credential: Credential) -> dict:
+    if isinstance(credential, PushSigningKey):
+        return {"destination": credential.destination, "kind": "push_key", "value": credential.value}
     if isinstance(credential, FileCredential):
         return {
             "destination": credential.destination, "kind": "file",
@@ -238,7 +404,7 @@ def _record(credential: FileCredential | InlineCredential) -> dict:
     }
 
 
-def canonical_credentials(credentials: Collection[FileCredential | InlineCredential]) -> bytes:
+def canonical_credentials(credentials: Collection[Credential]) -> bytes:
     """Every destination/value record as the one JSON encoding the aggregate
     limit is measured on: sorted by destination, compact, UTF-8."""
     records = sorted((_record(item) for item in credentials), key=lambda record: record["destination"])
@@ -261,7 +427,9 @@ def validate_bundle(bundle: Bundle) -> None:
         raise _too_large("configuration", CONFIG_MAX_BYTES)
     seen: set[str] = set()
     for credential in bundle.credentials:
-        if isinstance(credential, FileCredential):
+        if isinstance(credential, PushSigningKey):
+            refusal = None if _valid_push_key(credential.value) else "not an Ed25519 key"
+        elif isinstance(credential, FileCredential):
             refusal = destination_refusal("file", credential.target)
             if refusal is None and (credential.source not in _SOURCES or not isinstance(credential.value, str)):
                 refusal = "not a valid credential record"
@@ -344,13 +512,21 @@ def _gathered_names() -> list[str]:
     return [name for name in SECRET_NAMES if destination_refusal("file", name) is None]
 
 
-def _read_state(config_path: Path, secrets_dir: Path) -> tuple[bytes, dict[str, bytes | None], bool]:
+def _read_state(
+    config_path: Path, secrets_dir: Path, environ: Mapping[str, str],
+) -> tuple[bytes, dict[str, bytes | None], bool, bytes | None]:
     try:
         config_bytes = Path(config_path).read_bytes()
     except OSError:
         raise BackupError("config_unreadable", "config.toml could not be read.") from None
     files = {name: _read_secret_file(secrets_dir, name) for name in _gathered_names()}
-    return config_bytes, files, Path(secrets_dir).is_dir()
+    try:
+        document = tomllib.loads(config_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+        document = {}  # `_build` refuses it
+    key_path = push_key_path(document, environ)
+    push_key = _read_push_key_file(Path(key_path)) if key_path else None
+    return config_bytes, files, Path(secrets_dir).is_dir(), push_key
 
 
 def _file_value(data: bytes | None, name: str) -> str:
@@ -399,7 +575,7 @@ def _inline_credentials(document: dict) -> list[InlineCredential]:
 
 def _build(
     config_bytes: bytes, files: dict[str, bytes | None], dir_available: bool,
-    environ: Mapping[str, str],
+    push_key_data: bytes | None, environ: Mapping[str, str],
 ) -> Bundle:
     from istota.config import SECRET_ENV_OVERRIDES
     from istota.config_editor import edits, schema
@@ -462,6 +638,19 @@ def _build(
                 "environment", secrets.label(path), "supplied outside the saved configuration",
             ))
 
+    # A file that is no Ed25519 key (a stale path under `content = "legacy"`)
+    # is left out and named; one that cannot be read refuses, as a secret file does.
+    push_key = None
+    if push_key_data is not None:
+        try:
+            push_key = PushSigningKey(_push_key_text(push_key_data))
+        except BackupError:
+            omissions.append(Omission(
+                "push_signing_key", PUSH_KEY_LABEL, "the file there is not an unencrypted Ed25519 key",
+            ))
+    elif push_key_path(document, environ):
+        omissions.append(Omission("push_signing_key", PUSH_KEY_LABEL, "no key file at that path"))
+
     try:
         config_toml = config_document_text(secrets.redact_document(document))
     except toml_write.TomlWriteError:
@@ -473,6 +662,7 @@ def _build(
         omissions=omissions,
         config_digest=hashlib.sha256(config_bytes).hexdigest(),
         secrets_dir_available=dir_available,
+        push_key=push_key,
     )
     validate_bundle(bundle)
     return bundle
@@ -521,8 +711,8 @@ def gather_backup(
             "request_open", "A configuration change is waiting to be applied; back up after it finishes.",
         )
     for _ in range(2):
-        first = _read_state(config_path, secrets_dir)
-        second = _read_state(config_path, secrets_dir)
+        first = _read_state(config_path, secrets_dir, environ)
+        second = _read_state(config_path, secrets_dir, environ)
         if first == second:
             return _build(*first, environ)
     raise BackupError("state_changed", "The configuration changed while it was being read; try again.")
@@ -586,6 +776,8 @@ def _warning(path: tuple[str, ...] | None, message: str) -> dict:
 def restore_change_set(
     bundle: Bundle, current_text: str, *, restore_config: bool, selected: Collection[str],
     base_digest: str, current_files: Mapping[str, str] | None = None,
+    config_dir: Path | None = None, current_push_key: str | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> tuple[dict, list[dict]]:
     """An editor change set restoring `bundle` onto `current_text`, and the
     non-blocking warnings a review shows.
@@ -598,10 +790,16 @@ def restore_change_set(
     inline path. A sentinel with nothing to keep is dropped and named. A file
     credential whose value equals `current_files` is left out, since
     `edits.preview` counts every supplied file credential as a change.
+
+    A selected push signing key goes in as `push_key`, `{value, replaces}`,
+    `replaces` the key ID of `current_push_key` (the live key at the default
+    path) or None. It is left out when it is the live key, and refused where
+    `push_key_refusal` says it cannot be written.
     """
     from istota.config_editor import edits, schema
     from istota.config_editor.edits import UNREADABLE_CONFIG, ChangeError
 
+    environ = os.environ if environ is None else environ
     try:
         current = tomllib.loads(current_text)
     except tomllib.TOMLDecodeError:
@@ -612,11 +810,16 @@ def restore_change_set(
         if destination not in by_destination:
             raise ChangeError("the selection names a credential that is not in the backup")
         chosen.append(by_destination[destination])
+    push = next((item for item in chosen if isinstance(item, PushSigningKey)), None)
     validate_bundle(Bundle(config_toml=bundle.config_toml, file_credentials=[
         item for item in chosen if isinstance(item, FileCredential)
-    ], inline_credentials=[item for item in chosen if isinstance(item, InlineCredential)]))
+    ], inline_credentials=[item for item in chosen if isinstance(item, InlineCredential)], push_key=push))
 
     backup_document = _backup_document(bundle)
+    if push is not None and push_key_refusal(
+        backup_document if restore_config else current, environ, config_dir,
+    ) is not None:
+        raise ChangeError("the selection names a push signing key this restore cannot write")
     if restore_config:
         document = backup_document
     else:
@@ -660,7 +863,13 @@ def restore_change_set(
         raw = toml_write.dumps(document)
     except toml_write.TomlWriteError as exc:
         raise ChangeError(f"the restored document cannot be written: {exc}") from None
-    return {"base_digest": base_digest, "ops": [], "raw": raw, "secrets": file_secrets}, warnings
+    change_set = {"base_digest": base_digest, "ops": [], "raw": raw, "secrets": file_secrets}
+    if push is not None and push.value != current_push_key:
+        replaces = push_key_id(current_push_key) if current_push_key else None
+        change_set["push_key"] = {"value": push.value, "replaces": replaces}
+        if replaces is not None:
+            warnings.append(_warning(tuple(PUSH_KEY_LABEL.split(".")), REENROLL_NOTE))
+    return change_set, warnings
 
 
 # --- a restore's inputs and what it shows -------------------------------------
@@ -748,8 +957,39 @@ def _current_value(
         return None
 
 
+def _push_key_row(
+    credential: PushSigningKey, document: dict, *, config_dir: Path | None,
+    current_push_key: str | None, current_push_key_error: str | None, environ: Mapping[str, str],
+) -> dict:
+    reason = push_key_refusal(document, environ, config_dir)
+    if reason is None and current_push_key_error is not None:
+        reason = (
+            f"{current_push_key_error} Replace it on the host with "
+            "`istota-stack push-key import --force`, the key on stdin."
+        )
+    if reason is not None:
+        status = "host_only"
+    elif current_push_key is None:
+        status = "new"
+    elif current_push_key == credential.value:
+        status = "unchanged"
+    else:
+        status, reason = "changed", REENROLL_NOTE
+    return {
+        "id": credential.destination,
+        "kind": "push_key",
+        "name": f"Private push signing key ({PUSH_KEY_LABEL})",
+        "source": "file",
+        "status": status,
+        "reason": reason,
+        "selectable": status in ("new", "changed"),
+    }
+
+
 def credential_statuses(
     bundle: Bundle, current_text: str, current_files: Mapping[str, str], *, restore_config: bool,
+    config_dir: Path | None = None, current_push_key: str | None = None,
+    current_push_key_error: str | None = None, environ: Mapping[str, str] | None = None,
 ) -> list[dict]:
     """Each credential the backup holds, as a restore preview shows it: its
     destination id, name, kind, source and status (`new`, `changed`,
@@ -760,9 +1000,15 @@ def credential_statuses(
     the same index is `host_only` for a credentials-only restore, which would
     write it into whichever element is there now, and `new` when the backup's
     document is restored with it, since the current value at that index is
-    another element's."""
+    another element's.
+
+    The push signing key is compared with `current_push_key`, the key at the
+    default path now, and is `host_only` wherever `push_key_refusal` says the
+    configuration the restore leaves puts it elsewhere, or where that key
+    could not be read (`current_push_key_error`, a fixed message)."""
     from istota.config_editor.edits import UNREADABLE_CONFIG, ChangeError
 
+    environ = os.environ if environ is None else environ
     try:
         current = tomllib.loads(current_text)
     except tomllib.TOMLDecodeError:
@@ -770,6 +1016,13 @@ def credential_statuses(
     backup_document = _backup_document(bundle)
     rows = []
     for credential in sorted(bundle.credentials, key=lambda item: item.destination):
+        if isinstance(credential, PushSigningKey):
+            rows.append(_push_key_row(
+                credential, backup_document if restore_config else current, config_dir=config_dir,
+                current_push_key=current_push_key, current_push_key_error=current_push_key_error,
+                environ=environ,
+            ))
+            continue
         reason = host_only_reason(credential)
         moved = _element_moved(credential, backup_document, current)
         if reason is not None:
@@ -833,11 +1086,17 @@ def preview_digest(public: Any) -> str:
 # person reading the file in KeePassXC.
 
 FORMAT_VERSION = "1"
+#: A backup holding the push signing key, which a release before #947 cannot
+#: read: it then says the format is too new rather than that the file is not
+#: a backup. Without a key the file stays version 1.
+PUSH_KEY_FORMAT_VERSION = "2"
+_READABLE_VERSIONS = (FORMAT_VERSION, PUSH_KEY_FORMAT_VERSION)
 MANIFEST_TITLE = "Backup manifest"
 CONFIGURATION_TITLE = "Configuration"
 CONFIG_ATTACHMENT = "config.toml"
 DEPLOYMENT_GROUP = "Deployment credentials"
 INLINE_GROUP = "Inline credentials"
+PUSH_GROUP = "Push signing key"
 RECOVERY_SCOPE = "configuration-and-installation-credentials"
 #: What a rebuild needs beyond this file. Prerequisites, not something the
 #: exporter checked.
@@ -938,7 +1197,7 @@ def build_installation_kdbx(
     manifest = kp.add_entry(root, MANIFEST_TITLE, "", "")
     properties = {
         INSTALLATION_FORMAT_PROPERTY: INSTALLATION_FORMAT,
-        _P + "version": FORMAT_VERSION,
+        _P + "version": PUSH_KEY_FORMAT_VERSION if bundle.push_key is not None else FORMAT_VERSION,
         _ENTRY_ROLE: "manifest",
         _P + "created": created or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         _P + "app_version": __version__,
@@ -971,6 +1230,12 @@ def build_installation_kdbx(
             entry.set_custom_property(
                 _VALUE, json.dumps(credential.value, ensure_ascii=False, allow_nan=False), protect=True,
             )
+    if bundle.push_key is not None:
+        # The PEM in the password field, so a person can copy it out of
+        # KeePassXC for `istota-stack push-key import`.
+        group = kp.add_group(root, PUSH_GROUP)
+        entry = kp.add_entry(group, f"Private push signing key ({PUSH_KEY_LABEL})", "", bundle.push_key.value)
+        entry.set_custom_property(_KIND, "push_key")
     data = kdbx_export.serialize(kp)
     if len(data) > VAULT_READ_CAP_BYTES:
         raise _too_large("encrypted file", VAULT_READ_CAP_BYTES)
@@ -1025,7 +1290,8 @@ def _manifest(entry: dict) -> tuple[Manifest, list[Omission], bool]:
     properties = entry["properties"]
     if properties.get(INSTALLATION_FORMAT_PROPERTY) != INSTALLATION_FORMAT:
         raise _invalid()
-    if properties.get(_P + "version") != FORMAT_VERSION:
+    version = properties.get(_P + "version")
+    if version not in _READABLE_VERSIONS:
         raise _invalid("The backup's format version is not one this version of Istota can restore.")
     try:
         omissions_raw = _strict_json(properties.get(_P + "omissions", "[]"))
@@ -1049,7 +1315,7 @@ def _manifest(entry: dict) -> tuple[Manifest, list[Omission], bool]:
     if not (isinstance(digest, str) and len(digest) == 64):
         raise _invalid()
     manifest = Manifest(
-        version=FORMAT_VERSION,
+        version=version,
         created=properties.get(_P + "created", ""),
         app_version=properties.get(_P + "app_version", ""),
         config_sha256=digest,
@@ -1118,6 +1384,16 @@ def _inline_credential(entry: dict) -> InlineCredential:
     return InlineCredential(path=tuple(path), value=value)
 
 
+def _push_key_entry(entry: dict) -> PushSigningKey:
+    if entry["properties"].get(_KIND) != "push_key":
+        raise _invalid()
+    value = _str_field(entry, "password")
+    try:
+        return PushSigningKey(_push_key_text(value.encode("utf-8")))
+    except BackupError:
+        raise _invalid("The backup's push signing key is not an unencrypted Ed25519 key.") from None
+
+
 def parse_installation_backup(opened: dict) -> Bundle:
     """The strict reading of the decrypt worker's answer, as a bundle.
 
@@ -1154,10 +1430,11 @@ def parse_installation_backup(opened: dict) -> Bundle:
 
     file_credentials: list[FileCredential] = []
     inline_credentials: list[InlineCredential] = []
+    push_keys: list[PushSigningKey] = []
     seen_groups: set[str] = set()
     for subgroup in _groups_of(group):
         name = subgroup.get("name")
-        if name not in (DEPLOYMENT_GROUP, INLINE_GROUP) or name in seen_groups:
+        if name not in (DEPLOYMENT_GROUP, INLINE_GROUP, PUSH_GROUP) or name in seen_groups:
             raise _invalid("The backup holds a group it does not restore.")
         seen_groups.add(name)
         if _groups_of(subgroup):
@@ -1166,8 +1443,12 @@ def parse_installation_backup(opened: dict) -> Bundle:
             _no_attachments(entry)
             if name == DEPLOYMENT_GROUP:
                 file_credentials.append(_file_credential(entry))
-            else:
+            elif name == INLINE_GROUP:
                 inline_credentials.append(_inline_credential(entry))
+            else:
+                push_keys.append(_push_key_entry(entry))
+    if len(push_keys) > 1:
+        raise _invalid("The backup holds more than one push signing key.")
 
     bundle = Bundle(
         config_toml=config_toml,
@@ -1176,6 +1457,7 @@ def parse_installation_backup(opened: dict) -> Bundle:
         omissions=omissions,
         secrets_dir_available=dir_available,
         manifest=manifest,
+        push_key=push_keys[0] if push_keys else None,
     )
     validate_bundle(bundle)
     return bundle

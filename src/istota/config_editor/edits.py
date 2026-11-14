@@ -21,6 +21,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import difflib
+import json
 import os
 import re
 import tomllib
@@ -573,6 +574,30 @@ def _read_moves(raw: Any) -> dict[str, str]:
     return moves
 
 
+#: A restored push signing key's name among a request's sealed values, and in
+#: `secret_names`. Never a config path or a secret file's name.
+PUSH_KEY_SECRET = "push:signing_key"
+_KEY_ID = re.compile(r"[A-Za-z0-9_-]{43}")
+
+
+def _read_push_key(raw: Any) -> dict | None:
+    """`push_key`: `{value, replaces}`, which only a restore builds
+    (`backup.restore_change_set`). `value` is the PEM, `replaces` the key ID
+    of the live key the preview saw, or None when it saw none."""
+    from istota.config_editor import backup
+
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) != {"value", "replaces"}:
+        raise ChangeError("push_key is not a push signing key")
+    replaces = raw["replaces"]
+    if replaces is not None and not (isinstance(replaces, str) and _KEY_ID.fullmatch(replaces)):
+        raise ChangeError("push_key names the key it replaces by something that is not a key ID")
+    if not backup._valid_push_key(raw["value"]):
+        raise ChangeError("push_key is not an unencrypted Ed25519 key")
+    return {"value": raw["value"], "replaces": replaces}
+
+
 def _read_admins(raw: Any) -> list[str] | None:
     if raw is None:
         return None
@@ -678,7 +703,7 @@ def loggable_secret_name(name: str) -> str:
     """
     from istota.setup_wizard import SECRET_NAMES
 
-    if name in SECRET_NAMES:
+    if name in SECRET_NAMES or name == PUSH_KEY_SECRET:
         return name
     path = secrets.parse_label(name)
     return f"{section_of(path) if path else '(unknown)'} (inline)"
@@ -724,6 +749,8 @@ class Preview:
     admins_changed: bool = False
     running_tasks: int = 0
     moves: list[dict] = field(default_factory=list)
+    #: A restored push signing key, `{value, replaces}`; sealed with the rest.
+    push_key: dict | None = field(default=None, repr=False)
 
     @property
     def blocking(self) -> list[dict]:
@@ -739,8 +766,12 @@ class Preview:
 
     @property
     def secrets(self) -> dict[str, str]:
-        """Every new credential value, by file name or inline label, for sealing."""
-        return {**self.file_secrets, **self.inline_secrets}
+        """Every new credential value, by file name or inline label, for
+        sealing; a push key as JSON under `PUSH_KEY_SECRET`."""
+        found = {**self.file_secrets, **self.inline_secrets}
+        if self.push_key is not None:
+            found[PUSH_KEY_SECRET] = json.dumps(self.push_key, sort_keys=True)
+        return found
 
     @property
     def document_toml(self) -> str:
@@ -808,6 +839,7 @@ async def preview(
     except secrets.SentinelError as exc:
         raise ChangeError(str(exc)) from None
     file_secrets, inline_given = _read_secrets(change_set.get("secrets"))
+    push_key = _read_push_key(change_set.get("push_key"))
     for name, value in inline_given.items():
         path = secrets.parse_label(name)
         if value == "":
@@ -885,12 +917,16 @@ async def preview(
         diff=diff,
         problems=problems,
         errors=errors,
-        changed=bool(changed or file_secrets or admins_changed),
+        changed=bool(changed or file_secrets or admins_changed or push_key),
         changed_sections=sorted({section_of(path) for path in changed}),
         changed_keys=len(changed),
         risky_keys=sorted(risky),
-        secret_names=sorted(set(file_secrets) | set(inline_new) | set(removed) | set(moves.values())),
+        secret_names=sorted(
+            set(file_secrets) | set(inline_new) | set(removed) | set(moves.values())
+            | ({PUSH_KEY_SECRET} if push_key else set())
+        ),
         admins_changed=admins_changed,
         running_tasks=running_tasks(getattr(config, "db_path", None)),
         moves=[{"label": label, "file": name} for label, name in moves.items()],
+        push_key=push_key,
     )

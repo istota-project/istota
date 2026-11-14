@@ -1040,12 +1040,14 @@ export type ConfigRestoreStatus = 'new' | 'changed' | 'unchanged' | 'host_only';
 export interface ConfigRestoreCredential {
   /** The destination, which `selected` names. */
   id: string;
-  kind: 'file' | 'inline';
+  /** `push_key` is the private push signing key, written by the host applier. */
+  kind: 'file' | 'inline' | 'push_key';
   name: string;
   /** Where the backed-up value was saved: a secret file or config.toml. */
   source: 'file' | 'inline';
   status: ConfigRestoreStatus;
-  /** Why a `host_only` credential is not restored from here. */
+  /** Why a `host_only` credential is not restored from here, or what a
+   *  `changed` push key's replacement costs. */
   reason: string | null;
   selectable: boolean;
 }

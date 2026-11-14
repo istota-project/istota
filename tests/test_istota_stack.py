@@ -4135,7 +4135,10 @@ CONFIG_APPLY_ARMS = r"""  *" config-request take "*)
       exit 0
     fi
     ls -ld "$out" > "${STUB_CALLS}.staging-$next"
-    for f in plan.json files.json claude-code; do cp "$STUB_REQUESTS/$next/$f" "$out/$f"; chmod 0400 "$out/$f"; done
+    for f in plan.json files.json claude-code push-key.pem push-key-force; do
+      [ -e "$STUB_REQUESTS/$next/$f" ] || continue
+      cp "$STUB_REQUESTS/$next/$f" "$out/$f"; chmod 0400 "$out/$f"
+    done
     rm -rf "${STUB_REQUESTS:?}/$next"
     echo "$next"
     exit 0 ;;
@@ -4184,11 +4187,15 @@ class TestConfigApply:
         fx.queue, fx.rundir, fx.secrets = queue, run, secrets
         return fx
 
-    def _queue(self, fx, request_id: int, *, secrets=None, admins=None, claude_code=False):
+    def _queue(self, fx, request_id: int, *, secrets=None, admins=None, claude_code=False,
+               push_key=None, force=False):
         import json
 
         d = fx.queue / str(request_id)
         d.mkdir()
+        if push_key is not None:
+            (d / "push-key.pem").write_text(push_key)
+            (d / "push-key-force").write_text("1\n" if force else "0\n")
         brain = {"kind": "claude_code" if claude_code else "native"}
         (d / "plan.json").write_text(json.dumps(
             {"meta": {"managed": False, "source": "web", "request": request_id},
@@ -4236,6 +4243,60 @@ class TestConfigApply:
         assert "wrote istota_email_imap_password" in output
         assert "pw-7" not in output
         assert list(fx.rundir.iterdir()) == []
+
+    PUSH_KEY = "-----BEGIN PRIVATE KEY-----\nstub-restored-push-key\n-----END PRIVATE KEY-----\n"
+
+    @pytest.mark.parametrize("force, command", [(False, "import-key"), (True, "import-key --force")])
+    def test_a_restored_push_key_is_imported_after_the_config_on_stdin(self, ca, force, command):
+        """#947: the key goes through `istota push import-key` in a one-shot with
+        the config directory open, after the config it is written under, and
+        reaches it on stdin alone."""
+        fx = ca
+        self._queue(fx, 21, push_key=self.PUSH_KEY, force=force)
+        result = fx.run("config-apply")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        apply = self._index(calls, "istota apply -f /plan/plan.json --backup 10")
+        push = next(i for i, call in enumerate(calls) if call.endswith(f"istota push {command}"))
+        finish = self._index(calls, "config-request finish --id 21 --status applied")
+        restart = next(i for i, call in enumerate(calls) if call.endswith(" restart"))
+        assert apply < push < finish < restart, calls
+        assert "--entrypoint istota-drop" in calls[push]
+        assert "push read-only=false" in calls
+        assert Path(f"{fx.calls}.stdin").read_text() == self.PUSH_KEY
+        assert not any("stub-restored-push-key" in call for call in calls)
+        assert "stub-restored-push-key" not in result.stdout + result.stderr
+        assert f"$ istota push {command}" in (fx.root / "docker-calls.output-21").read_text()
+
+    def test_a_failed_import_fails_the_request_and_restarts_for_the_config(self, ca):
+        fx = ca
+        self._queue(fx, 22, push_key=self.PUSH_KEY)
+        result = fx.run("config-apply", STUB_APPLY_RC="2", STUB_PUSH_RC="1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert any("config-request finish --id 22 --status failed" in call for call in calls), calls
+        assert any(call.endswith(" restart") for call in calls), calls
+        output = (fx.root / "docker-calls.output-22").read_text()
+        assert "the push signing key was not" in output
+
+    def test_no_key_is_imported_when_the_config_apply_fails(self, ca):
+        fx = ca
+        self._queue(fx, 23, push_key=self.PUSH_KEY)
+        result = fx.run("config-apply", STUB_APPLY_RC="1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert not any(" istota push " in f"{call} " for call in calls), calls
+        assert any("config-request finish --id 23 --status failed" in call for call in calls), calls
+
+    def test_a_push_key_with_no_force_file_is_refused(self, ca):
+        fx = ca
+        self._queue(fx, 24, push_key=self.PUSH_KEY)
+        (fx.queue / "24" / "push-key-force").unlink()
+        result = fx.run("config-apply", STUB_DRY_RC="2", STUB_APPLY_RC="2")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert any("config-request finish --id 24 --status refused" in call for call in calls), calls
+        assert not any("--backup" in call for call in calls), calls
 
     def test_an_unchanged_config_records_unchanged_and_does_not_restart(self, ca):
         fx = ca

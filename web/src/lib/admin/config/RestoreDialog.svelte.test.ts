@@ -228,6 +228,30 @@ describe('an encrypted backup', () => {
     expect(box('Model API key')).not.toBeChecked();
   });
 
+  it('says where a push signing key goes and what replacing one costs', async () => {
+    const reenroll = 'Phones enrolled under that key must enroll again.';
+    api.previewConfigRestore.mockResolvedValue(
+      restorePreview({
+        credentials: [
+          credential({
+            id: 'push:signing_key',
+            kind: 'push_key',
+            name: 'Private push signing key',
+            status: 'changed',
+            reason: reenroll,
+          }),
+        ],
+      }),
+    );
+    mount();
+    await unlock();
+    expect(await screen.findByText('Private push signing key')).toBeInTheDocument();
+    expect(screen.getByText(/push\/signing\.pem in the config directory/)).toBeInTheDocument();
+    expect(screen.getByText(reenroll)).toBeInTheDocument();
+    expect(screen.queryByText(/Deployment credential/)).toBeNull();
+    expect(box('Private push signing key')).toBeEnabled();
+  });
+
   it('previews the chosen selection again, names what it replaces, and submits it', async () => {
     api.previewConfigRestore.mockResolvedValue(restorePreview({ credentials }));
     api.submitConfigRestore.mockResolvedValue({ id: 32 });

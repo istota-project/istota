@@ -87,9 +87,10 @@ class Change:
     value: int
 
 
-def _step_up(vm: lima.Vm, web: WebSession, *, method: str = "password") -> dict:
+def _step_up(vm: lima.Vm, web: WebSession, *, method: str = "password",
+             action: str = "admin_config_change") -> dict:
     """A redeemable step-up proof: the password, or a mailed code read back from the row's digest."""
-    payload = {"action": "admin_config_change"}
+    payload = {"action": action}
     if method == "email":
         _db_write(vm, "DELETE FROM web_auth_attempts WHERE kind = 'step_up_mail'")
         payload["method"] = "email"
@@ -335,6 +336,103 @@ class TestTheModelListingKeyFromTheWeb:
             assert (entry["source"], entry["set"]) == ("file", True), entry
         finally:
             vm.run(f"printf '%s' '{{\"secrets\": {{\"{LISTING_KEY}\": \"\"}}}}' | istota-stack put-files || true")
+
+
+PUSH_DIR = f"{lima.STACK}/config/push"
+PUSH_KEY = f"{PUSH_DIR}/signing.pem"
+PUSH_SAVED = f"{lima.SCRATCH}/config-editor-push-saved"
+CONFIG_FILE = f"{lima.STACK}/config/config.toml"
+
+
+class TestARestoredPushKey:
+    """#947: the installation backup carries the private push signing key, and a
+    restore that selects it has the host applier write it back through
+    `istota push import-key` in a config-open one-shot. The key is replaced
+    on the host after the backup, so the row is `changed`, and the case reads
+    the restored pair off the host: the backed-up key, 10001's, 0600, its
+    `.pub` derived from it."""
+
+    @pytest.fixture
+    def pushed(self, editor):
+        vm = editor.vm
+        if lima.control():
+            pytest.skip("a negative control is applied")
+        _settle_open_requests(editor.web)
+        vm.run(f"""
+rm -rf {PUSH_SAVED}
+install -d -m 0700 {PUSH_SAVED}
+cp -p {CONFIG_FILE} {PUSH_SAVED}/config.toml
+if [ -e {PUSH_DIR} ]; then cp -a {PUSH_DIR} {PUSH_SAVED}/push; fi
+python3 - {CONFIG_FILE} <<'PY'
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+text = re.sub(r"^signing_key_path\\s*=.*\\n", "", text, flags=re.M)
+line = 'signing_key_path = "/data/config/push/signing.pem"'
+if re.search(r"^\\[push\\]$", text, flags=re.M):
+    text = re.sub(r"^\\[push\\]$", "[push]\\n" + line, text, count=1, flags=re.M)
+else:
+    text += "\\n[push]\\n" + line + "\\n"
+open(path, "w").write(text)
+PY
+istota-stack push-key create --force < /dev/null
+""")
+        try:
+            yield vm
+        finally:
+            vm.run(f"""
+rm -rf {PUSH_DIR}
+if [ -e {PUSH_SAVED}/push ]; then cp -a {PUSH_SAVED}/push {PUSH_DIR}; fi
+cp -p {PUSH_SAVED}/config.toml {CONFIG_FILE}
+rm -rf {PUSH_SAVED}
+""")
+
+    def _public(self, vm: lima.Vm) -> str:
+        return vm.out(f"openssl pkey -in {PUSH_KEY} -pubout")
+
+    def test_the_backed_up_key_is_written_back_by_the_host(self, editor, pushed):
+        vm, web = pushed, editor.web
+        backed_up = self._public(vm)
+
+        response = web.post(f"{CONFIG}/backup", json={
+            "step_up": _step_up(vm, web, action="admin_config_backup")})
+        if response.status_code == 429:
+            pytest.skip("the admin's daily export limit is spent on this VM")
+        assert response.status_code == 200, response.text[:2000]
+        exported = response.json()
+        assert exported["summary"]["push_signing_key"] is True, exported["summary"]
+
+        vm.run("istota-stack push-key create --force < /dev/null")
+        assert self._public(vm) != backed_up
+
+        view = web.answer(CONFIG, timeout=RESTART_SECONDS)
+        upload = {
+            "format": "kdbx", "file": exported["file"], "password": exported["password"],
+            "base_digest": view["document_digest"], "restore_config": False,
+            "selected": ["push:signing_key"],
+        }
+        preview = web.post(f"{CONFIG}/restore/preview", json=upload)
+        assert preview.status_code == 200, preview.text[:3000]
+        reviewed = preview.json()
+        [row] = [row for row in reviewed["credentials"] if row["id"] == "push:signing_key"]
+        assert row["status"] == "changed" and "enroll again" in row["reason"], row
+        assert "PRIVATE KEY" not in preview.text
+
+        response = web.post(f"{CONFIG}/restore/requests", json={
+            **upload, "input_digest": reviewed["input_digest"],
+            "preview_digest": reviewed["preview_digest"],
+            "confirm": reviewed["preview"]["risky_keys"], "step_up": _step_up(vm, web),
+        })
+        assert response.status_code == 202, response.text[:3000]
+        row = _wait_status(web, response.json()["id"], lambda s: s in TERMINAL, timeout=APPLY_SECONDS)
+        assert row["status"] == "applied", row
+        assert "PRIVATE KEY" not in json.dumps(row)
+        assert "istota push import-key --force" in row["output_text"], row["output_text"]
+
+        assert self._public(vm) == backed_up
+        assert vm.out(f"stat -c '%u %a' {PUSH_KEY}") == "10001 600"
+        assert vm.out(f"stat -c '%u %a' {PUSH_KEY}.pub") == "10001 644"
+        _wait_restarted(web, row["finished_at"])
 
 
 class TestTwoRequestsInQuickSuccession:
