@@ -23,7 +23,9 @@ Controls (`scripts/test-vm-negative-control.sh`):
   `apparmor=unconfined` and the daemon service is recreated;
 - `apparmor-unnarrowed`: the loaded `istota` profile loses its three mount
   denies (no bind or move out of /proc or /sys, no sysfs), as before Stage 9b;
-- `secret-owned-by-root`: one secret file on the VM is chowned to root.
+- `secret-owned-by-root`: one secret file on the VM is chowned to root;
+- `rclone-rc-outside-nextcloud`: the daemon is recreated with the mount's rc
+  bound in (#939's overlay) while host.env says STORAGE=local.
 """
 
 from __future__ import annotations
@@ -74,6 +76,24 @@ def stack(local_stack, release):
         finally:
             vm.run(f"git -C {lima.STACK}/src checkout -- docker/docker-compose.yml"
                    " && istota-stack compose up -d daemon", timeout=600)
+            lima.wait_healthy(vm)
+        return
+    if name == "rclone-rc-outside-nextcloud":
+        # The rc overlay compose() adds only under STORAGE=nextcloud, forced
+        # onto the local mode's daemon; a VM never in that mode lacks the paths.
+        rc_dir, rc_env = f"{lima.STACK}/rclone-rc", f"{lima.STACK}/rclone-rc.env"
+        made = vm.out(f"m=''; test -e {rc_dir} || {{ install -d -m 0700 {rc_dir}; m=\"$m {rc_dir}\"; }}; "
+                      f"test -e {rc_env} || {{ install -m 0600 /dev/null {rc_env}; m=\"$m {rc_env}\"; }}; "
+                      "echo $m")
+        vm.run(f"ISTOTA_RCLONE_RC_DIR={rc_dir} ISTOTA_RCLONE_RC_ENV={rc_env} istota-stack compose"
+               f" -f {lima.STACK}/src/docker/docker-compose.rclone-rc.yml up -d daemon", timeout=600)
+        lima.wait_healthy(vm)
+        try:
+            yield vm
+        finally:
+            vm.run("istota-stack compose up -d daemon", timeout=600)
+            if made:
+                vm.run(f"rm -rf {made}")
             lima.wait_healthy(vm)
         return
     if name == "apparmor-unnarrowed":
@@ -130,13 +150,23 @@ class TestTheDaemonCannotSeeTheMachine:
         assert sorted(mounts) == [lima.REPO_MOUNT], f"row 7: Mac paths mounted in the VM: {mounts}"
         assert "ro" in mounts[lima.REPO_MOUNT].split(","), mounts
 
+    def test_the_local_mode_is_on_local_storage(self, stack):
+        # A setup re-run once kept the nextcloud mode's storage here, which put
+        # the mount's rc in the bind check below (#951).
+        storage = lima.env_value(stack, f"{lima.STACK}/host.env", "STORAGE")
+        assert storage == "local", f"the local mode runs with STORAGE={storage!r}"
+
     def test_the_istota_container_binds_only_the_stacks_own_paths(self, stack):
         cid = lima.container(stack, "daemon")
         mounts = json.loads(stack.out(f"docker inspect -f '{{{{json .Mounts}}}}' {cid}"))
         binds = sorted(m["Source"] for m in mounts if m["Type"] == "bind")
-        allowed = (f"{lima.STACK}/config", f"{lima.STACK}/data", lima.MOUNT, f"{lima.STACK}/secrets/")
-        strays = [b for b in binds if not (b in allowed[:3] or b.startswith(allowed[3]))]
-        assert strays == [], f"row 7: the daemon container binds {strays}"
+        allowed = [f"{lima.STACK}/config", f"{lima.STACK}/data", lima.MOUNT]
+        storage = lima.env_value(stack, f"{lima.STACK}/host.env", "STORAGE")
+        if storage == "nextcloud":
+            # The mount's rc, for the tree watcher (#939), only beside the mount.
+            allowed += [f"{lima.STACK}/rclone-rc", f"{lima.STACK}/rclone-rc.env"]
+        strays = [b for b in binds if not (b in allowed or b.startswith(f"{lima.STACK}/secrets/"))]
+        assert strays == [], f"row 7: the daemon container binds {strays} (STORAGE={storage!r})"
         assert f"{lima.STACK}/config" in binds, binds
         assert f"{lima.STACK}/data" in binds, "the state is the host directory, not a volume"
 

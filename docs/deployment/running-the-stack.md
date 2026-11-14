@@ -414,7 +414,7 @@ On a Mac the stack runs in a Lima VM that the Mac's own `istota-stack` creates a
 |---|---|---|
 | `STORAGE` | `host-folder` | the workspace is the Mac folder at `/srv/mount/host-folder`; `provision.sh` makes `istota-stack.service` require that mount, and never creates, chmods or chowns the folder |
 | `INGRESS` | `local` | nginx on the VM's loopback, which Lima forwards to the Mac's `localhost:<port>` |
-| `HOST_LOOPBACK_BLOCK`, `HOST_GATEWAY_ADDR`, `HOST_LOOPBACK_ALLOW` | `1`, `192.168.5.2`, empty | containers cannot reach the Mac's loopback except DNS and the ports listed ([Security](security.md#the-local-vm)) |
+| `HOST_LOOPBACK_BLOCK`, `HOST_GATEWAY_ADDR`, `HOST_LOOPBACK_ALLOW` | `1`, `192.168.5.2`, empty | containers cannot reach the Mac's loopback except DNS and the ports listed, and a devbox or the browser not even those ([Security](security.md#the-local-vm)) |
 | `LOCAL_FORWARD_PORT` | the Mac's `--port`, `8080` by default | the port Lima forwards; setup refuses a `local` hostname on another port, defaults to `localhost:<port>`, and publishes nginx and the setup page on it |
 
 Every command on this page works from the Mac: `istota-stack <verb>` there runs the VM's `istota-stack <verb>` as root, and `istota` runs the CLI in the daemon container. `setup` writes `LOCAL_FORWARD_PORT` first when it differs, and `setup --web` adds `--local` and opens the page. `apply` and `import-bare-metal` take a path on the Mac. Paths such as `/srv/app/istota/config/config.toml` are in the VM; `istota-stack shell` opens a shell there.

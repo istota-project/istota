@@ -16,7 +16,8 @@
 #
 # Controls, grouped by the stack mode they run in:
 #
-#   local:     mac-home-mounted (row 7), secret-owned-by-root (row 12),
+#   local:     mac-home-mounted, rclone-rc-outside-nextcloud (row 7),
+#              secret-owned-by-root (row 12),
 #              apparmor-unconfined, apparmor-unnarrowed (row 20), no-egress-unit (row 10),
 #              every-cred-volume-everywhere (row 11), exec-socket-symlink (row 11),
 #              browser-on-default-network, no-browser-firewall (row 17),
@@ -29,7 +30,8 @@
 #   any:       no-host-bounds (row 15)
 #   nextcloud: no-storage-refusal (row 9), localize-without-config and
 #              localize-stops-mount-at-once (istota-stack localize-workspace)
-#   host-folder: no-workspace-marker (row L1), host-loopback-unblocked (row L2),
+#   host-folder: no-workspace-marker (row L1), host-loopback-unblocked,
+#              no-browser-firewall-on-host-folder (row L2),
 #              default-mounts-in-template (row L3), mac-shim-without-drop (row L4)
 #   proxied:   no-allow-list, no-docker-user-rule (row 18),
 #              role-user-settings-unchecked (the management role's --check)
@@ -85,6 +87,9 @@ C="$VM/test_confinement.py"
 control mac-home-mounted \
     "row 7: a Mac directory mounted into the VM" \
     "$C::TestTheDaemonCannotSeeTheMachine::test_the_vm_mounts_no_mac_path_but_the_read_only_checkout"
+control rclone-rc-outside-nextcloud \
+    "row 7: the mount's rc bound into the daemon under STORAGE=local" \
+    "$C::TestTheDaemonCannotSeeTheMachine::test_the_istota_container_binds_only_the_stacks_own_paths"
 control secret-owned-by-root \
     "row 12: a secret file on the VM owned by root" \
     "$C::TestTheSecretFilesAreTheDaemons::test_every_secret_file_is_0400_and_owned_by_10001_inside_the_container"
@@ -186,8 +191,10 @@ control no-workspace-marker \
 H="$VM/test_host_folder.py::TestTheMacLoopbackIsClosedToContainers"
 control host-loopback-unblocked \
     "row L2: HOST_LOOPBACK_BLOCK=0, the egress unit re-run" \
-    "$H::test_the_daemon_reaches_the_allowed_port_only" \
-    "$H::test_the_browser_reaches_the_allowed_port_only"
+    "$H::test_the_daemon_reaches_the_allowed_port_only"
+control no-browser-firewall-on-host-folder \
+    "row L2: the browser's own DOCKER-USER rules removed, so the allow list opens the model port to it" \
+    "$H::test_the_browser_reaches_neither_port"
 M="$VM/test_host_folder.py::TestOnlyTheFolderCrossesFromTheMac"
 control default-mounts-in-template \
     "row L3: the template with template:_default/mounts in its base, so the Mac home is mounted" \

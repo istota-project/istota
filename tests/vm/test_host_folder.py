@@ -20,7 +20,10 @@ egress unit's HOST_LOOPBACK_BLOCK rules drop container traffic to it but for
 DNS (Lima serves it at the gateway) and HOST_LOOPBACK_ALLOW, which here holds
 the scripted model's port. A listener on the Mac's loopback the allow list does
 not name is unreachable from the istota and the browser containers, and
-reachable from the VM itself, whose own traffic is not filtered.
+reachable from the VM itself, whose own traffic is not filtered. The browser
+reaches the allowed port no more than the other: its own drop of the private
+ranges (#884), which takes in the gateway, sits in front of the block's
+returns, so the allow list opens nothing to it (#952).
 
 Row L3: only the workspace folder, and in developer mode the checkout
 read-only, crosses from the Mac. The VM mounts exactly the template's two
@@ -43,6 +46,8 @@ Controls (`scripts/test-vm-negative-control.sh`):
   (`docker/test/Dockerfile.no-workspace-marker`);
 - `host-loopback-unblocked`: HOST_LOOPBACK_BLOCK=0 in host.env and the egress
   unit re-run, as on a VM set up without the block;
+- `no-browser-firewall-on-host-folder`: the browser's own DOCKER-USER rules
+  (#884) removed, which are what close the allowed port to the browser;
 - `default-mounts-in-template`: the VM gets the mounts Lima resolves from the
   template with `template:_default/mounts` added to its `base:`, which is what
   `template:debian-13` would bring in: the Mac home, read-only;
@@ -240,7 +245,15 @@ def mac_listener():
 
 @pytest.fixture(scope="module")
 def loopback(stack):
-    """The host-folder stack, with the block switched off under its control."""
+    """The host-folder stack, with the block or the browser's rules switched
+    off under their controls."""
+    if lima.control() == "no-browser-firewall-on-host-folder":
+        lima.remove_browser_rules(stack)
+        try:
+            yield stack
+        finally:
+            stack.run("systemctl restart istota-devbox-egress.service")
+        return
     if lima.control() != "host-loopback-unblocked":
         yield stack
         return
@@ -271,8 +284,18 @@ class TestTheMacLoopbackIsClosedToContainers:
     def test_the_daemon_reaches_the_allowed_port_only(self, loopback, model, mac_listener):
         _reaches_the_allowed_port_only(loopback, "daemon", "10001", model, mac_listener)
 
-    def test_the_browser_reaches_the_allowed_port_only(self, loopback, model, mac_listener):
-        _reaches_the_allowed_port_only(loopback, "browser", "", model, mac_listener)
+    def test_the_browser_reaches_neither_port(self, loopback, model, mac_listener):
+        # The browser's own drop of 192.168.0.0/16 (#884) sits in front of the
+        # block's RETURNs, so the allowed port is closed to it too (#952).
+        gateway = lima.mac_address(loopback)
+        targets = [f"{gateway}:{mac_listener}", f"{gateway}:{model.port}"]
+        from_vm = _connect(loopback, targets)
+        assert set(from_vm.values()) == {"reached"}, f"the in-session control: the VM reaches both: {from_vm}"
+        cid = lima.container(loopback, "browser")
+        assert cid, "browser is not running"
+        outcome = _connect(loopback, targets, cid=cid)
+        reached = sorted(target for target, result in outcome.items() if result == "reached")
+        assert reached == [], f"row L2: the browser container reached a Mac port: {outcome}"
 
 
 class TestTheBlockLeavesDnsAlone:

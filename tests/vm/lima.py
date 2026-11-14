@@ -616,10 +616,15 @@ def common_args(model_url: str) -> list[str]:
     ]
 
 
+#: For a mode without Nextcloud: a setup re-run keeps every answer it is not
+#: given, so after the nextcloud mode it would otherwise stay on the mount (#951).
+WITHOUT_NEXTCLOUD = ["--nextcloud-url", "", "--storage", "local"]
+
+
 def local_mode(model_url: str) -> Mode:
     return Mode(
         name="local",
-        setup_args=common_args(model_url) + [
+        setup_args=common_args(model_url) + WITHOUT_NEXTCLOUD + [
             # No signaling profile: the wizard refuses it without Talk.
             "--ingress", "local", "--hostname", "localhost:8080", "--developer",
             "--profile", "browser",
@@ -643,7 +648,7 @@ def proxied_mode(model_url: str) -> Mode:
 def direct_mode(model_url: str) -> Mode:
     return Mode(
         name="direct",
-        setup_args=common_args(model_url) + [
+        setup_args=common_args(model_url) + WITHOUT_NEXTCLOUD + [
             "--ingress", "direct", "--hostname", DOMAIN, "--tls-cert-source", "acme",
         ],
         host_env={
@@ -1107,6 +1112,16 @@ def remove_vm_reach_rules(vm: Vm) -> None:
     """The `no-vm-reach-rule` control: as on a VM whose egress unit predates #903."""
     vm.run("""
 iptables -w 5 -S INPUT | { grep -F 'istota-vm-reach:' || true; } | sed 's/^-A /-D /' | while read -r rule; do
+    eval "iptables -w 5 ${rule}"
+done
+""")
+
+
+def remove_browser_rules(vm: Vm) -> None:
+    """The browser's DOCKER-USER rules gone, as on a VM that never ran the
+    egress unit: `no-browser-firewall` (row 17) and its host-folder twin (L2)."""
+    vm.run("""
+iptables -w 5 -S DOCKER-USER | { grep -F 'istota-browser:' || true; } | sed 's/^-A /-D /' | while read -r rule; do
     eval "iptables -w 5 ${rule}"
 done
 """)
