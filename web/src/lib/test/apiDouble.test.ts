@@ -41,6 +41,14 @@ function apiSourceExports(): string[] {
   return [...names].sort();
 }
 
+/** The exported names of `api.ts` that are declared as classes there, read off the source. */
+function apiSourceClasses(): string[] {
+  const source = readFileSync(join(ROOT, 'src/lib/api.ts'), 'utf8');
+  const declared = new Set<string>();
+  for (const m of source.matchAll(/^(?:export )?class (\w+)/gm)) declared.add(m[1]);
+  return apiSourceExports().filter((name) => declared.has(name));
+}
+
 describe('the $lib/api double', () => {
   it('carries every value export of api.ts, taken from the module and not a list', async () => {
     // The oracle is the module's own source, read independently of the
@@ -62,26 +70,15 @@ describe('the $lib/api double', () => {
 
     // Asserted as a set rather than one or two names: a class the derivation
     // started stubbing would turn every `instanceof` against it false, silently.
+    // The set comes from the source, so a new error class needs no edit here
+    // (ISSUE-945: a written list missed JobSaveError).
     const passedThrough = Object.keys(actual).filter(
       (name) => typeof actual[name] === 'function' && !vi.isMockFunction(double[name]),
     );
-    expect(passedThrough.sort()).toEqual([
-      'AdminUserWriteError',
-      'AuthError',
-      'ChatMemoryBusyError',
-      'ChatMemoryConflictError',
-      'ChatMessageBusyError',
-      'ChatRoomBusyError',
-      'ConfigChangeError',
-      'CredentialWriteError',
-      'GroupApiError',
-      'QuickNoteError',
-      'SetupApiError',
-      'TextFileConflictError',
-      'TextFileInvalidError',
-      'TextFileLockedError',
-      'UploadUnreachableError',
-    ]);
+    const classes = apiSourceClasses();
+    expect(classes).toContain('AuthError');
+    expect(classes).toContain('JobSaveError');
+    expect(passedThrough.sort()).toEqual(classes);
     for (const name of passedThrough) expect(double[name]).toBe(actual[name]);
 
     const { AuthError, ChatRoomBusyError } = actual as {
