@@ -13,6 +13,7 @@ import {
   renderDocument,
   renderMarkdown,
   renderMarkdownPreview,
+  renderUntrustedDocument,
   renderUntrustedMarkdown,
 } from './index';
 import { chatFileUrl } from '$lib/api';
@@ -496,5 +497,89 @@ describe('preview list boundaries', () => {
     expect(body.querySelectorAll(':scope > ul > li')).toHaveLength(5);
     expect(body.querySelectorAll('li li')).toHaveLength(8);
     expect(result.truncated).toBe(false);
+  });
+});
+
+// ISSUE-960: GitHub's task lists, read-only. Chat and the Files viewer share
+// these renderers, so every one of them is held to the same rule.
+describe.each([
+  ['renderMarkdown', renderMarkdown],
+  ['renderDocument', renderDocument],
+  ['renderUntrustedDocument', renderUntrustedDocument],
+  ['renderUntrustedMarkdown', renderUntrustedMarkdown],
+] as const)('task lists in %s', (_name, render) => {
+  const dom = (src: string) => new DOMParser().parseFromString(render(src), 'text/html').body;
+
+  it('draws a disabled checkbox for [ ], [x] and [X], with no brackets left', () => {
+    const body = dom('- [ ] todo\n- [x] done\n- [X] also done');
+    const list = body.querySelector('ul')!;
+    expect(list.getAttribute('class')).toBe('contains-task-list');
+    const items = [...list.querySelectorAll(':scope > li')];
+    expect(items).toHaveLength(3);
+    for (const item of items) expect(item.classList.contains('task-list-item')).toBe(true);
+    const boxes = items.map((item) => item.querySelector('input')!);
+    for (const box of boxes) {
+      expect(box.getAttribute('type')).toBe('checkbox');
+      expect(box.disabled).toBe(true);
+    }
+    expect(boxes.map((box) => box.checked)).toEqual([false, true, true]);
+    expect(items.map((item) => item.textContent!.trim())).toEqual(['todo', 'done', 'also done']);
+    expect(body.textContent).not.toContain('[');
+  });
+
+  it('marks an ordered list and a loose list the same way', () => {
+    const ordered = dom('1. [x] first\n2. [ ] second');
+    expect(ordered.querySelector('ol')!.classList.contains('contains-task-list')).toBe(true);
+    expect(ordered.querySelectorAll('li.task-list-item input:checked')).toHaveLength(1);
+
+    const loose = dom('- [ ] one\n\n- [x] two');
+    expect(loose.querySelectorAll('li.task-list-item > p > input')).toHaveLength(2);
+    expect(loose.textContent).not.toContain('[');
+  });
+
+  it('takes a marker ending its line, as GFM does', () => {
+    const body = dom('- [x]\n  wrapped');
+    expect(body.querySelectorAll('li.task-list-item input:checked')).toHaveLength(1);
+    expect(body.textContent).not.toContain('[');
+    expect(body.textContent).toContain('wrapped');
+  });
+
+  it('marks only the task item, not a plain item beside it or nested under it', () => {
+    const body = dom('- [ ] parent\n  - child\n- plain');
+    const items = [...body.querySelectorAll('li')];
+    expect(items.map((item) => item.classList.contains('task-list-item'))).toEqual([
+      true,
+      false,
+      false,
+    ]);
+    expect(body.querySelectorAll('input')).toHaveLength(1);
+  });
+
+  it('leaves brackets alone where they are not a task marker', () => {
+    const cases = [
+      '- [y] not a marker',
+      '- [ ]no space after it',
+      '- a [ ] in the middle',
+      '[ ] outside a list',
+      '- `[ ]` in code',
+      '> [ ] in a quote',
+      '- \\[x] escaped',
+      '- &#91;x] an entity',
+    ];
+    for (const src of cases) {
+      const body = dom(src);
+      expect(body.querySelector('input'), src).toBeNull();
+      expect(body.querySelector('.task-list-item'), src).toBeNull();
+      expect(body.textContent, src).toContain('[');
+    }
+  });
+
+  it('keeps escaping the item text and draws no input the source wrote', () => {
+    const html = render('- [x] <input type="checkbox"> <b>x</b>');
+    expect(html).toContain('&lt;input type=&quot;checkbox&quot;&gt;');
+    expect(html).toContain('&lt;b&gt;x&lt;/b&gt;');
+    const body = new DOMParser().parseFromString(html, 'text/html').body;
+    expect(body.querySelectorAll('input')).toHaveLength(1);
+    expect(body.querySelector('b')).toBeNull();
   });
 });

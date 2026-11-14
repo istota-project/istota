@@ -41,6 +41,17 @@
 .markdown li > ol {
   margin: 0.5rem 0;
 }
+/* A task item (ISSUE-960) draws its checkbox where the bullet would be, so its
+   text lines up with a plain item's. The box is disabled: it shows the source
+   and is never a control. */
+.markdown .task-list-item {
+  list-style: none;
+}
+.markdown .task-list-item-checkbox {
+  margin: 0 var(--space-1) 0 calc(-1 * var(--space-4));
+  vertical-align: middle;
+  accent-color: var(--accent-blue);
+}
 .markdown h1,
 .markdown h2,
 .markdown h3,
