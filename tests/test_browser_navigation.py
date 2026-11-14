@@ -566,6 +566,10 @@ def test_extract_keeps_textless_controls_and_scrubs_before_truncation(monkeypatc
      {'html': '<input type="password" value="[REDACTED]">'}),
     ([], {'text': 'Photo', 'html': '', 'src': '/photo.png', 'alt': 'Photo'},
      {'src': '/photo.png', 'alt': 'Photo'}),
+    (['817'], {'text': '', 'html': '', 'tag': 'input', 'value': '48170'},
+     {'value': '48170'}),
+    (['817'], {'text': '', 'html': '', 'tag': 'input', 'value': 'cvc 817'},
+     {'value': None}),
 ])
 def test_extract_live_state_and_password_reflections(monkeypatch, passwords, entry, expected):
     page = mock.Mock()
@@ -585,7 +589,7 @@ def test_extract_live_state_and_password_reflections(monkeypatch, passwords, ent
     result = browse_api.extract()
     assert result['count'] == 1
     for key, value in expected.items():
-        assert result['elements'][0][key] == value
+        assert result['elements'][0].get(key) == value
     field.evaluate.assert_called_once_with(browse_api._EXTRACT_ELEMENT_JS)
 
 
@@ -806,30 +810,62 @@ def test_card_failure_does_not_log_value(monkeypatch, caplog):
     assert secret not in caplog.text
 
 
+@pytest.mark.parametrize("card_field, value, joins", [
+    ("number", "4242" * 4, True), ("cvc", "817", True),
+    ("exp_month", "12", False), ("exp_year", "2029", False), ("exp", "12/29", False),
+    ("name", "Alice Example", False),
+])
+def test_only_card_secrets_join_the_redaction_set(monkeypatch, card_field, value, joins):
+    # ISSUE-956: the set outlives the session, so a month of 12 hid every later "12".
+    page = mock.Mock()
+    handle = mock.Mock()
+    handle.owner_frame.return_value.url = "https://shop.example/pay"
+    handle.evaluate.return_value = {"ok": True}
+    monkeypatch.setattr(browse_api, "_locate", lambda *a: handle)
+    monkeypatch.setattr(browse_api, "_credential_values", set())
+    result = browse_api._selector_action({}, page, {
+        "type": "fill", "selector": "#f", "value": value, "credential": True,
+        "card_field": card_field, "bound_hosts": ["shop.example"],
+    })
+    assert result["ok"] is True
+    assert (value in browse_api._credential_values) is joins
+
+
+def test_the_container_and_the_skill_agree_on_the_card_secrets():
+    from istota.skills.browse import CARD_SECRET_FIELDS
+    assert browse_api.CARD_SECRET_FIELDS == CARD_SECRET_FIELDS
+
+
+def test_a_numeric_secret_is_redacted_only_as_a_whole_number():
+    text = "Order 48170 for $817.00, code 817, ref 817x"
+    assert browse_api._scrub_extracted(text, {"817"}) == (
+        "Order 48170 for $[REDACTED].00, code [REDACTED], ref [REDACTED]x")
+
+
 @pytest.mark.parametrize("endpoint", ["browse", "render_page", "interact"])
 def test_card_scrub_preserves_session_identifier(monkeypatch, endpoint):
     page = mock.Mock()
     page.url = "https://shop.example/"
-    page.title.return_value = "Expiry 07"
-    page.content.return_value = "<p>Expiry 07</p>"
+    page.title.return_value = "CVC 817"
+    page.content.return_value = "<p>CVC 817</p>"
     page.is_closed.return_value = False
-    monkeypatch.setattr(browse_api, "_credential_values", {"07", "7"})
+    monkeypatch.setattr(browse_api, "_credential_values", {"817"})
     monkeypatch.setattr(browse_api, "_cleanup_expired", lambda **kw: None)
     monkeypatch.setattr(browse_api, "_get_session", lambda _: {"page": page})
     monkeypatch.setattr(browse_api, "_session_page", lambda _: page)
     monkeypatch.setattr(browse_api.chrome, "connect_cdp", lambda _: None)
     monkeypatch.setattr(browse_api, "_foreground_tabs", lambda _: ([], []))
     monkeypatch.setattr(browse_api.browsing, "detect_captcha", lambda _: False)
-    monkeypatch.setattr(browse_api.browsing, "extract_page_content", lambda *a, **kw: {"text": "Expiry 07"})
+    monkeypatch.setattr(browse_api.browsing, "extract_page_content", lambda *a, **kw: {"text": "CVC 817"})
     monkeypatch.setattr(browse_api, "_collect_frames", lambda *a: ([], False))
     monkeypatch.setattr(browse_api.render, "to_markdown", lambda html, **kw: {"markdown": html})
     monkeypatch.setattr(browse_api, "jsonify", lambda value: value)
     monkeypatch.setattr(browse_api, "request", types.SimpleNamespace(get_json=lambda: {
-        "session_id": "abc7d07e", "actions": [],
+        "session_id": "abc817de", "actions": [],
     }))
     result = getattr(browse_api, endpoint)()
-    assert result["session_id"] == "abc7d07e"
-    assert "07" not in result.get("text", result.get("markdown", ""))
+    assert result["session_id"] == "abc817de"
+    assert "817" not in result.get("text", result.get("markdown", ""))
 
 
 @pytest.mark.parametrize("fill_metadata,error", [
