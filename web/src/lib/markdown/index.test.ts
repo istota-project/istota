@@ -583,3 +583,67 @@ describe.each([
     expect(body.querySelector('b')).toBeNull();
   });
 });
+
+// ISSUE-964: a workspace file's HTML comment is an authoring note, as in the
+// GROUP.md and USER.md starters, and a document preview hides it.
+describe.each([
+  ['renderDocument', renderDocument],
+  ['renderUntrustedDocument', renderUntrustedDocument],
+] as const)('%s hides HTML comments', (_name, render) => {
+  it('drops a multi-line comment block, as the GROUP.md starter opens', () => {
+    const html = render(
+      '<!-- Group memory for "Demo".\n     Nothing else goes in it. -->\n\n# Demo\n',
+    );
+    expect(html).toBe('<h1>Demo</h1>\n');
+  });
+
+  it('drops a comment that interrupts a paragraph and keeps the text around it', () => {
+    const html = render('before\n<!-- note -->\nafter');
+    expect(html).not.toContain('note');
+    expect(html).toContain('before');
+    expect(html).toContain('after');
+  });
+
+  it('drops an inline comment', () => {
+    const html = render('## Facts <!-- pinned -->');
+    expect(html).toContain('<h2>Facts');
+    expect(html).not.toContain('pinned');
+  });
+
+  it('shows an unterminated comment rather than hiding the rest of the file', () => {
+    const html = render('<!-- never closed\n\nstill here');
+    expect(html).toContain('&lt;!-- never closed');
+    expect(html).toContain('still here');
+  });
+
+  it('stops at a list item and shows a comment that runs past it', () => {
+    const html = render('- <!-- a\n\nb -->\nc');
+    expect(html).toContain('&lt;!-- a');
+    expect(html).toContain('b --&gt;');
+    expect(render('- item\n  <!-- hidden -->\n- next')).not.toContain('hidden');
+  });
+
+  it('stays linear on unclosed comments', () => {
+    const started = performance.now();
+    render('<!-- x\n\n'.repeat(2000));
+    render('- <!--\n'.repeat(2000));
+    render('para ' + '<!-- '.repeat(8000));
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
+  it('leaves a comment inside code alone', () => {
+    expect(render('`<!-- x -->`')).toContain('<code>&lt;!-- x --&gt;</code>');
+    expect(render('```\n<!-- x -->\n```')).toContain('&lt;!-- x --&gt;');
+  });
+
+  it('still escapes other raw HTML', () => {
+    const html = render('<div>x</div>\n\n<!-- c --><b>y</b>');
+    expect(html).toContain('&lt;div&gt;');
+    expect(html).toContain('&lt;b&gt;');
+    expect(html).not.toContain('<div>');
+  });
+});
+
+it('chat keeps a comment visible as typed', () => {
+  expect(renderMarkdown('<!-- x -->')).toContain('&lt;!-- x --&gt;');
+});

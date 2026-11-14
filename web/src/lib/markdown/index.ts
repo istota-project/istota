@@ -148,8 +148,74 @@ function sizeAttrs(src: string): string {
   return ` width="${width}" height="${height}" style="--embed-ratio:${ratio}"`;
 }
 
+const commentCloseMemo = new WeakMap<object, { from: number; at: number }>();
+
+/** The next `-->` at or after `from` in a parse state's source, or -1. Kept per
+ *  state because every unclosed `<!--` would otherwise search to the end again:
+ *  2,000 of them in 16 KB took a minute. */
+function nextCommentClose(state: { src: string }, from: number): number {
+  const memo = commentCloseMemo.get(state);
+  if (memo && from >= memo.from && (memo.at < 0 || from <= memo.at)) return memo.at;
+  const at = state.src.indexOf('-->', from);
+  commentCloseMemo.set(state, { from, at });
+  return at;
+}
+
+/**
+ * HTML comments in a document (ISSUE-964), rendered as nothing.
+ *
+ * With `html: false` a comment is escaped and printed, so the authoring note
+ * the GROUP.md and USER.md starters open with showed on every preview. These
+ * rules consume a complete `<!-- … -->` and emit no token, so no source text
+ * reaches the `{@html}` sink and every other tag is still escaped. Untrusted
+ * documents hide them too, as other markdown viewers do; the editor shows them.
+ *
+ * Wherever a rule is unsure it declines and the comment shows as text, which is
+ * the safe direction: no `-->`, text after the closing `-->`, a line outdented
+ * past a list item (as `html_block` checks), or a comment across a blank line
+ * that the block rule declined.
+ */
+function hideHtmlComments(md: MarkdownIt) {
+  md.block.ruler.before(
+    'html_block',
+    'html_comment',
+    (state, startLine, endLine, silent) => {
+      if (state.sCount[startLine] - state.blkIndent >= 4) return false;
+      const start = state.bMarks[startLine] + state.tShift[startLine];
+      if (!state.src.startsWith('<!--', start)) return false;
+      const close = nextCommentClose(state, start + 2);
+      if (close < 0) return false;
+      let line = startLine;
+      while (line < endLine && state.eMarks[line] <= close) {
+        line++;
+        if (line < endLine && state.sCount[line] < state.blkIndent && !state.isEmpty(line)) {
+          return false;
+        }
+      }
+      if (line >= endLine) return false;
+      if (state.src.slice(close + 3, state.eMarks[line]).trim()) return false;
+      if (!silent) state.line = line + 1;
+      return true;
+    },
+    { alt: ['paragraph', 'reference', 'blockquote'] },
+  );
+
+  md.inline.ruler.before('html_inline', 'html_comment', (state) => {
+    if (!state.src.startsWith('<!--', state.pos)) return false;
+    const close = nextCommentClose(state, state.pos + 2);
+    if (close < 0 || close + 3 > state.posMax) return false;
+    state.pos = close + 3;
+    return true;
+  });
+}
+
 /** Build each presentation with the same escaping, link and image rules. */
-function createRenderer(opts: { breaks: boolean; imageAffordance: boolean; untrusted?: boolean }) {
+function createRenderer(opts: {
+  breaks: boolean;
+  imageAffordance: boolean;
+  untrusted?: boolean;
+  hideComments?: boolean;
+}) {
   const md = new MarkdownIt({
     html: false, // never emit raw HTML from source — safe-by-construction
     linkify: true, // auto-link bare URLs
@@ -411,6 +477,8 @@ function createRenderer(opts: { breaks: boolean; imageAffordance: boolean; untru
       ? '<input class="task-list-item-checkbox" type="checkbox" checked disabled>'
       : '<input class="task-list-item-checkbox" type="checkbox" disabled>';
 
+  if (opts.hideComments) hideHtmlComments(md);
+
   return {
     linkify: md.linkify,
     parse: (src: string, env: Record<string, unknown>) => md.parse(src, env),
@@ -445,13 +513,18 @@ export function findLinks(text: string): { start: number; end: number; url: stri
 }
 
 /** Render a document without chat's hard line breaks or image controls. */
-export const renderDocument = createRenderer({ breaks: false, imageAffordance: false }).render;
+export const renderDocument = createRenderer({
+  breaks: false,
+  imageAffordance: false,
+  hideComments: true,
+}).render;
 
 /** A document somebody else may have written, such as a file shared in Nextcloud. */
 export const renderUntrustedDocument = createRenderer({
   breaks: false,
   imageAffordance: false,
   untrusted: true,
+  hideComments: true,
 }).render;
 
 const renderUntrusted = createRenderer({
