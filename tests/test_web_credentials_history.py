@@ -54,6 +54,21 @@ async def test_history_delete_restore_purge_and_activity(signed_client, config, 
     with db.get_db(config.db_path) as conn:
         assert "SENTINEL" not in str([tuple(r) for r in conn.execute("SELECT * FROM credential_audit")])
 
+async def test_history_and_activity_times_are_utc_instants(signed_client, config):
+    """Both tables default to naive UTC, which a browser parses as local time (#955)."""
+    body = {"name": "example", "value": "SENTINEL-7f3a-history", "username": "alice", "url": "example.com"}
+    assert (await signed_client.post(BASE, json=body, headers=ORIGIN)).status_code == 200
+    assert (await signed_client.delete(f"{BASE}/example/value", headers=ORIGIN)).status_code == 200
+    with db.get_db(config.db_path) as conn:
+        conn.execute("UPDATE secrets_history SET replaced_at='2026-11-13 19:58:34' WHERE user_id='alice'")
+        conn.execute("UPDATE credential_audit SET at='2026-11-13 19:58:35' WHERE user_id='alice'")
+    history = (await signed_client.get(f"{BASE}/example/history", headers=ORIGIN)).json()
+    assert [row["at"] for row in history] == ["2026-11-13T19:58:34Z"]
+    deleted = (await signed_client.get(f"{BASE}/deleted", headers=ORIGIN)).json()
+    assert [row["at"] for row in deleted] == ["2026-11-13T19:58:34Z"]
+    activity = (await signed_client.get(f"{BASE}/activity", headers=ORIGIN)).json()
+    assert activity and {row["at"] for row in activity} == {"2026-11-13T19:58:35Z"}
+
 async def test_reveal_on_nextcloud_needs_identity_and_step_up(signed_client, config, monkeypatch):
     with db.get_db(config.db_path) as conn:
         generated.create(conn, "alice", name="generated_example", username="alice", password="fixture", url="example.com")

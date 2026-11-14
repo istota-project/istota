@@ -177,6 +177,22 @@ async def test_removing_the_link_ends_the_feed(signed_client, fresh_feed_limits)
     assert (await signed_client.delete(FEED_LINK, headers=ORIGIN)).status_code == 404
 
 
+async def test_listing_times_are_utc_instants(signed_client, feed_server, config, fresh_feed_limits):  # noqa: F811
+    """Both tables default to naive UTC, which a browser parses as local time (#955)."""
+    url = feed_server.url(f"/cal/{MARKER}.ics")
+    assert (await signed_client.post(f"{BASE}/feeds", json={"url": url}, headers=ORIGIN)).status_code == 201
+    assert (await signed_client.post(FEED_LINK, headers=ORIGIN)).status_code == 201
+    with db.get_db(config.db_path) as conn:
+        conn.execute("UPDATE shared_sources SET created_at='2026-11-13 19:58:34' WHERE user_id='alice'")
+        conn.execute("UPDATE calendar_feed_tokens SET created_at='2026-11-13 19:58:35', "
+                     "last_used_at='2026-11-13 19:58:36' WHERE user_id='alice'")
+    listing = (await signed_client.get(BASE)).json()
+    assert listing["feeds"][0]["created_at"] == "2026-11-13T19:58:34Z"
+    assert listing["feeds"][0]["last_ok_at"].endswith("Z")
+    assert listing["calendar"]["feed"] == {"created_at": "2026-11-13T19:58:35Z",
+                                           "last_used_at": "2026-11-13T19:58:36Z"}
+
+
 async def test_the_feed_link_needs_the_origin_check(signed_client, config):  # noqa: F811
     response = await signed_client.post(FEED_LINK, headers={"Origin": "https://evil.example"})
     assert response.status_code == 403
@@ -244,6 +260,8 @@ async def test_no_ocm_section_while_ocm_is_off(signed_client, config):  # noqa: 
 async def test_the_federated_id_and_pending_offers(signed_client, config):  # noqa: F811
     config.sharing.ocm.enabled = True
     source_id = _pending_offer(config)
+    with db.get_db(config.db_path) as conn:
+        conn.execute("UPDATE shared_sources SET created_at='2026-11-13 19:58:34' WHERE id=?", (source_id,))
     response = await signed_client.get(BASE)
     assert "synthetic-ocm-secret-99" not in response.text
     assert "public.php" not in response.text
@@ -254,7 +272,7 @@ async def test_the_federated_id_and_pending_offers(signed_client, config):  # no
         "id": source_id, "name": "Taxes 2026", "owner": "carol@https://cloud.example.org",
         "owner_display_name": None, "shared_by": None, "shared_by_display_name": None,
         "host": "cloud.example.org", "reoffer": False, "signed": None,
-        "created_at": offer["created_at"],
+        "created_at": "2026-11-13T19:58:34Z",
     }
     me = await signed_client.get("/istota/api/me")
     assert me.json()["features"]["sharing_ocm"] is True

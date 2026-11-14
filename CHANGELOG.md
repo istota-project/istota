@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The configuration backup now holds the private push signing key, and a restore puts it back through the usual review when it lives at the default path in the config directory, so phones enrolled under it keep their private previews after a rebuild. Replacing a different key is a choice the review spells out. See docs/deployment/running-the-stack.md, "Recovering a lost installation". (#947)
 - **Browser sign-ins no longer fail on Chrome's "Save password?" prompt.** The browser's Chrome no longer offers to save passwords, cards or addresses, so no prompt opens over the page after a login or a checkout and takes the next click, such as the one into a two-factor code field. Takes effect when the browser image is rebuilt. (#954)
 - **Tapping a push for the inbox opens the notifications panel.** That covers a notification with no link, such as a task alert, and a tap the iPhone app 0.15.0 routes to the inbox when a private notification fails a check. These taps used to land on Chat. (#949)
+- Settings shows purchase times on the Wallet page, credential activity and history, a connected service's "Updated" line, and the calendar feed link's "made" and "last read" times in your own time zone. They were shown as if UTC were local time, so anywhere west of Greenwich a purchase looked hours later than it was. (#955)
 
 ## [0.49.0] - 2026-11-13
 

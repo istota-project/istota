@@ -2797,6 +2797,19 @@ class TestSettingsEndpoints:
         karakeep = {s["service"]: s for s in resp.json()["services"]}["karakeep"]
         assert karakeep["values"] == {}
 
+    async def test_last_updated_is_a_utc_instant(self, tmp_path, client, app):
+        """`secrets.updated_at` is naive UTC, which a browser reads as local time (#955)."""
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        from istota.credentials import store as secrets_store
+        secrets_store.set_secret(self._db_path, "alice", "ntfy", "topic", "alerts-x")
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute("UPDATE secrets SET updated_at='2026-11-13 19:58:34' WHERE user_id='alice'")
+        cookies = await self._login_alice(client, app)
+        resp = await client.get("/istota/api/settings/services", cookies=cookies)
+        ntfy = {s["service"]: s for s in resp.json()["services"]}["ntfy"]
+        assert ntfy["last_updated"] == "2026-11-13T19:58:34Z"
+
     async def test_set_secret_persists(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)

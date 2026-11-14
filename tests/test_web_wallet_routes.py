@@ -182,3 +182,23 @@ async def test_declared_currency_amount_reaches_listing(signed_client, config, c
     row = (await signed_client.get(BASE)).json()["purchases"][0]
     assert row["amount_cents"] == minor
     assert row["currency"] == currency
+
+
+async def test_purchase_times_are_utc_instants(signed_client, config):  # noqa: F811
+    """The store writes naive UTC, which a browser parses as local time (#955)."""
+    ident = await add(signed_client)
+    with db.get_db(config.db_path) as conn:
+        room = db.create_web_chat_room(conn, "alice", "Private")
+        task_id = db.create_task(conn, user_id="alice", prompt="Buy filter", conversation_token=room.token)
+        conn.execute("UPDATE tasks SET status='running' WHERE id=?", (task_id,))
+        result = purchases.request(conn, config, user_id="alice", task_id=task_id, card=ident,
+                                   merchant="shop.example", amount_cents=100, currency="USD", description="Filter")
+        conn.execute("UPDATE wallet_purchases SET created_at='2026-11-13 19:58:34', updated_at='2026-11-13 20:01:02', "
+                     "authorized_at='2026-11-13 19:59:00', expires_at='2026-11-13 20:14:00', last_filled_at=NULL "
+                     "WHERE id=?", (result.purchase_id,))
+    row = (await signed_client.get(BASE)).json()["purchases"][0]
+    assert row["created_at"] == "2026-11-13T19:58:34Z"
+    assert row["updated_at"] == "2026-11-13T20:01:02Z"
+    assert row["authorized_at"] == "2026-11-13T19:59:00Z"
+    assert row["expires_at"] == "2026-11-13T20:14:00Z"
+    assert row["last_filled_at"] is None

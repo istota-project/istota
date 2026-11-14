@@ -10,6 +10,7 @@
     Field,
     Input,
     SecretField,
+    Timestamp,
     type BadgeVariant,
   } from '@minot/ui';
   import { setSecret, deleteSecret, type ServiceCard as ServiceCardData } from '$lib/api';
@@ -128,7 +129,9 @@
   {/snippet}
   {#snippet actions()}
     {#if service.last_updated}
-      <span class="caption">Updated {service.last_updated}</span>
+      <span class="caption"
+        >Updated <Timestamp value={service.last_updated} format="datetime" /></span
+      >
     {/if}
     <!-- No Save button: the app bar owns it (see useHeaderSave above). The
 		     flash stays, because with one shared button it is the only thing that
