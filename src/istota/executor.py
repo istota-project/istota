@@ -1668,10 +1668,9 @@ def discover_calendars_for_task(
     if not (config.caldav_url and config.caldav_username and config.caldav_password):
         return []
     try:
-        # ISSUE-101: DAVClient owns a requests.Session whose urllib3 pool
-        # spawns a daemon watchdog thread on first connection. Without
-        # close() the thread and the open socket leak per call — over
-        # days the scheduler accumulated 6000+ of each.
+        # ISSUE-101: DAVClient owns an HTTP session and its pooled sockets.
+        # Under caldav 2.x each pool also ran a watchdog thread, and without
+        # close() the scheduler accumulated 6000+ threads and sockets.
         with get_caldav_client(
             config.caldav_url, config.caldav_username, config.caldav_password,
         ) as client:

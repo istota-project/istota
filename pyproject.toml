@@ -25,6 +25,10 @@ dependencies = [
     # pairing they cannot complete, and an apt install is not available on
     # every host at the moment they need it.
     "segno>=1.6.0",
+    # `istota migrate role-vars` reads the old role's YAML variables. It
+    # reached every install through caldav 2.x until caldav was pinned below 2
+    # (ISSUE-944); since then nothing in a lean install provides it.
+    "pyyaml>=6.0.0",
 ]
 
 [project.optional-dependencies]
@@ -34,7 +38,7 @@ dev = [
     "pytest-asyncio>=0.23.0",
 ]
 calendar = [
-    "caldav>=1.3.0",
+    "caldav>=1.3,<2",
     "icalendar>=5.0.0",
     "recurring-ical-events>=3.0.0",
 ]
@@ -344,8 +348,8 @@ dev = [
     # pyyaml: the same failure a third time (ISSUE-437). Eighteen test files
     #   parse the Ansible role's YAML and the compose files with it, while it
     #   was declared nowhere at all and reached the venv only because `caldav`
-    #   depends on it and `calendar` is in the `test` extra. It stops arriving
-    #   the day either of those changes.
+    #   depends on it and `calendar` is in the `test` extra. caldav 1.x does
+    #   not depend on it (ISSUE-944), and it is now a core dependency too.
     # python-dotenv: `tests/adversarial/send_t1.py` reads `.env.test` through
     #   it. Undeclared and, unlike the other three, not installed by anything
     #   either — so the script could not run at all.

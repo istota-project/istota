@@ -571,8 +571,7 @@ def _fetch_calendar_events(
             format_event_for_display,
         )
 
-        # ISSUE-101: DAVClient owns urllib3 pools whose watchdog threads
-        # leak unless close() is called.
+        # ISSUE-101: close DAVClient so its pooled connections are released.
         with get_caldav_client(
             config.caldav_url, config.caldav_username, config.caldav_password,
         ) as client:

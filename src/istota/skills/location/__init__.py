@@ -551,8 +551,8 @@ def cmd_attendance(args):
         framework_conn.close()
         _fail(str(e))
 
-    # ISSUE-101: DAVClient owns urllib3 pools whose watchdog threads
-    # leak unless close() is called. Use try/finally because the function
+    # ISSUE-101: close DAVClient so its pooled connections are released.
+    # Use try/finally because the function
     # already branches into sys.exit on errors.
     client = get_caldav_client(caldav_url, caldav_user, caldav_pass)
     try:
