@@ -92,11 +92,14 @@ async def test_re_registration_replaces_the_capability_in_place(client, relay_pu
     assert second.json() == first.json()
     ref = f"{first.json()['id']}.cap"
     assert _relay_columns() == (_b64(b"\x22" * 16), ref, LEASE + 1, "active")
-    assert [p.name for p in relay_push["dir"].iterdir()] == [ref]
+    # The replaced route's capability moves aside for its revocation (test_push_relay_revocation.py).
+    revoke = f"revoke-{ROUTE_ID}.cap"
+    assert sorted(p.name for p in relay_push["dir"].iterdir()) == sorted([ref, revoke])
     assert (relay_push["dir"] / ref).read_text("ascii") == newer
+    assert (relay_push["dir"] / revoke).read_text("ascii") == CAPABILITY
 
 
-async def test_a_registration_without_a_route_clears_it_and_removes_the_file(client, relay_push):  # noqa: F811
+async def test_a_registration_without_a_route_clears_it_and_queues_its_revocation(client, relay_push):  # noqa: F811
     import istota.webui.app as mod
 
     cookies = await _login(client, "alice")
@@ -106,7 +109,10 @@ async def test_a_registration_without_a_route_clears_it_and_removes_the_file(cli
     second = await client.post(URL, cookies=cookies, headers=ORIGIN, json=_encrypted(relay_push["kid"]))
     assert second.json() == first.json()
     assert _relay_columns() == (None, None, None, "active")
-    assert list(relay_push["dir"].iterdir()) == []
+    assert [p.name for p in relay_push["dir"].iterdir()] == [f"revoke-{ROUTE_ID}.cap"]
+    with db.get_db(_db_path()) as conn:
+        queued = conn.execute("SELECT route_id, relay_url FROM push_relay_revocations").fetchall()
+    assert [tuple(r) for r in queued] == [(ROUTE_ID, RELAY_URL)]
 
 
 async def test_an_explicit_credentials_dir_is_used(client, relay_push, tmp_path):  # noqa: F811
@@ -260,3 +266,28 @@ def test_snapshot_and_config_view_never_carry_the_capability(install, tmp_path, 
     assert code == 0, stderr
     assert CAPABILITY not in stdout and CAPABILITY not in stderr
     assert CAPABILITY not in str(admin_config_view.build_config_view(config, secrets_dir=tmp_path / "none"))
+
+
+def _queued_routes():
+    with db.get_db(_db_path()) as conn:
+        return [tuple(r) for r in conn.execute(
+            "SELECT route_id, credential_ref, relay_url FROM push_relay_revocations")]
+
+
+async def test_removing_a_relay_device_queues_its_route_and_keeps_the_file(client, relay_push):  # noqa: F811
+    cookies = await _login(client, "alice")
+    device_id = (await client.post(URL, cookies=cookies, headers=ORIGIN, json=_relay_body(relay_push["kid"]))).json()["id"]
+    removed = await client.delete(f"{URL}/{device_id}", cookies=cookies, headers=ORIGIN)
+    assert removed.status_code == 200
+    assert _device_count() == 0
+    assert _queued_routes() == [(ROUTE_ID, f"{device_id}.cap", RELAY_URL)]
+    assert (relay_push["dir"] / f"{device_id}.cap").read_text("ascii") == CAPABILITY
+
+
+async def test_logout_queues_the_session_relay_route(client, relay_push):  # noqa: F811
+    cookies = await _login(client, "alice")
+    first = await client.post(URL, cookies=cookies, headers=ORIGIN, json=_relay_body(relay_push["kid"]))
+    response = await client.get("/istota/logout", cookies=first.cookies, follow_redirects=False)
+    assert response.status_code == 302
+    assert _device_count() == 0
+    assert _queued_routes() == [(ROUTE_ID, f"{first.json()['id']}.cap", RELAY_URL)]

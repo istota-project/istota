@@ -11242,6 +11242,11 @@ def check_push_relay(config: "Config", probe: bool) -> CheckResult:
         notes.append(f"{repair} device(s) in repair: their relay route expired or was revoked, "
                      "or its credential file is missing")
         remedies.append("Each such device must enroll again from the app's notification settings.")
+    pending = _relay_revocations_pending(config)
+    if pending:
+        notes.append(f"{pending} route revocation(s) still queued after a day")
+        remedies.append("The relay has not accepted them; check that it is reachable from the daemon. "
+                        "Each is retried with backoff for seven days, then left to lapse with its lease.")
     if any(value.strip() for value in (push.apns_key_path, push.apns_key_id, push.apns_team_id)):
         notes.append("APNs settings are set and ignored under relay delivery")
         remedies.append("Remove apns_key_path, apns_key_id and apns_team_id from [push]; "
@@ -11290,6 +11295,26 @@ def _relay_repair_count(config: "Config") -> int:
         ).fetchone()[0])
     except Exception:  # noqa: BLE001 — a check reports, it does not propagate
         logger.debug("push relay repair count failed", exc_info=True)
+        return 0
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _relay_revocations_pending(config: "Config") -> int:
+    """Queued relay revocations older than a day; 0 with no database or no readable table."""
+    conn = None
+    try:
+        db_path = Path(getattr(config, "db_path", "") or "")
+        if not db_path.name or not db_path.exists():
+            return 0
+        conn = sqlite_util.connect_read_only(db_path)
+        return int(conn.execute(
+            "SELECT COUNT(*) FROM push_relay_revocations WHERE created_at <= ?",
+            (int(time.time()) - 86_400,),
+        ).fetchone()[0])
+    except Exception:  # noqa: BLE001 — a check reports, it does not propagate
+        logger.debug("push relay revocation count failed", exc_info=True)
         return 0
     finally:
         if conn is not None:

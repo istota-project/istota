@@ -22,6 +22,13 @@ anything else, a redirect included, is `delivery_unknown`. Results become
 deletes like an APNs 410, the route results in `devices.REPAIR_REASONS` mark
 the device `repair`, and the rest are transient.
 
+`revoke` is the revocation sweep's `DELETE {relay_url}/v1/routes/{route_id}`
+(istota-relay's `delete_route` in `src/relay/app.py`), with the same client,
+the same bound on the answer and redirects off. 204 is a route revoked now or
+already gone, and 401 a capability that is not the route's; both mean there
+is nothing more to do. A 429 carries the relay's `retry_after`. Anything else
+is a failure to try again later.
+
 Never logged: the capability, the route ID, the envelope or an exception's
 text, which can carry the URL.
 """
@@ -29,6 +36,7 @@ text, which can carry the URL.
 import logging
 import threading
 import time
+from dataclasses import dataclass
 
 import httpx
 
@@ -140,6 +148,42 @@ def _read_bounded(response: httpx.Response) -> bytes | None:
         if len(data) > MAX_RESPONSE_BYTES:
             return None
     return bytes(data)
+
+
+@dataclass(frozen=True)
+class RevokeResult:
+    """One revocation attempt; `done` when there is nothing more to send for the route."""
+    done: bool
+    status: int
+    reason: str
+    retry_after: int | None = None
+
+
+def revoke(config: Config, route_id: str, capability: str, *, relay_url: str | None = None,
+           client: httpx.Client | None = None) -> RevokeResult:
+    """Revoke one route at the relay that issued it (`relay_url`, else the configured one)."""
+    url = f"{relay_url or config.push.relay_url}/v1/routes/{route_id}"
+    headers = {"authorization": f"Bearer {capability}"}
+    try:
+        with (client or _client()).stream(
+            "DELETE", url, headers=headers, timeout=config.push.relay_timeout_seconds, follow_redirects=False,
+        ) as response:
+            status = response.status_code
+            data = _read_bounded(response)
+    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        logger.warning("Push relay unreachable for a revocation: %s", type(exc).__name__)
+        return RevokeResult(False, 0, UNREACHABLE)
+    except Exception as exc:
+        logger.warning("Push relay revocation ended without an answer: %s", type(exc).__name__)
+        return RevokeResult(False, 0, "no_answer")
+    if status == 204:
+        return RevokeResult(True, status, "revoked")
+    if status == 401:
+        return RevokeResult(True, status, "unauthorized_route")
+    answer = None if data is None else _answer(status, data)
+    if status == 429 and answer is not None:
+        return RevokeResult(False, status, "rate_limited", answer.get("retry_after"))
+    return RevokeResult(False, status, "unexpected_status")
 
 
 def send(config: Config, device: dict, prepared, *, client: httpx.Client | None = None) -> ApnsResult:

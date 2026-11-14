@@ -14431,7 +14431,8 @@ def _push_device_register(
     with db.get_db(_config.db_path) as conn:
         device_id = devices.register_device(
             conn, username, **body, auth_method=auth["method"], auth_epoch=auth["epoch"],
-            auth_session_id=session_id, credentials_dir=devices.relay_credentials_dir(_config), **private,
+            auth_session_id=session_id, credentials_dir=devices.relay_credentials_dir(_config),
+            relay_url=_config.push.relay_url, **private,
         )
         if device_id is None:
             return None
@@ -14443,7 +14444,7 @@ def _push_session_delete(username: str, session_id: str) -> None:
     from istota.push import devices
 
     with db.get_db(_config.db_path) as conn:
-        devices.delete_session_devices(conn, username, session_id)
+        devices.delete_session_devices(conn, username, session_id, relay_url=_config.push.relay_url)
 
 
 def _push_device_delete(username: str, device_id: int, created_at: str | None = None) -> bool:
@@ -14451,7 +14452,8 @@ def _push_device_delete(username: str, device_id: int, created_at: str | None = 
     from istota.push import devices
 
     with db.get_db(_config.db_path) as conn:
-        return devices.delete_device(conn, device_id, username, created_at=created_at)
+        return devices.delete_device(conn, device_id, username, created_at=created_at,
+                                     relay_url=_config.push.relay_url)
 
 
 @api_router.get("/push/categories")

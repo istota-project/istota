@@ -133,7 +133,8 @@ def _enroll(state, token, route, *, capability=CAPABILITY, user=ACCOUNT):
             conn, user, token, "production", "ios", "0.15.0", auth_method="nextcloud", auth_epoch=0,
             connection_binding=BINDING, connection_generation=3, private_version=1, private_content="encrypted",
             encryption_public_key=envelope.b64url(raw), encryption_key_id=envelope.key_id(raw),
-            sender_key_id=sender, push_generation=GENERATION, relay=relay, credentials_dir=state.directory)
+            sender_key_id=sender, push_generation=GENERATION, relay=relay, credentials_dir=state.directory,
+            relay_url=state.config.push.relay_url)
     assert device_id is not None
     state.mock.capabilities[route_id(route)] = capability
     return device_id

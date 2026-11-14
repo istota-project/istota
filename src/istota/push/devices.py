@@ -4,12 +4,20 @@ Under relay delivery a registration also carries the relay route. Its send
 capability is a bearer credential, so it is written to a 0600 file named for
 the device (`<id>.cap`) in the push credentials directory, and the row holds
 only that file name: never the database, a log line or the device list.
+
+Removing a relay device, or re-enrolling it on a different route, queues the
+old route in `push_relay_revocations` in the same transaction; the sweep in
+`push/revocations.py` revokes it at the relay and then deletes its file. A
+replaced route's capability is copied to `revoke-<route_id>.cap` first, since
+the device's own file is about to hold the new one.
 """
 
 import logging
 import os
 import re
 import sqlite3
+import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,12 +32,15 @@ from istota.lib.atomic_write import write_bytes_atomic
 
 logger = logging.getLogger(__name__)
 
-_CREDENTIAL_REF = re.compile(r"[0-9]+\.cap")
+_ROUTE_ID = re.compile(r"[A-Za-z0-9_-]{22}")
+_CREDENTIAL_REF = re.compile(r"(?:[0-9]+|revoke-[A-Za-z0-9_-]{22})\.cap")
 # A capability file holds one 43-character capability; anything longer is not one.
 _CAPABILITY_FILE_MAX = 64
 CREDENTIAL_MISSING = "relay_credential_missing"
 # Relay results that leave a route unusable until the device enrolls again.
 REPAIR_REASONS = frozenset({"unauthorized_route", "expired_route", CREDENTIAL_MISSING})
+# How long a queued revocation is retried before the route is left to lapse with its lease.
+REVOCATION_LIFETIME_SECONDS = 7 * 86_400
 
 
 def relay_credentials_dir(config: "Config") -> Path:
@@ -45,16 +56,21 @@ def relay_credentials_dir(config: "Config") -> Path:
     return Path(config.db_path).parent / "push" / "relay"
 
 
-def write_relay_capability(directory: Path | None, device_id: int, capability: str) -> str:
-    """Write one device's send capability (0600, directory 0700) and return its file name."""
+def _write_capability_file(directory: Path | None, name: str, capability: str) -> Path:
     if directory is None:
         raise FileNotFoundError("no push credentials directory")
     directory = Path(directory)
     if not directory.is_dir():
         directory.mkdir(parents=True, mode=0o700)
         os.chmod(directory, 0o700)
-    name = f"{int(device_id)}.cap"
     write_bytes_atomic(directory / name, capability.encode("ascii"), mode=0o600, fsync=True)
+    return directory / name
+
+
+def write_relay_capability(directory: Path | None, device_id: int, capability: str) -> str:
+    """Write one device's send capability (0600, directory 0700) and return its file name."""
+    name = f"{int(device_id)}.cap"
+    _write_capability_file(directory, name, capability)
     return name
 
 
@@ -91,6 +107,67 @@ def remove_relay_capability(directory: Path, ref: str | None) -> None:
         logger.warning("Push relay credential removal failed: %s", type(exc).__name__)
 
 
+@contextmanager
+def _savepoint(conn: sqlite3.Connection, name: str):
+    """One savepoint, so the statements inside are atomic within the caller's transaction too."""
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    conn.execute(f"SAVEPOINT {name}")
+    try:
+        yield
+    except BaseException:
+        try:
+            conn.execute(f"ROLLBACK TO {name}")
+            conn.execute(f"RELEASE {name}")
+        except sqlite3.Error:
+            pass
+        raise
+    conn.execute(f"RELEASE {name}")
+
+
+def queue_revocation(conn: sqlite3.Connection, route_id: str, credential_ref: str, relay_url: str) -> None:
+    """Queue one relay route for revocation, due now; the caller's transaction holds it.
+
+    `relay_url` is the relay that issued the route, as configured when it was
+    queued; the sweep revokes there and drops what it cannot send.
+    """
+    now = int(time.time())
+    conn.execute(
+        """INSERT INTO push_relay_revocations
+            (route_id, credential_ref, relay_url, next_attempt_at, attempts, expires_at, created_at)
+            VALUES (?, ?, ?, ?, 0, ?, ?)
+            ON CONFLICT(route_id) DO NOTHING""",
+        (route_id, credential_ref or "", relay_url or "", now, now + REVOCATION_LIFETIME_SECONDS, now),
+    )
+
+
+def _queue_removed_routes(conn: sqlite3.Connection, removed, relay_url: str) -> None:
+    # A removed device's id is never reused (AUTOINCREMENT), so its own file can stay as the sweep's.
+    for route_id, ref in removed:
+        if route_id:
+            queue_revocation(conn, route_id, ref, relay_url)
+
+
+def _queue_replaced_route(conn: sqlite3.Connection, directory: Path | None, route_id: str,
+                          old_ref: str | None, relay_url: str) -> Path | None:
+    """Queue a route a re-registration replaced, its capability copied to a file of its own.
+
+    Returns the file written, so a registration that fails afterwards can take it back.
+    """
+    if directory is None or not _ROUTE_ID.fullmatch(route_id):
+        return None
+    if conn.execute("SELECT 1 FROM push_relay_revocations WHERE route_id = ?", (route_id,)).fetchone():
+        return None
+    capability = read_relay_capability(directory, old_ref)
+    if capability is None:
+        logger.warning("Push relay route replaced with no readable capability; it lapses with its lease")
+        return None
+    name = f"revoke-{route_id}.cap"
+    written = _write_capability_file(directory, name, capability)
+    queue_revocation(conn, route_id, name, relay_url)
+    return written
+
+
 def register_device(
     conn: sqlite3.Connection, user_id: str, token: str, environment: str,
     platform: str = "ios", app_version: str = "", *,
@@ -100,7 +177,7 @@ def register_device(
     private_version: int | None = None, private_content: str | None = None,
     encryption_public_key: str | None = None, encryption_key_id: str | None = None,
     sender_key_id: str | None = None, push_generation: str | None = None,
-    relay: dict | None = None, credentials_dir: Path | None = None,
+    relay: dict | None = None, credentials_dir: Path | None = None, relay_url: str = "",
 ) -> int | None:
     """Move a token to its current account and seed only a new user's watermark.
 
@@ -111,9 +188,11 @@ def register_device(
 
     `relay` is the validated `{route_id, send_capability, lease_expires_at}`;
     its capability is written to `credentials_dir` inside the savepoint, so a
-    file that cannot be written registers nothing. A registration that drops a
-    route removes the old file once the row no longer names it.
+    file that cannot be written registers nothing. A registration that drops or
+    replaces a route queues the old one for revocation at `relay_url`, and
+    removes the device's old file once the row no longer names it.
     """
+    revoke_file = None
     try:
         # One savepoint makes the registration and watermark atomic, including
         # when the caller has already started a transaction.
@@ -121,7 +200,8 @@ def register_device(
             conn.execute("BEGIN IMMEDIATE")
         conn.execute("SAVEPOINT register_push_device")
         previous = conn.execute(
-            "SELECT user_id, created_at, relay_credential_ref FROM push_devices WHERE token = ? AND environment = ?",
+            "SELECT user_id, created_at, relay_credential_ref, relay_route_id FROM push_devices"
+            " WHERE token = ? AND environment = ?",
             (token, environment),
         ).fetchone()
         now = iso_utc_now()
@@ -160,6 +240,10 @@ def register_device(
                 ON CONFLICT(user_id) DO NOTHING""",
             (user_id,),
         )
+        replaced = previous["relay_route_id"] if previous else None
+        if replaced and (relay is None or relay["route_id"] != replaced):
+            revoke_file = _queue_replaced_route(conn, credentials_dir, replaced,
+                                                previous["relay_credential_ref"], relay_url)
         ref = None
         if relay is not None:
             # Last before the release, so a write that fails rolls back the row
@@ -184,6 +268,8 @@ def register_device(
             conn.execute("RELEASE register_push_device")
         except sqlite3.Error:
             pass
+        if revoke_file is not None:
+            revoke_file.unlink(missing_ok=True)
         logger.warning("Push registration failed: %s", type(exc).__name__)
         return None
 
@@ -229,24 +315,35 @@ def list_devices(
         return []
 
 
-def delete_device(conn: sqlite3.Connection, device_id: int, user_id: str, *, created_at: str | None = None) -> bool:
+def delete_device(conn: sqlite3.Connection, device_id: int, user_id: str, *, created_at: str | None = None,
+                  relay_url: str = "") -> bool:
+    """Remove one registration; a relay route it held is queued for revocation in the same savepoint."""
     try:
-        return conn.execute(
-            "DELETE FROM push_devices WHERE id = ? AND user_id = ? AND (? IS NULL OR created_at = ?)",
-            (device_id, user_id, created_at, created_at),
-        ).rowcount > 0
+        with _savepoint(conn, "delete_push_device"):
+            removed = conn.execute(
+                "DELETE FROM push_devices WHERE id = ? AND user_id = ? AND (? IS NULL OR created_at = ?)"
+                " RETURNING relay_route_id, relay_credential_ref",
+                (device_id, user_id, created_at, created_at),
+            ).fetchall()
+            _queue_removed_routes(conn, removed, relay_url)
+        return bool(removed)
     except Exception as exc:
         logger.warning("Push device removal failed: %s", type(exc).__name__)
         return False
 
 
-def delete_session_devices(conn: sqlite3.Connection, user_id: str, session_id: str) -> None:
+def delete_session_devices(conn: sqlite3.Connection, user_id: str, session_id: str, *,
+                           relay_url: str = "") -> None:
+    """A logout's registrations, their relay routes queued in the same savepoint; errors propagate."""
     if not session_id:
         return
-    conn.execute(
-        "DELETE FROM push_devices WHERE user_id = ? AND auth_session_id = ?",
-        (user_id, session_id),
-    )
+    with _savepoint(conn, "delete_session_push_devices"):
+        removed = conn.execute(
+            "DELETE FROM push_devices WHERE user_id = ? AND auth_session_id = ?"
+            " RETURNING relay_route_id, relay_credential_ref",
+            (user_id, session_id),
+        ).fetchall()
+        _queue_removed_routes(conn, removed, relay_url)
 
 
 def registration_authorized(config, device: dict) -> bool:
