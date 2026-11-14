@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A browser grant can no longer open the Mac's loopback on the local VM.** A `[private_hosts]` host granted to `browser` that resolves to the VM's gateway, or is the gateway's address, is now left out of the browser's firewall with a warning naming the host. Before, such a grant opened every port on the Mac's `127.0.0.1` to the browser. See docs/deployment/security.md, "The local VM". (#953)
 - The configuration backup now holds the private push signing key, and a restore puts it back through the usual review when it lives at the default path in the config directory, so phones enrolled under it keep their private previews after a rebuild. Replacing a different key is a choice the review spells out. See docs/deployment/running-the-stack.md, "Recovering a lost installation". (#947)
+- **Browser sign-ins no longer fail on Chrome's "Save password?" prompt.** The browser's Chrome no longer offers to save passwords, cards or addresses, so no prompt opens over the page after a login or a checkout and takes the next click, such as the one into a two-factor code field. Takes effect when the browser image is rebuilt. (#954)
 - **Tapping a push for the inbox opens the notifications panel.** That covers a notification with no link, such as a task alert, and a tap the iPhone app 0.15.0 routes to the inbox when a private notification fails a check. These taps used to land on Chat. (#949)
 
 ## [0.49.0] - 2026-11-13
