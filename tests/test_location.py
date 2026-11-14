@@ -4,7 +4,7 @@ import io
 import json
 import sys
 from types import SimpleNamespace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -620,6 +620,37 @@ class TestLocationCLI:
         output = _run_cli(_skill().cmd_current, db_path)
         assert output["last_ping"] is None
         assert output["current_visit"] is None
+
+    @staticmethod
+    def _seed_open_visit(db_path, entered_at: datetime):
+        stamp = entered_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+        pid = _add_place(db_path, "cafe")
+        with location_db.connect(db_path) as conn:
+            location_db.insert_ping(conn, stamp, 34.0, -118.0, accuracy=10.0,
+                                    place_id=pid)
+            location_db.open_visit(conn, pid, "cafe", stamp)
+            conn.commit()
+
+    def test_current_visit_duration_counts_up_from_entry(self, tmp_path):
+        db_path = _init_loc_db(tmp_path)
+        self._seed_open_visit(db_path, datetime.now(timezone.utc) - timedelta(minutes=30))
+
+        output = _run_cli(_skill().cmd_current, db_path)
+        assert output["current_visit"]["duration_minutes"] in (29, 30)
+
+    def test_current_visit_entered_in_the_future_has_no_duration(self, tmp_path):
+        """ISSUE-961: Today showed "-444m" beside the place, read as metres.
+
+        A visit opened by a ping stamped ahead of the server clock (a seeder
+        replaying the rest of today, a phone clock running fast) has not
+        lasted a negative time; it has no duration the server can state.
+        """
+        db_path = _init_loc_db(tmp_path)
+        self._seed_open_visit(db_path, datetime.now(timezone.utc) + timedelta(hours=7, minutes=24))
+
+        output = _run_cli(_skill().cmd_current, db_path)
+        assert output["current_visit"]["place_name"] == "cafe"
+        assert output["current_visit"]["duration_minutes"] is None
 
     def test_places_lists_db(self, tmp_path):
         db_path = _init_loc_db(tmp_path)

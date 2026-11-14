@@ -601,6 +601,10 @@ def location_current(db_path: str | Path, *, tz: str | tzinfo | None = None) -> 
                 )
             except (ValueError, TypeError):
                 duration_min = None
+            # An entry stamped ahead of this clock (a fast device clock, a
+            # replayed track) has no duration yet; Today printed it as "-444m".
+            if duration_min is not None and duration_min < 0:
+                duration_min = None
             current_visit = {
                 "place_name": visit_row["place_name"],
                 "entered_at": entered,
