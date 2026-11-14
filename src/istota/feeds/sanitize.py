@@ -174,16 +174,20 @@ def _text_only(html: str) -> str | None:
     text = html_to_text(_drop_raw_text_elements(html))
     if not text:
         return None
-    return html_module.escape(html_module.unescape(text), quote=False)
+    return html_module.escape(text, quote=False)
 
 
 def html_to_text(html: str | None) -> str | None:
     """Crude HTML-to-text extraction for content_text. Used when feed
     sources only give HTML.
+
+    The result is plain text, so character references are decoded
+    (ISSUE-957). Tags go first: an escaped ``&lt;b&gt;`` is text, not markup.
     """
     if not html:
         return None
     text = re.sub(r"<[^>]+>", " ", html)
+    text = html_module.unescape(text)
     text = re.sub(r"\s+", " ", text).strip()
     return text or None
 
