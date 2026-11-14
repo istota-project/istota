@@ -131,12 +131,68 @@ class TestAPrincipalsTurn:
             _shared(conn)
         text = _card(config, _task("bob"), withheld=frozenset())
         assert "privately with `istota-skill room whisper`" in text
-        assert "answer their question in their private chat instead" in text
+        assert "run `istota-skill room answer-privately`" in text
         assert "side room" not in text
         withheld = _card(config, _task("bob"))
         assert "goes to them privately with `istota-skill room whisper`" in withheld
         assert "side room" not in withheld
         assert "room whisper" not in _card(config, _task("bob"), room_cli=False)
+
+
+class TestAPersonalQuestionInASharedRoom:
+    """ISSUE-966: what the card says to do with a personal question.
+
+    The `room` skill body has always said to answer it privately without asking,
+    but that body loads only when a trigger word selects the skill, and "what do
+    you know about me personally" names none. On the card alone the model
+    sometimes carried the question to the private chat and sometimes only told
+    the user to ask there, because the card offered the verb with no rule for
+    when to use it.
+    """
+
+    def test_with_the_room_cli_it_is_answered_privately_without_asking(self, config):
+        with db.get_db(config.db_path) as conn:
+            _shared(conn)
+        text = _card(config, _task("bob"), withheld=frozenset())
+        assert "something personal" in text
+        assert "do not answer it here and do not ask first" in text
+        assert "run `istota-skill room answer-privately`" in text
+        assert "tell the room, briefly, that you have answered them privately" in text
+
+    def test_without_the_room_cli_it_is_redirected_never_answered_here(self, config):
+        with db.get_db(config.db_path) as conn:
+            _shared(conn)
+        text = _card(config, _task("bob"), withheld=frozenset(), room_cli=False)
+        assert "something personal" in text
+        assert "do not answer it here" in text
+        assert "ask you in their private chat" in text
+        assert "answer-privately" not in text
+
+    def test_a_turn_with_withheld_scopes_gets_no_such_rule(self, config):
+        with db.get_db(config.db_path) as conn:
+            _shared(conn)
+        assert "something personal" not in _card(config, _task("bob", source_type="scheduled"))
+        guest = _card(
+            config, _task("alice", guest_participant_id=1), withheld=frozenset({"files"}),
+        )
+        assert "something personal" not in guest
+
+    def test_a_guests_turn_without_the_room_cli_gets_no_such_rule(self, config):
+        # Nothing withheld and no CLI: only the guest check keeps the
+        # redirect line off a turn whose principal did not write it.
+        with db.get_db(config.db_path) as conn:
+            _shared(conn)
+        guest = _card(
+            config, _task("alice", guest_participant_id=1),
+            withheld=frozenset(), room_cli=False,
+        )
+        assert "something personal" not in guest
+
+    def test_the_memory_line_defers_to_the_rule(self, config):
+        with db.get_db(config.db_path) as conn:
+            _shared(conn)
+        text = _card(config, _task("bob"), withheld=frozenset())
+        assert "only when they ask for it, and only for something that is not personal" in text
 
     def test_room_notes_are_front_stage(self, config):
         with db.get_db(config.db_path) as conn:

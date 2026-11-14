@@ -7233,6 +7233,16 @@ def _email_room_card(
     return "".join(f"\n{line}" for line in lines)
 
 
+def _personal_question_lead(principal: str) -> str:
+    # One condition for both endings, so the card with and without the room CLI
+    # cannot disagree about what counts as personal (ISSUE-966).
+    return (
+        f"When '{principal}' asks about something personal (such as their health, "
+        "money, private mail, or what you know about them) or asks for a private "
+        "answer,"
+    )
+
+
 INCOGNITO_ROOM_LINE = (
     "This is an incognito room. None of the user's memory was loaded and none "
     "can be read or written from here, and nothing said here reaches their "
@@ -7373,7 +7383,8 @@ def room_card(
                 f"This turn runs with everything '{principal}' can reach, and "
                 "anything you reach may end up in front of everyone here. Their "
                 "personal memory is not loaded into this room; read it with the "
-                "memory skill only when they ask for it."
+                "memory skill only when they ask for it, and only for something "
+                "that is not personal."
             )
             if readers.guests > 0 or task.audience == "mixed":
                 lines.append("A guest reads this room.")
@@ -7395,11 +7406,22 @@ def room_card(
             )
         else:
             lines.append(
-                f"Anything only '{principal}' should see goes to them privately "
-                "with `istota-skill room whisper`, or "
-                "`istota-skill room answer-privately` to answer their question "
-                "in their private chat instead; post to the room only as your reply."
+                f"{_personal_question_lead(principal)} do not answer it here and do "
+                "not ask first: run `istota-skill room answer-privately`, which "
+                "asks their question again in their private chat, then tell the "
+                "room, briefly, that you have answered them privately. If that is "
+                "refused, say you could not answer privately and ask them to "
+                "message you directly."
             )
+            lines.append(
+                f"Anything else only '{principal}' should see goes to them privately "
+                "with `istota-skill room whisper`; post to the room only as your reply."
+            )
+    elif not guest_turn and not withheld_scopes:
+        lines.append(
+            f"{_personal_question_lead(principal)} do not answer it here: tell "
+            "them to ask you in their private chat."
+        )
     lines.append("Room notes (CHANNEL.md) are read by everyone in this room.")
     lines.append("A member's private notes about this room cannot be shown or edited "
                  "from here; point them at their private chat with you.")

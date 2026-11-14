@@ -29,7 +29,7 @@ It returns `queued`; the daemon delivers it. When the answer also carries `"deli
 istota-skill room answer-privately
 ```
 
-When the user you are acting for asks something whose answer should not be read by everyone here (their health, money, private mail and so on), or asks you to answer privately, run this instead of answering in the room: their own question is asked again in their private chat with you, where only they read the answer and their personal memory is available. Then tell the room, briefly, that you have answered them privately. The command takes no text: what is asked again is their message as they wrote it.
+When the user you are acting for asks something whose answer should not be read by everyone here (such as their health, money, private mail, or what you know about them), or asks you to answer privately, run this instead of answering in the room: their own question is asked again in their private chat with you, where only they read the answer and their personal memory is available. Then tell the room, briefly, that you have answered them privately. The command takes no text: what is asked again is their message as they wrote it.
 
 It returns `queued` with the new task's id. It is refused for a guest's message (`guest_turn`), outside a shared room (`not_a_shared_room`), for anything but the user's own message (`unsupported_origin`), and when the user has no private chat with you (`no_private_room`): then tell the room you could not answer privately and ask them to message you directly first.
 
