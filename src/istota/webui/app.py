@@ -6479,12 +6479,24 @@ async def _build_config_restore(user_id: str, inp: _RestoreInput, text: str, dig
     from istota.config_editor import backup, edits
 
     bundle = await _open_restore_bundle(inp)
+    config_dir = Path(_config.config_path).parent
     try:
         current_files = await asyncio.to_thread(
             backup.current_secret_files, backup.deployment_secrets_dir(),
         )
+        current_push_key = push_key_error = None
+        if bundle.push_key is not None:
+            # A broken live key makes the key's row host only, not the restore.
+            try:
+                current_push_key = await asyncio.to_thread(
+                    backup.current_push_key, backup.default_push_key_path(config_dir),
+                )
+            except backup.BackupError as exc:
+                push_key_error = str(exc)
         credentials = backup.credential_statuses(
             bundle, text, current_files, restore_config=inp.restore_config,
+            config_dir=config_dir, current_push_key=current_push_key,
+            current_push_key_error=push_key_error,
         )
         selectable = {row["id"] for row in credentials if row["selectable"]}
         if set(inp.selected) - selectable:
@@ -6495,6 +6507,7 @@ async def _build_config_restore(user_id: str, inp: _RestoreInput, text: str, dig
         change_set, warnings = backup.restore_change_set(
             bundle, text, restore_config=inp.restore_config, selected=inp.selected,
             base_digest=digest, current_files=current_files,
+            config_dir=config_dir, current_push_key=current_push_key,
         )
     except backup.BackupError as exc:
         raise _restore_refusal(exc) from None

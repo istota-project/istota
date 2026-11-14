@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The configuration backup now holds the private push signing key, and a restore puts it back through the usual review when it lives at the default path in the config directory, so phones enrolled under it keep their private previews after a rebuild. Replacing a different key is a choice the review spells out. See docs/deployment/running-the-stack.md, "Recovering a lost installation". (#947)
 - **Tapping a push for the inbox opens the notifications panel.** That covers a notification with no link, such as a task alert, and a tap the iPhone app 0.15.0 routes to the inbox when a private notification fails a check. These taps used to land on Chat. (#949)
 
 ## [0.49.0] - 2026-11-13

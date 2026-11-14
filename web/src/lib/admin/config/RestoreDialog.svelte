@@ -253,6 +253,7 @@
 
   function kindLine(row: ConfigRestoreCredential): string {
     if (row.kind === 'inline') return 'Held in config.toml.';
+    if (row.kind === 'push_key') return 'Restored to push/signing.pem in the config directory.';
     return row.source === 'inline'
       ? 'Deployment credential, saved in config.toml when backed up; restored to its secret file.'
       : 'Deployment credential.';

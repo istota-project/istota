@@ -3322,7 +3322,8 @@ config_apply_snapshot() {
 # or the five-minute timer, runs this. Each request: take it in a one-shot,
 # check everything with both dry runs, build the image if the new config needs
 # Claude Code and the image lacks it, then write credentials and admins
-# (put-files) and the config (istota apply --backup), record the outcome and
+# (put-files), the config (istota apply --backup) and a restored push signing
+# key (istota push import-key), record the outcome and
 # restart. Nothing is written until every check has passed. The journal gets
 # verbs, ids and exit codes; the commands' own output goes to the request's
 # row, through `istota config-request finish`, which redacts it again.
@@ -3384,6 +3385,7 @@ sys.exit(0 if request.get("secrets") or request.get("admins") is not None else 1
 # CONFIG_APPLY_NOTHING when none was pending, anything else to stop the loop.
 config_apply_one() (
     local dir out id service tag name lacking status written="" rc=0 rc_put=0 rc_apply=0 puts=""
+    local push_key push_force rc_key=0
     dir="$(mktemp -d "${CONFIG_APPLY_RUN}/istota-config.XXXXXX")" \
         || die "config-apply: could not make a staging directory in ${CONFIG_APPLY_RUN}"
     trap 'rm -rf "$dir"' EXIT
@@ -3412,6 +3414,27 @@ config_apply_one() (
             exit 0
         fi
     done
+    # A restored push signing key (#947): the key and whether it replaces the
+    # live one, both or neither.
+    push_key="" push_force=()
+    if [ -e "${dir}/push-key.pem" ] || [ -L "${dir}/push-key.pem" ] \
+            || [ -e "${dir}/push-key-force" ] || [ -L "${dir}/push-key-force" ]; then
+        for name in push-key.pem push-key-force; do
+            if [ -z "$(find -P "${dir}/${name}" -maxdepth 0 -type f 2>/dev/null)" ]; then
+                echo "take left ${name} missing or not a plain file" >> "$out"
+                config_apply_finish "$id" refused "$dir"
+                exit 0
+            fi
+        done
+        case "$(cat "${dir}/push-key-force")" in
+            0) ;;
+            1) push_force=(--force) ;;
+            *) echo "take left push-key-force saying neither 0 nor 1" >> "$out"
+               config_apply_finish "$id" refused "$dir"
+               exit 0 ;;
+        esac
+        push_key=1
+    fi
 
     # Everything is checked before anything is written.
     echo "\$ istota apply --dry-run" >> "$out"
@@ -3472,6 +3495,15 @@ config_apply_one() (
         apply_plan_file "${dir}/plan.json" --backup "$CONFIG_APPLY_BACKUPS" >> "$out" 2>&1 || rc_apply=$?
         echo "(exit ${rc_apply})" >> "$out"
     fi
+    # The key after the config it is written under, which import-key loads to
+    # find signing_key_path. It goes in on stdin, through the CLI's own writer.
+    if [ -n "$push_key" ] && { [ "$rc_apply" -eq 0 ] || [ "$rc_apply" -eq 2 ]; } \
+            && { [ "$rc_put" -eq 0 ] || [ "$rc_put" -eq 2 ]; }; then
+        echo "\$ istota push import-key${push_force[*]+ ${push_force[*]}}" >> "$out"
+        ISTOTA_CONFIG_READ_ONLY=false oneshot "$service" istota push import-key \
+                ${push_force[@]+"${push_force[@]}"} < "${dir}/push-key.pem" >> "$out" 2>&1 || rc_key=$?
+        echo "(exit ${rc_key})" >> "$out"
+    fi
 
     # A put-files that failed may have written some files before it did.
     if [ "$rc_put" -ne 0 ] && [ "$rc_put" -ne 2 ]; then
@@ -3480,7 +3512,11 @@ config_apply_one() (
     elif [ "$rc_apply" -ne 0 ] && [ "$rc_apply" -ne 2 ]; then
         status=failed
         if [ "$rc_put" -eq 2 ]; then written="credentials or admins"; fi
-    elif [ "$rc_put" -eq 2 ] || [ "$rc_apply" -eq 2 ]; then
+    elif [ "$rc_key" -ne 0 ]; then
+        status=failed
+        if [ "$rc_put" -eq 2 ] || [ "$rc_apply" -eq 2 ]; then written="the change"; fi
+        echo "the push signing key was not written" >> "$out"
+    elif [ "$rc_put" -eq 2 ] || [ "$rc_apply" -eq 2 ] || [ -n "$push_key" ]; then
         status=applied
         written="the change"
     else

@@ -489,7 +489,8 @@ def cmd_config_request_take(args) -> int:
         return 0
     try:
         plan, files, claude_code = handoff.build(taken, current)
-        handoff.write(Path(args.out), plan, files, claude_code)
+        push = handoff.push_key(taken, plan["config"], config_dir=config_path.parent)
+        handoff.write(Path(args.out), plan, files, claude_code, push)
     except (handoff.HandoffError, OSError) as exc:
         reason = str(exc) if isinstance(exc, handoff.HandoffError) else (
             f"the host's files could not be written: {exc.strerror or type(exc).__name__}"

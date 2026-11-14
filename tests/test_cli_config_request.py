@@ -392,6 +392,134 @@ class TestBuild:
             handoff.build(taken, None)
 
 
+def _push_pem(path: Path) -> str:
+    from istota.push import envelope
+
+    envelope.write_signing_key(path, force=True)
+    return path.read_text(encoding="ascii")
+
+
+def _push_key_id(pem: str) -> str:
+    from istota.push import envelope
+
+    return envelope.key_id(envelope.parse_signing_key(pem.encode()).public_key().public_bytes_raw())
+
+
+class TestThePushSigningKey:
+    """#947: a restored push key travels sealed with the request and leaves
+    take as `push-key.pem` and `push-key-force`, for the host applier to pipe
+    into `istota push import-key`. Take checks the live key is still the one
+    the preview saw, and that the key's path is the default."""
+
+    @pytest.fixture
+    def push(self, install, tmp_path):
+        key = install.config_path.parent / "push" / "signing.pem"
+        install.config_path.write_text(
+            install.config_path.read_text()
+            + f'\n[push]\ncontent = "private"\nsigning_key_path = "{key}"\n'
+        )
+        backed_up = _push_pem(tmp_path / "backed-up.pem")
+        return key, backed_up
+
+    def _take(self, install):
+        return install.run("config-request", "take", "--out", str(install.out))
+
+    def _status(self, install, request_id):
+        with db.get_db(install.db_path) as conn:
+            return requests.get(conn, request_id)
+
+    def test_a_new_key_is_handed_over_on_its_own_with_no_force(self, install, push):
+        key, pem = push
+        request_id = install.submit({"push_key": {"value": pem, "replaces": None}})
+        with db.get_db(install.db_path) as conn:
+            row = conn.execute("SELECT * FROM config_change_requests WHERE id = ?", (request_id,)).fetchone()
+        assert all(pem.splitlines()[1] not in str(row[name]) for name in row.keys())
+        result = self._take(install)
+        assert result.returncode == 0 and result.stdout == f"{request_id}\n", result.stderr
+        assert (install.out / handoff.PUSH_KEY_FILE).read_text() == pem
+        assert (install.out / handoff.PUSH_KEY_FORCE_FILE).read_text() == "0\n"
+        assert _mode(install.out / handoff.PUSH_KEY_FILE) == 0o400
+        assert _mode(install.out / handoff.PUSH_KEY_FORCE_FILE) == 0o400
+        for name in ("plan.json", "files.json"):
+            assert pem.splitlines()[1] not in (install.out / name).read_text()
+        assert not key.exists()
+
+    def test_the_key_the_preview_saw_is_replaced_with_force(self, install, push):
+        key, pem = push
+        live = _push_pem(key)
+        install.submit({"push_key": {"value": pem, "replaces": _push_key_id(live)}})
+        assert self._take(install).returncode == 0
+        assert (install.out / handoff.PUSH_KEY_FILE).read_text() == pem
+        assert (install.out / handoff.PUSH_KEY_FORCE_FILE).read_text() == "1\n"
+
+    def test_a_public_half_left_without_its_key_is_replaced_with_force(self, install, push, tmp_path):
+        """Without --force `import-key` refuses an existing `.pub`, and it would
+        refuse only after the config was written (the review of #947)."""
+        key, pem = push
+        key.parent.mkdir()
+        _push_pem(tmp_path / "gone.pem")
+        (tmp_path / "gone.pem.pub").rename(key.parent / "signing.pem.pub")
+        install.submit({"push_key": {"value": pem, "replaces": None}})
+        assert self._take(install).returncode == 0
+        assert (install.out / handoff.PUSH_KEY_FORCE_FILE).read_text() == "1\n"
+
+    def test_a_key_written_since_the_preview_refuses_the_request(self, install, push):
+        key, pem = push
+        request_id = install.submit({"push_key": {"value": pem, "replaces": None}})
+        _push_pem(key)
+        result = self._take(install)
+        assert result.returncode == 0 and result.stdout == ""
+        row = self._status(install, request_id)
+        assert row["status"] == "refused"
+        assert "push signing key" in row["output_text"]
+        assert not (install.out / handoff.PUSH_KEY_FILE).exists()
+
+    def test_a_key_replaced_since_the_preview_refuses_the_request(self, install, push, tmp_path):
+        key, pem = push
+        seen = _push_pem(key)
+        request_id = install.submit({"push_key": {"value": pem, "replaces": _push_key_id(seen)}})
+        _push_pem(key)
+        assert self._take(install).stdout == ""
+        assert self._status(install, request_id)["status"] == "refused"
+
+    def test_the_key_already_in_place_is_not_handed_over(self, install, push):
+        key, pem = push
+        request_id = install.submit({
+            "ops": [{"op": "set", "path": ["email", "imap_host"], "value": "x.example.org"}],
+            "push_key": {"value": pem, "replaces": None},
+        })
+        key.parent.mkdir(exist_ok=True)
+        key.write_text(pem)
+        assert self._take(install).stdout == f"{request_id}\n"
+        assert not (install.out / handoff.PUSH_KEY_FILE).exists()
+        assert not (install.out / handoff.PUSH_KEY_FORCE_FILE).exists()
+
+    def test_a_path_that_is_not_the_default_refuses_the_request(self, install, push, tmp_path):
+        _, pem = push
+        request_id = install.submit({
+            "ops": [{"op": "set", "path": ["push", "signing_key_path"], "value": str(tmp_path / "k.pem")}],
+            "push_key": {"value": pem, "replaces": None},
+        })
+        assert self._take(install).stdout == ""
+        row = self._status(install, request_id)
+        assert row["status"] == "refused"
+        assert "istota-stack push-key import" in row["output_text"]
+
+    def test_finish_removes_every_line_of_the_key(self, install, push):
+        _, pem = push
+        request_id = install.submit({"push_key": {"value": pem, "replaces": None}})
+        assert self._take(install).returncode == 0
+        output = install.out / "output"
+        output.write_text("$ istota push import-key\n" + pem + "Key ID: abc\n")
+        result = install.run("config-request", "finish", "--id", str(request_id), "--status", "applied",
+                             "--output-file", str(output))
+        assert result.returncode == 0, result.stderr
+        text = self._status(install, request_id)["output_text"]
+        for line in pem.strip().splitlines()[1:-1]:
+            assert line not in text
+        assert "Key ID: abc" in text
+
+
 class TestFinishAndMark:
     def test_finish_stores_the_output_without_a_credential_line(self, install):
         request_id = install.submit(CHANGE)
