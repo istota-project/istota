@@ -54,6 +54,7 @@ ZRAM_ENABLED=1
 HOST_LOOPBACK_BLOCK=1
 HOST_GATEWAY_ADDR=192.168.5.2
 HOST_LOOPBACK_ALLOW=11434 1234
+ISTOTA_BROWSER_SUBNET=
 APT_MIRROR=
 APT_SNAPSHOT=
 LOCAL_FORWARD_PORT=
@@ -282,13 +283,16 @@ def test_every_role_variable_in_host_env_is_mapped():
 
 def test_a_site_dir_converts_to_its_own_variable():
     host = HOST_ENV.replace("SITE_DIR=", "SITE_DIR=/srv/www/html").replace(
-        "APT_MIRROR=", "APT_MIRROR=http://mirror.example.com/debian")
+        "APT_MIRROR=", "APT_MIRROR=http://mirror.example.com/debian").replace(
+        "ISTOTA_BROWSER_SUBNET=", "ISTOTA_BROWSER_SUBNET=10.77.3.0/24")
     result = _convert(host_env=role_vars.parse_env(host, "host.env"))
     assert result.vars["istota_site_dir"] == "/srv/www/html"
     assert result.vars["istota_apt_mirror"] == "http://mirror.example.com/debian"
-    assert {"SITE_DIR", "APT_MIRROR"}.isdisjoint(result.vars["istota_host_env_extra"])
+    assert result.vars["istota_browser_subnet"] == "10.77.3.0/24"
+    assert {"SITE_DIR", "APT_MIRROR", "ISTOTA_BROWSER_SUBNET"}.isdisjoint(result.vars["istota_host_env_extra"])
     rendered = _render(_defaults() | result.vars)
     assert rendered["istota_host_env"]["SITE_DIR"] == "/srv/www/html"
+    assert rendered["istota_host_env"]["ISTOTA_BROWSER_SUBNET"] == "10.77.3.0/24"
 
 
 def test_an_unsigned_running_tag_is_reported():
