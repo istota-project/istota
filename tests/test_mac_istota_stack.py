@@ -97,11 +97,21 @@ if name == "lsof":
             out(f"{state['lock_holder']}\n")
             sys.exit(0)
         sys.exit(1)
-    holder = state.get("port_holder")
+    port = next((a.split(":", 1)[1] for a in argv if a.startswith("-iTCP:")), "")
+    holder = state.get("port_holders", {}).get(port) or state.get("port_holder")
     if holder:
-        out(f"COMMAND   PID USER   FD   TYPE\n{holder} 4242 me 5u IPv4 TCP 127.0.0.1:8080 (LISTEN)\n")
+        out(f"COMMAND   PID USER   FD   TYPE\n{holder} 4242 me 5u IPv4 TCP 127.0.0.1:{port} (LISTEN)\n")
         sys.exit(0)
     sys.exit(1)
+
+if name == "netstat":
+    # A listener the user's lsof cannot see: root's, or another user's.
+    out("Active Internet connections (including servers)\n"
+        "Proto Recv-Q Send-Q  Local Address  Foreign Address  (state)  rxbytes txbytes rhiwat shiwat process:pid\n")
+    for port, holder in state.get("root_holders", {}).items():
+        out(f"tcp4 0 0 127.0.0.1.{port} *.* LISTEN 0 0 131072 131072 {holder}:88\n"
+            f"tcp4 0 0 127.0.0.1.1{port} *.* LISTEN 0 0 131072 131072 other:89\n")
+    sys.exit(0)
 
 if name == "open":
     state["opened"] = True
@@ -414,7 +424,7 @@ def mac(tmp_path) -> Mac:
     stub = stubs / "stub"
     stub.write_text(STUB.replace("{python}", sys.executable))
     stub.chmod(0o755)
-    for name in ("limactl", "security", "lsof", "open", "uname", "git", "curl", "sysctl", "df", "zstd"):
+    for name in ("limactl", "security", "lsof", "netstat", "open", "uname", "git", "curl", "sysctl", "df", "zstd"):
         (stubs / name).symlink_to(stub)
     state = tmp_path / "state.json"
     state.write_text(json.dumps({"key": KEY}))
@@ -848,6 +858,16 @@ class TestCreate:
         limactl = [c[0] for c in mac.calls("limactl") if c[0] != "shell"]
         assert "create" not in limactl and "start" in limactl
 
+    def test_a_stopped_instance_whose_port_was_taken_is_not_started(self, mac):
+        """#969, create's half: a re-run starts a stopped VM the same way."""
+        assert _create(mac).returncode == 0
+        mac.set(instance={"name": "istota", "status": "Stopped"}, port_holders={"8080": "ollama"})
+        mac.calls_path.unlink()
+        result = mac.run("create")
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "ollama" in result.stderr
+        assert not any(c[:1] == ["start"] for c in mac.calls("limactl"))
+
     def test_a_taken_port_is_refused_with_its_holder(self, mac):
         mac.set(port_holder="ollama")
         result = _create(mac)
@@ -1250,6 +1270,42 @@ class TestTheVmsLife:
         assert running.run("start").returncode == 0
         assert running.calls("limactl") == [["list", "--format", "{{.Status}}", "istota"],
                                             ["start", "--tty=false", "istota"]]
+
+    def test_start_refuses_a_web_port_taken_since_create(self, running):
+        """#969: Lima's host agent logs the bind failure and starts anyway, and
+        whatever holds the port answers the web UI's address."""
+        running.set(instance={"name": "istota", "status": "Stopped"},
+                    port_holders={"8181": "limactl-vm1"})
+        result = running.run("start")
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "port 8181" in result.stderr and "limactl-vm1" in result.stderr
+        assert "--port" not in result.stderr
+        assert not any(c[:1] == ["start"] for c in running.calls("limactl"))
+
+    def test_start_sees_a_root_listener_lsof_cannot(self, running):
+        """The user's lsof sees only their own sockets; netstat sees them all."""
+        running.set(instance={"name": "istota", "status": "Stopped"}, root_holders={"8181": "nginx"})
+        result = running.run("start")
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "nginx 127.0.0.1.8181" in result.stderr
+        assert "other" not in result.stderr
+        assert not any(c[:1] == ["start"] for c in running.calls("limactl"))
+
+    def test_start_warns_about_the_other_forwarded_ports(self, running):
+        running.set(instance={"name": "istota", "status": "Stopped"},
+                    port_holders={"6080": "com.docker", "9223": "com.docker"})
+        result = running.run("start")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "WARNING: port 6080" in result.stdout and "WARNING: port 9223" in result.stdout
+        assert "32768" not in result.stdout
+        assert ["start", "--tty=false", "istota"] in running.calls("limactl")
+
+    def test_a_running_vm_holds_its_own_port(self, running):
+        running.set(port_holders={"8181": "limactl"})
+        result = running.run("start")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "already running" in result.stdout
+        assert running.calls("lsof") == []
 
     def test_stop_takes_the_stack_down_first(self, running):
         assert running.run("stop").returncode == 0

@@ -321,18 +321,54 @@ prepare_folder() {
     log "workspace: ${folder}"
 }
 
+# What listens on TCP port $1 on this Mac: a header line, then one line per
+# listener with the process name first, or nothing. The user's lsof does not
+# see another user's or root's sockets, which netstat does, so netstat's
+# LISTEN lines for the port stand in when lsof prints nothing.
+port_holders() {
+    local holders
+    holders="$(lsof -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null || true)"
+    if [ -z "$holders" ] && command -v netstat >/dev/null 2>&1; then
+        holders="$(netstat -anv -p tcp 2>/dev/null | awk -v suffix=".$1" '
+            $6 == "LISTEN" && length($4) > length(suffix) && substr($4, length($4) - length(suffix) + 1) == suffix {
+                name = $11
+                sub(/:[0-9]+$/, "", name)
+                if (name == "") name = "unknown"
+                lines = lines name " " $4 "\n"
+            }
+            END { if (lines != "") printf "COMMAND ADDRESS\n%s", lines }' || true)"
+    fi
+    [ -z "$holders" ] || printf '%s\n' "$holders"
+}
+
+# $2 is what to do about a taken port, for the refusal's last line.
 require_port_free() {
-    local port="$1" holders
+    local port="$1" advice="${2:-Stop that, or choose another port with --port.}" holders
     if ! command -v lsof >/dev/null 2>&1; then
         log "WARNING: no lsof to check that port ${port} is free"
         return 0
     fi
-    holders="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+    holders="$(port_holders "$port")"
     if [ -n "$holders" ]; then
         fail "$EX_CONFIG" "port ${port} on this Mac is taken:
 ${holders}
-Stop that, or choose another port with --port."
+${advice}"
     fi
+}
+
+# Lima also forwards every port the VM listens on at its loopback: the
+# browser's VNC and API ports, and the ephemeral one nginx's unused TLS slot
+# usually takes. Lima skips one that is taken and starts anyway; only the web
+# port breaks the window, so these are warned about.
+OTHER_FORWARDED_PORTS="6080 9223 32768"
+
+warn_other_ports_held() {
+    command -v lsof >/dev/null 2>&1 || return 0
+    local port holders
+    for port in $OTHER_FORWARDED_PORTS; do
+        holders="$(port_holders "$port" | awk 'NR > 1 { print $1 }' | sort -u | tr '\n' ' ')"
+        [ -z "$holders" ] || log "WARNING: port ${port} on this Mac is held by ${holders}so Lima will not forward the VM's ${port} to it."
+    done
 }
 
 # A plain file of create's keys and no other: the test that keeps the
@@ -999,6 +1035,9 @@ cmd_create() {
         require_new_vm_inputs
         require_port_free "$port"
         size_new_vm
+    elif [ "$status" != Running ]; then
+        # The forward the VM was made with, which a --port now does not move.
+        require_port_free "$(port_or_default)" "Stop that, then run this again."
     fi
     prepare_folder "$folder" "$adopt"
     # The signing key is public; kept so a re-run or a restore can make the VM again.
@@ -1286,8 +1325,15 @@ cmd_start() {
     if [ ! -f "${folder}/${MARKER}" ]; then
         log "WARNING: ${folder} has no ${MARKER}; the stack refuses to start without it."
     fi
-    [ "$status" = Running ] || exec limactl start --tty=false "$INSTANCE"
-    log "${INSTANCE} is already running"
+    if [ "$status" = Running ]; then
+        log "${INSTANCE} is already running"
+        return 0
+    fi
+    # A running VM holds its own port; a stopped one's may have been taken
+    # since, and Lima would start with whatever holds it answering the web UI.
+    require_port_free "$(port_or_default)" "Stop that, then run \`istota-stack start\` again."
+    warn_other_ports_held
+    exec limactl start --tty=false "$INSTANCE"
 }
 
 # The stack first, so SQLite closes cleanly, bounded so a hung stack cannot
@@ -1334,7 +1380,7 @@ cmd_status() {
     probe="$(vm sh -c "$VM_PROBE" </dev/null || true)"
     echo "Deployed:   $(probe_value "$probe" tag)"
     if command -v lsof >/dev/null 2>&1; then
-        holders="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 { print $1 }' | sort -u || true)"
+        holders="$(port_holders "$port" | awk 'NR > 1 { print $1 }' | sort -u || true)"
         # NGINX_PUBLISH is ADDR:HOSTPORT:80; the host port is what Lima forwards to.
         published="$(probe_value "$probe" publish)"
         published="${published%:*}"

@@ -116,7 +116,7 @@ istota-stack update            # the newest signed release, then refresh the Mac
 istota task "..." -u alice -x  # the istota CLI, in the daemon container as uid 10001
 ```
 
-`stop` stops the stack before the VM so SQLite closes its files cleanly. `autostart on` runs `limactl autostart enable`, which writes a LaunchAgent that starts the VM at your next login; it does not start or stop a running VM.
+`stop` stops the stack before the VM so SQLite closes its files cleanly. `start` refuses (exit 78) when another program has taken the web port since the VM was made, and names it: Lima would otherwise start without its forward, and that program would answer `http://localhost:<port>/istota`. It warns about 6080, 9223 and 32768, which Lima also forwards for the browser and nginx, and starts. `autostart on` runs `limactl autostart enable`, which writes a LaunchAgent that starts the VM at your next login; it does not start or stop a running VM.
 
 Every other verb is the VM's own `istota-stack`, run as root in the VM with its arguments unchanged and its exit status passed back: `rollback`, `setup-cancel`, `exec`, `compose`, `up`, `down`, `check-image` and the rest. `apply <plan>` and `import-bare-metal <dir>` take a path on the Mac: it is copied into a directory of its own in the VM for the call and removed afterwards.
 
