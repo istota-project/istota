@@ -2746,7 +2746,8 @@ def _validate_push_content(push: PushConfig) -> None:
     if push.content == "private" and not push.signing_key_path.strip():
         raise ValueError(
             '[push] content = "private" needs signing_key_path (or '
-            "ISTOTA_PUSH_SIGNING_KEY_PATH); run `istota push keygen` to create the key."
+            "ISTOTA_PUSH_SIGNING_KEY_PATH); run `istota push keygen` (`istota-stack push-key create` "
+            "on the stack) to create the key."
         )
 
 

@@ -3676,7 +3676,8 @@ def cmd_push_test(args):
         try:
             signing_key = envelope.load_signing_key(config.push.signing_key_path)
         except envelope.KeyFileError as exc:
-            print(f"Private push is configured but {exc}; run `istota push keygen` or fix the path.",
+            print(f"Private push is configured but {exc}; run `istota push keygen` "
+                  "(`istota-stack push-key create` on the stack) or fix the path.",
                   file=sys.stderr)
             return 1
     try:
@@ -3723,8 +3724,12 @@ def cmd_push_test(args):
         return 1
 
 
-def cmd_push_keygen(args):
-    """Write the private push signing key; prints its key ID, never the key."""
+#: The most `istota push import-key` reads from stdin; a PEM Ed25519 key is about 120 bytes.
+_PUSH_KEY_STDIN_LIMIT = 64 * 1024
+
+
+def _write_push_signing_key(args, stack_action: str, given=None):
+    """Write the push signing key pair, the `given` key or a fresh one; prints its key ID, never the key."""
     from istota.push import envelope
 
     config = load_config(Path(args.config) if args.config else None)
@@ -3733,15 +3738,17 @@ def cmd_push_keygen(args):
         print("Set [push] signing_key_path (or ISTOTA_PUSH_SIGNING_KEY_PATH) first.", file=sys.stderr)
         return 1
     try:
-        key = envelope.write_signing_key(path, force=args.force)
+        key = envelope.write_signing_key(path, force=args.force, given=given)
     except FileExistsError:
         print(f"A push signing key already exists at {path}; pass --force to replace it.", file=sys.stderr)
         return 1
     except OSError as exc:
         if exc.errno == errno.EROFS:
+            stack_command = f"istota-stack push-key {stack_action}" + (" --force" if args.force else "")
             print("Could not write the push signing key: the config directory is read-only here, as it is in "
-                  "the stack's daemon container. On the stack, the management role's `istota_push` task "
-                  "creates a missing key.", file=sys.stderr)
+                  f"the stack's daemon container. On the stack, run `{stack_command}` on "
+                  "the VM, or, where the management role manages the stack, its `istota_push` task.",
+                  file=sys.stderr)
             return 1
         print(f"Could not write the push signing key ({type(exc).__name__}).", file=sys.stderr)
         return 1
@@ -3752,8 +3759,34 @@ def cmd_push_keygen(args):
     return 0
 
 
+def cmd_push_keygen(args):
+    """Write a new private push signing key."""
+    return _write_push_signing_key(args, "create")
+
+
+def cmd_push_import_key(args):
+    """Write the private push signing key read from stdin: unencrypted PKCS8 PEM, Ed25519 only."""
+    from istota.push import envelope
+
+    if sys.stdin.isatty():
+        print("Pipe the private push signing key on stdin; it is never read from a terminal or a path.",
+              file=sys.stderr)
+        return 1
+    data = sys.stdin.buffer.read(_PUSH_KEY_STDIN_LIMIT + 1)
+    if len(data) > _PUSH_KEY_STDIN_LIMIT:
+        print("What came on stdin is too long to be a push signing key; nothing was written.", file=sys.stderr)
+        return 1
+    try:
+        key = envelope.parse_signing_key(data)
+    except envelope.KeyFileError as exc:
+        print(f"Not imported: {exc}. Nothing was written.", file=sys.stderr)
+        return 1
+    return _write_push_signing_key(args, "import", given=key)
+
+
 def cmd_push(args):
-    return {"test": cmd_push_test, "keygen": cmd_push_keygen}[args.push_action](args)
+    return {"test": cmd_push_test, "keygen": cmd_push_keygen,
+            "import-key": cmd_push_import_key}[args.push_action](args)
 
 
 def cmd_calendar_test(args):
@@ -5430,6 +5463,13 @@ def main():
         "keygen", help="Write the private push signing key to [push] signing_key_path",
     )
     push_keygen.add_argument(
+        "--force", action="store_true",
+        help="Replace an existing key; every enrolled device must re-enroll",
+    )
+    push_import_key = push_commands.add_parser(
+        "import-key", help="Write the private push signing key read from stdin to [push] signing_key_path",
+    )
+    push_import_key.add_argument(
         "--force", action="store_true",
         help="Replace an existing key; every enrolled device must re-enroll",
     )
