@@ -119,6 +119,7 @@ HOST_ENV_VARS = {
     "HOST_LOOPBACK_BLOCK": "istota_host_loopback_block",
     "HOST_GATEWAY_ADDR": "istota_host_gateway_addr",
     "HOST_LOOPBACK_ALLOW": "istota_host_loopback_allow",
+    "ISTOTA_BROWSER_SUBNET": "istota_browser_subnet",
     "SITE_DIR": "istota_site_dir",
 }
 

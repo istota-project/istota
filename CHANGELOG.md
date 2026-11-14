@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Location's Today page no longer shows a negative time such as "-444m" beside the current place when the visit's first ping is timestamped later than the server's clock. It shows no duration until that time has passed. (#961)
 - A scheduled job whose `cron` is not a valid schedule is now reported as a problem in CRON.md and not loaded. Before, one such job stopped every scheduled job on the installation from running until it was fixed. (#959)
 - Istota's images no longer carry icalendar-searcher, an AGPL-3.0 package that came in with the CalDAV library's 2.x line. The library is now pinned to 1.x, and calendar reads keep each event's own time zone and repeat recurring events as before. (#944)
+- `istota migrate role-vars` now prints a VM's browser network as `istota_browser_subnet`, the management role's own variable for it. It used to land among the keys the role has no variable for. (#963)
 - Settings shows purchase times on the Wallet page, credential activity and history, a connected service's "Updated" line, and the calendar feed link's "made" and "last read" times in your own time zone. They were shown as if UTC were local time, so anywhere west of Greenwich a purchase looked hours later than it was. (#955)
 
 ## [0.49.0] - 2026-11-13
