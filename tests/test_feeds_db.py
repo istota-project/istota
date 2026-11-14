@@ -1752,6 +1752,131 @@ class TestSchemaV8Migration:
         assert feeds_db.MAX_ENTRIES_PER_FEED_KEY not in keys
 
 
+class TestSchemaV10Migration:
+    """ISSUE-957. Rows written before ``html_to_text`` decoded character
+    references hold ``&#x27;`` and ``&quot;`` in their plain text."""
+
+    def _v9_db(self, tmp_path):
+        path, rss_id = _seed_one_feed(tmp_path)
+        with feeds_db.connect(path) as conn:
+            arena_id = feeds_db.upsert_feed(
+                conn, url="https://www.are.na/someone/channel", title=None,
+                site_url=None, source_type="arena", category_id=None,
+                poll_interval_minutes=30,
+            )
+            ids = {}
+            for key, feed_id, title, html, text in (
+                ("derived", rss_id, "A patient&#x27;s choice",
+                 "<p>The patient&#x27;s &quot;supply disruption&quot; &amp;lt;b&amp;gt;</p>",
+                 "The patient&#x27;s &quot;supply disruption&quot; &amp;lt;b&amp;gt;"),
+                ("joined", arena_id, "Tom &amp; Jerry",
+                 "<p>it&#x27;s</p>", "it&#x27;s — https://example.com/x"),
+                ("clean", rss_id, "Plain", "<p>plain</p>", "plain"),
+                ("double", rss_id, "Tom &amp;amp; Jerry", None, None),
+                ("loose", rss_id, "R&D &notes", None, None),
+            ):
+                ids[key] = conn.execute(
+                    "INSERT INTO feed_entries(feed_id, guid, title, content_html, "
+                    "content_text, fetched_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (feed_id, key, title, html, text, "2026-01-01T00:00:00+00:00"),
+                ).lastrowid
+            conn.execute(
+                "UPDATE feeds SET title = 'News &amp; Notes' WHERE id = ?", (rss_id,)
+            )
+            conn.execute(
+                "UPDATE feeds SET title = 'Arts &amp; Letters' WHERE id = ?", (arena_id,)
+            )
+            conn.execute("UPDATE schema_meta SET value='9' WHERE key='version'")
+            conn.commit()
+        return path, ids
+
+    def _row(self, conn, entry_id):
+        return conn.execute(
+            "SELECT title, content_text FROM feed_entries WHERE id = ?", (entry_id,)
+        ).fetchone()
+
+    def test_derived_text_and_rss_titles_are_decoded_and_reindexed(self, tmp_path):
+        path, ids = self._v9_db(tmp_path)
+
+        feeds_db.init_db(path)
+
+        with feeds_db.connect(path) as conn:
+            row = self._row(conn, ids["derived"])
+            assert row["title"] == "A patient's choice"
+            assert row["content_text"] == 'The patient\'s "supply disruption" &lt;b&gt;'
+            fts = conn.execute(
+                "SELECT rowid FROM feed_entries_fts WHERE feed_entries_fts MATCH 'x27'"
+            ).fetchall()
+            assert [r[0] for r in fts] == [ids["joined"]]
+            phrase = conn.execute(
+                "SELECT rowid FROM feed_entries_fts WHERE feed_entries_fts "
+                "MATCH '\"supply disruption\"'"
+            ).fetchall()
+            assert [r[0] for r in phrase] == [ids["derived"]]
+            conn.execute(
+                "INSERT INTO feed_entries_fts(feed_entries_fts, rank) "
+                "VALUES ('integrity-check', 1)"
+            )
+            version = conn.execute(
+                "SELECT value FROM schema_meta WHERE key='version'"
+            ).fetchone()["value"]
+        assert version == str(feeds_db.SCHEMA_VERSION)
+
+    def test_a_second_run_does_not_decode_twice(self, tmp_path):
+        path, ids = self._v9_db(tmp_path)
+
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            feeds_db._migrate_v9_to_v10(conn)
+            conn.commit()
+            assert self._row(conn, ids["double"])["title"] == "Tom &amp; Jerry"
+
+    def test_an_opener_after_the_migration_commits_does_not_decode_again(self, tmp_path):
+        # init_db's executescript commits the migration before init_db writes
+        # the version, so a second opener can land in between.
+        path, ids = self._v9_db(tmp_path)
+        with feeds_db.connect(path) as first:
+            feeds_db._migrate_v9_to_v10(first)
+            first.executescript(feeds_db.SCHEMA_SQL)
+            feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            assert self._row(conn, ids["double"])["title"] == "Tom &amp; Jerry"
+
+    def test_rss_feed_titles_are_decoded(self, tmp_path):
+        path, _ = self._v9_db(tmp_path)
+
+        feeds_db.init_db(path)
+
+        with feeds_db.connect(path) as conn:
+            titles = {
+                r["source_type"]: r["title"]
+                for r in conn.execute("SELECT source_type, title FROM feeds")
+            }
+        assert titles == {"rss": "News & Notes", "arena": "Arts &amp; Letters"}
+
+    def test_a_title_without_a_well_formed_reference_is_left_alone(self, tmp_path):
+        path, ids = self._v9_db(tmp_path)
+
+        feeds_db.init_db(path)
+
+        with feeds_db.connect(path) as conn:
+            assert self._row(conn, ids["loose"])["title"] == "R&D &notes"
+
+    def test_text_not_derived_from_the_html_is_left_alone(self, tmp_path):
+        # An Are.na body joined with its source URL is not html_to_text of
+        # the stored HTML, and a provider's plain title is already text.
+        path, ids = self._v9_db(tmp_path)
+
+        feeds_db.init_db(path)
+
+        with feeds_db.connect(path) as conn:
+            joined = self._row(conn, ids["joined"])
+            clean = self._row(conn, ids["clean"])
+        assert joined["title"] == "Tom &amp; Jerry"
+        assert joined["content_text"] == "it&#x27;s — https://example.com/x"
+        assert (clean["title"], clean["content_text"]) == ("Plain", "plain")
+
+
 class TestPollClaims:
     def test_claim_succeeds_and_writes_the_lease(self, tmp_path):
         path, feed_id = _seed_one_feed(tmp_path)

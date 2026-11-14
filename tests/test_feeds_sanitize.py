@@ -9,6 +9,7 @@ no feedparser.
 from istota.feeds.sanitize import (
     dedupe_image_variants,
     extract_images,
+    html_to_text,
     image_identity,
     remove_images,
     sanitize_html,
@@ -257,6 +258,24 @@ class TestBodyLinkProtocols:
         assert sanitize_html(once) == once
 
 
+class TestHtmlToText:
+    """ISSUE-957. ``content_text`` is plain text, so character references
+    in the HTML are decoded rather than stored as literal ``&#x27;``."""
+
+    def test_entities_are_decoded(self):
+        html = "<p>The patient&#x27;s &quot;supply disruption&quot; &amp; more</p>"
+        assert html_to_text(html) == 'The patient\'s "supply disruption" & more'
+
+    def test_escaped_markup_becomes_text_not_a_stripped_tag(self):
+        assert html_to_text("<p>use &lt;b&gt;bold&lt;/b&gt;</p>") == "use <b>bold</b>"
+
+    def test_decoded_once_only(self):
+        assert html_to_text("<p>&amp;lt;tag&amp;gt;</p>") == "&lt;tag&gt;"
+
+    def test_whitespace_from_entities_collapses(self):
+        assert html_to_text("<p>a&nbsp;&nbsp;b&#10;c</p>") == "a b c"
+
+
 class TestWithoutBleach:
     """ISSUE-780. With bleach missing, no HTML is stored at all.
 
@@ -293,6 +312,10 @@ class TestWithoutBleach:
         assert "1 &lt; 2 &amp; bold" in out
         assert "&lt;img src=x onerror=alert(1)&gt;" in out
         assert "p{}" not in out
+
+    def test_escaped_entity_text_is_not_decoded_twice(self, monkeypatch):
+        self._no_bleach(monkeypatch)
+        assert sanitize_html("<p>&amp;lt;tag&amp;gt; it&#x27;s</p>") == "&amp;lt;tag&amp;gt; it's"
 
     def test_markup_only_input_is_none(self, monkeypatch):
         self._no_bleach(monkeypatch)
