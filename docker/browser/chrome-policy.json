@@ -1,3 +1,7 @@
 {
-  "WebRtcIPHandling": "disable_non_proxied_udp"
+  "WebRtcIPHandling": "disable_non_proxied_udp",
+  "PasswordManagerEnabled": false,
+  "PasswordLeakDetectionEnabled": false,
+  "AutofillCreditCardEnabled": false,
+  "AutofillAddressEnabled": false
 }

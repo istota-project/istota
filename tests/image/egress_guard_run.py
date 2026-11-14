@@ -26,8 +26,8 @@ PRIVATE_PORT = 18081
 STUN_PORT = 18082
 QUIC_PORT = 18083
 GRANTED = "granted.internal"
-POLICY = "/etc/opt/chrome/policies/managed/istota-egress.json"
-POLICY_ASIDE = "/tmp/istota-egress.json"
+POLICY = "/etc/opt/chrome/policies/managed/istota.json"
+POLICY_ASIDE = "/tmp/istota-policy.json"
 
 
 def own_address():

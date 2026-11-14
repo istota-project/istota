@@ -140,7 +140,9 @@ COPY browse_api.py browser_server.py chrome.py pool.py browsing.py render.py tex
 COPY document_render.py pdf_text.py pdf_child.py egress_proxy.py ./
 # WebRTC's UDP skips a proxy. Chrome ignores --force-webrtc-ip-handling-policy
 # here (measured in tests/image), and this path is root's, out of a profile's reach.
-COPY chrome-policy.json /etc/opt/chrome/policies/managed/istota-egress.json
+# Chrome's save prompts are off too: one opens over the page and takes the next
+# X11 click aimed at a field beneath it (#954).
+COPY chrome-policy.json /etc/opt/chrome/policies/managed/istota.json
 COPY lib/ ./lib/
 COPY novnc-web/ /usr/share/novnc/
 COPY entrypoint.sh .
