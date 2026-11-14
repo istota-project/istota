@@ -1117,6 +1117,16 @@ done
 """)
 
 
+def remove_browser_rules(vm: Vm) -> None:
+    """The browser's DOCKER-USER rules gone, as on a VM that never ran the
+    egress unit: `no-browser-firewall` (row 17) and its host-folder twin (L2)."""
+    vm.run("""
+iptables -w 5 -S DOCKER-USER | { grep -F 'istota-browser:' || true; } | sed 's/^-A /-D /' | while read -r rule; do
+    eval "iptables -w 5 ${rule}"
+done
+""")
+
+
 def ensure_proxied_namespaces(vm: Vm) -> None:
     """A bridge holding LISTEN_ADDR, with an upstream and an outsider namespace on it."""
     vm.run(f"""

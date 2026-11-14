@@ -30,7 +30,8 @@
 #   any:       no-host-bounds (row 15)
 #   nextcloud: no-storage-refusal (row 9), localize-without-config and
 #              localize-stops-mount-at-once (istota-stack localize-workspace)
-#   host-folder: no-workspace-marker (row L1), host-loopback-unblocked (row L2),
+#   host-folder: no-workspace-marker (row L1), host-loopback-unblocked,
+#              no-browser-firewall-on-host-folder (row L2),
 #              default-mounts-in-template (row L3), mac-shim-without-drop (row L4)
 #   proxied:   no-allow-list, no-docker-user-rule (row 18),
 #              role-user-settings-unchecked (the management role's --check)
@@ -190,8 +191,10 @@ control no-workspace-marker \
 H="$VM/test_host_folder.py::TestTheMacLoopbackIsClosedToContainers"
 control host-loopback-unblocked \
     "row L2: HOST_LOOPBACK_BLOCK=0, the egress unit re-run" \
-    "$H::test_the_daemon_reaches_the_allowed_port_only" \
-    "$H::test_the_browser_reaches_the_allowed_port_only"
+    "$H::test_the_daemon_reaches_the_allowed_port_only"
+control no-browser-firewall-on-host-folder \
+    "row L2: the browser's own DOCKER-USER rules removed, so the allow list opens the model port to it" \
+    "$H::test_the_browser_reaches_neither_port"
 M="$VM/test_host_folder.py::TestOnlyTheFolderCrossesFromTheMac"
 control default-mounts-in-template \
     "row L3: the template with template:_default/mounts in its base, so the Mac home is mounted" \

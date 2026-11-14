@@ -92,11 +92,7 @@ def stack(local_stack):
             vm.run(f"docker network disconnect istota_default {cid}")
         return
     if lima.control() == "no-browser-firewall":
-        vm.run("""
-iptables -w 5 -S DOCKER-USER | { grep -F 'istota-browser:' || true; } | sed 's/^-A /-D /' | while read -r rule; do
-    eval "iptables -w 5 ${rule}"
-done
-""")
+        lima.remove_browser_rules(vm)
         try:
             yield vm
         finally:
