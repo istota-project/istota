@@ -3,6 +3,7 @@ from istota.credentials import kdbx_import as credential_read
 import base64
 import io
 import json
+import re
 
 from pykeepass import PyKeePass
 from istota import db
@@ -51,7 +52,7 @@ async def test_limit_consumes_code(signed_client, config, mail, cheap):
     response = await signed_client.post(BASE, json=proof, headers=ORIGIN)
     assert response.status_code == 429
     assert response.json()["detail"] == "export_rate_limited"
-    assert response.json()["next_allowed_at"]
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", response.json()["next_allowed_at"])
     assert (await signed_client.post(BASE, json=proof, headers=ORIGIN)).status_code == 403
 
 

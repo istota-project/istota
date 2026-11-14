@@ -129,6 +129,15 @@ async def test_listing_shows_only_the_signed_in_users_accounts(signed_client, co
     assert listing["accounts"] == []
 
 
+async def test_updated_at_is_a_utc_instant(signed_client, config):  # noqa: F811
+    """The column is naive UTC, which a browser reads as local time (#955)."""
+    account = await create(signed_client)
+    with db.get_db(config.db_path) as conn:
+        conn.execute("UPDATE mail_accounts SET updated_at='2026-11-13 19:58:34' WHERE id=?", (account["id"],))
+    [row] = (await signed_client.get(BASE)).json()["accounts"]
+    assert row["updated_at"] == "2026-11-13T19:58:34Z"
+
+
 # ---------------------------------------------------------------------------
 # No password on any response path
 # ---------------------------------------------------------------------------

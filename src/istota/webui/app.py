@@ -16181,10 +16181,10 @@ def _build_service_card(
         )
         if isinstance(value, str):
             values[f["key"]] = value
-    last_updated = max(
+    last_updated = _iso_utc(max(
         (entry["updated_at"] or "" for entry in stored.get(service, [])),
         default="",
-    ) or None
+    ) or None)
     card = {
         "service": service,
         "label": schema["label"],
@@ -16531,7 +16531,7 @@ def _export_limit(conn, user_id):
     ).fetchall()
     if len(rows) >= limit:
         raise HTTPException(status_code=429, detail={"detail": "export_rate_limited",
-                                                     "next_allowed_at": rows[limit - 1][0]})
+                                                     "next_allowed_at": _iso_utc(rows[limit - 1][0])})
 
 
 def _build_credential_export(user_id, keyfile, ip, user_agent):
@@ -16744,6 +16744,9 @@ async def _read_wallet_body(request: Request, operation: str) -> dict:
     return body
 
 
+_WALLET_PURCHASE_TIMES = ("created_at", "updated_at", "authorized_at", "expires_at", "last_filled_at")
+
+
 def _wallet_settings(user_id: str) -> dict:
     from dataclasses import asdict
     from istota import db
@@ -16757,6 +16760,8 @@ def _wallet_settings(user_id: str) -> dict:
             task = db.get_task(conn, purchase["task_id"])
             purchase["room_token"] = canonical_token(conn, task.conversation_token) if task and task.user_id == user_id else None
             purchase["extra_hosts"] = json.loads(purchase["extra_hosts"])
+            for column in _WALLET_PURCHASE_TIMES:
+                purchase[column] = _iso_utc(purchase[column])
         return {"currency_precision": {"default": 2, "exceptions": CURRENCY_EXPONENTS},
                 "refusal": _web_vault_refusal(user_id),
                 "cards": [asdict(card) for card in cards.list_cards(conn, user_id)],
@@ -16911,7 +16916,7 @@ def _mail_account_dict(account) -> dict:
         "sent_folder": account.sent_folder, "enabled": account.enabled,
         "imap_password_set": account.has_imap_password,
         "smtp_password_set": account.has_smtp_password,
-        "pending_drafts": account.pending_drafts, "updated_at": account.updated_at,
+        "pending_drafts": account.pending_drafts, "updated_at": _iso_utc(account.updated_at),
     }
 
 
@@ -17185,7 +17190,7 @@ def _shared_feed_dict(source) -> dict:
     return {
         "id": source.id, "host": source.remote_host, "name": source.extras.get("name"),
         "state": source.state, "last_reason": source.last_reason,
-        "last_ok_at": source.last_ok_at, "created_at": source.created_at,
+        "last_ok_at": _iso_utc(source.last_ok_at), "created_at": _iso_utc(source.created_at),
     }
 
 
@@ -17220,7 +17225,7 @@ def _ocm_offer_dict(source) -> dict:
         "id": source.id, "name": source.extras.get("name"), **_ocm_people(source),
         "host": source.remote_host, "reoffer": source.state != "pending",
         "signed": signed if isinstance(signed, bool) else None,
-        "created_at": source.created_at,
+        "created_at": _iso_utc(source.created_at),
     }
 
 
@@ -17236,8 +17241,8 @@ def _ocm_share_dict(source) -> dict:
         "id": source.id, "name": source.extras.get("name"), **_ocm_people(source),
         "host": source.remote_host, "access": source.access, "state": source.state,
         "kind": kind if kind in ("file", "folder") else None,
-        "last_reason": source.last_reason, "created_at": source.created_at,
-        "accepted_at": accepted if isinstance(accepted, str) else None,
+        "last_reason": source.last_reason, "created_at": _iso_utc(source.created_at),
+        "accepted_at": _iso_utc(accepted) if isinstance(accepted, str) else None,
     }
 
 
@@ -17305,6 +17310,8 @@ def _sharing_listing(user_id: str) -> dict:
     with db.get_db(_config.db_path) as conn:
         feeds = sources.sources_for_user(conn, user_id, kinds=("ics_feed",))
         feed_link = events.token_info(conn, user_id)
+        if feed_link is not None:
+            feed_link = {key: _iso_utc(value) for key, value in feed_link.items()}
         receiving = bool(_config.sharing.ocm.enabled and _config.site.hostname)
         shares = sources.sources_for_user(conn, user_id, kinds=("ocm_share",))
         # With OCM off the section stays while shares do, so they can still
@@ -17789,6 +17796,12 @@ async def _require_step_up(request: Request, body: dict, action: str) -> JSONRes
                          "reason": reason}, status_code=403, headers={"Cache-Control": "no-store"})
 
 
+def _credential_rows(rows: list[dict]) -> JSONResponse:
+    """Each row's `at` is a naive UTC column default; the page needs it as an instant."""
+    rows = [{**row, "at": _iso_utc(row["at"])} for row in rows]
+    return JSONResponse(rows, headers={"Cache-Control": "no-store"})
+
+
 @api_router.get("/settings/credentials/activity")
 async def settings_credential_activity(user: dict = Depends(_require_api_auth),
                                        _csrf: None = Depends(_verify_origin)):
@@ -17798,7 +17811,7 @@ async def settings_credential_activity(user: dict = Depends(_require_api_auth),
     def read():
         with db.get_db(_config.db_path) as conn:
             return audit.recent(conn, user["username"])
-    return JSONResponse(await asyncio.to_thread(read), headers={"Cache-Control": "no-store"})
+    return _credential_rows(await asyncio.to_thread(read))
 
 
 @api_router.get("/settings/credentials/deleted")
@@ -17806,8 +17819,7 @@ async def settings_credential_deleted(user: dict = Depends(_require_api_auth),
                                       _csrf: None = Depends(_verify_origin)):
     from istota.credentials import store
     await _credential_isolation(user["username"])
-    return JSONResponse(await asyncio.to_thread(store.list_deleted, _config.db_path, user["username"]),
-                        headers={"Cache-Control": "no-store"})
+    return _credential_rows(await asyncio.to_thread(store.list_deleted, _config.db_path, user["username"]))
 
 
 @api_router.get("/settings/credentials/{name}/history")
@@ -17815,8 +17827,7 @@ async def settings_credential_history(name: str, user: dict = Depends(_require_a
                                       _csrf: None = Depends(_verify_origin)):
     from istota.credentials import store
     await _credential_isolation(user["username"])
-    return JSONResponse(await asyncio.to_thread(store.list_history, _config.db_path, user["username"], name),
-                        headers={"Cache-Control": "no-store"})
+    return _credential_rows(await asyncio.to_thread(store.list_history, _config.db_path, user["username"], name))
 
 
 @api_router.post("/settings/credentials/history/{history_id}/restore")

@@ -128,3 +128,16 @@ describe('an ordinary service card', () => {
     expect(get(headerSave)).toBeNull();
   });
 });
+
+describe('the last-updated line', () => {
+  // The server sends a UTC instant; printed raw it read as local time (#955).
+  it('renders the instant as a timestamp, not the raw string', () => {
+    const at = '2026-11-13T19:58:34Z';
+    render(ServiceCard, { service: card({ last_updated: at }) });
+
+    const time = document.querySelector('time');
+    expect(time?.getAttribute('datetime')).toBe(at);
+    expect(time?.closest('.caption')?.textContent).toMatch(/^Updated /);
+    expect(document.body.textContent).not.toContain(at);
+  });
+});
