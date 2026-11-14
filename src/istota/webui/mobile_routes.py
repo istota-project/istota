@@ -44,8 +44,13 @@ async def mobile_config(request: Request) -> JSONResponse:
     if direct_push and push.content == "private" and push.signing_key_path.strip():
         push_capabilities["private"] = {"versions": [1]}
     # The load normalized the URL and held it to private content and a key.
-    # The app compares it, path included, with its compiled-in relay.
+    # The app compares it, path included, with its compiled-in relay. Relay
+    # delivery is private only: `private` is the envelope, `relay` the
+    # transport. The web page enrolls privately only on `delivery == "direct"`,
+    # and the 0.15 shell enrolls only when the page asks, so an older app does
+    # not enroll on these keys.
     if dispatching and push.delivery == "relay":
+        push_capabilities["private"] = {"versions": [1]}
         push_capabilities["relay"] = {"versions": [1], "url": push.relay_url}
     # The only config string serialized is the relay URL, bounded at load, so
     # every branch stays well within the client's 64 KiB discovery limit.

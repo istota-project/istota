@@ -337,6 +337,16 @@ it('keeps the plain path on a 0.14.0 shell even when the server offers private p
 
 it.each([
   ['delivery is unavailable', { push: { delivery: 'unavailable', private: { versions: [1] } } }],
+  [
+    'the server delivers through a relay',
+    {
+      push: {
+        delivery: 'unavailable',
+        private: { versions: [1] },
+        relay: { versions: [1], url: 'https://relay.example.com/istota' },
+      },
+    },
+  ],
   ['no private key is advertised', { push: { delivery: 'direct' } }],
   ['only another version is offered', { push: { delivery: 'direct', private: { versions: [2] } } }],
 ])('keeps the plain path when %s', async (_label, body) => {

@@ -102,9 +102,11 @@ async def test_relay_delivery_is_a_separate_key_and_delivery_stays_unavailable(c
     configured._config.push = _relay_push()
     response = await client.get(URL)
     # Shells 0.12 to 0.14 accept only `unavailable` and `direct`; the path is
-    # part of the URL the app compares, so it is sent whole.
+    # part of the URL the app compares, so it is sent whole. Relay delivery is
+    # private only, so the envelope versions ride beside the transport.
     assert response.json()["push"] == {
         "delivery": "unavailable",
+        "private": {"versions": [1]},
         "relay": {"versions": [1], "url": RELAY},
     }
     assert "signing.key" not in response.text
@@ -116,6 +118,7 @@ async def test_relay_delivery_never_reports_direct_even_with_apns_settings(clien
                                           apns_key_id="example-key", apns_team_id="example-team")
     push = (await client.get(URL)).json()["push"]
     assert push["delivery"] == "unavailable"
+    assert push["private"] == {"versions": [1]}
     assert push["relay"] == {"versions": [1], "url": RELAY}
 
 
