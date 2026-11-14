@@ -874,7 +874,7 @@ Native iOS push through APNs. Install the `push` extra and put the APNs signing 
 | `max_age_seconds` | `300` | Chat messages older than this when a sweep reaches them are skipped rather than pushed |
 | `alert_batch_limit` | `200` | Pending notifications read per sweep |
 | `content` | `"legacy"` | `legacy` sends plaintext previews, which Apple can read. `private` encrypts previews for devices that enrolled a device key and sends every other device a fixed alert with no preview; see [private push v1](../reference/private-push-v1.md). Any other value stops the load |
-| `signing_key_path` | `""` | The Ed25519 signing key for private push, with its public half at `<path>.pub`. Required when `content = "private"`. Create it with `istota push keygen`; `--force` replaces it, and every enrolled device then has to enroll again. `ISTOTA_PUSH_SIGNING_KEY_PATH` overrides it |
+| `signing_key_path` | `""` | The Ed25519 signing key for private push, with its public half at `<path>.pub`. Required when `content = "private"`. Create it with `istota push keygen`, or on the stack `istota-stack push-key create`; `istota push import-key` (`istota-stack push-key import`) writes a saved key from stdin instead. `--force` replaces it, and every enrolled device then has to enroll again. `ISTOTA_PUSH_SIGNING_KEY_PATH` overrides it |
 
 ## `[assignments]`
 
