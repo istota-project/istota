@@ -616,10 +616,15 @@ def common_args(model_url: str) -> list[str]:
     ]
 
 
+#: For a mode without Nextcloud: a setup re-run keeps every answer it is not
+#: given, so after the nextcloud mode it would otherwise stay on the mount (#951).
+WITHOUT_NEXTCLOUD = ["--nextcloud-url", "", "--storage", "local"]
+
+
 def local_mode(model_url: str) -> Mode:
     return Mode(
         name="local",
-        setup_args=common_args(model_url) + [
+        setup_args=common_args(model_url) + WITHOUT_NEXTCLOUD + [
             # No signaling profile: the wizard refuses it without Talk.
             "--ingress", "local", "--hostname", "localhost:8080", "--developer",
             "--profile", "browser",
@@ -643,7 +648,7 @@ def proxied_mode(model_url: str) -> Mode:
 def direct_mode(model_url: str) -> Mode:
     return Mode(
         name="direct",
-        setup_args=common_args(model_url) + [
+        setup_args=common_args(model_url) + WITHOUT_NEXTCLOUD + [
             "--ingress", "direct", "--hostname", DOMAIN, "--tls-cert-source", "acme",
         ],
         host_env={

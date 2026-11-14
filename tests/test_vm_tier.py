@@ -222,6 +222,37 @@ class TestLeavingTheHostFolderMode:
         assert order == ["stop", "apply", "storage-local", "provision", "mounts"], order
 
 
+class TestTheModesWithoutNextcloudLeaveIt:
+    """A setup re-run keeps every answer it is not given, the Nextcloud URL
+    included, so a mode without Nextcloud applied after the nextcloud mode
+    stayed on the rclone mount. Row 7 then found the mount's rc bound into the
+    daemon in the local mode (#951)."""
+
+    PRIOR = {"user_id": "alice", "nextcloud_url": "http://nextcloud.test",
+             "nextcloud_username": "istota", "workspace": "mount"}
+
+    def _storage_after(self, mode, monkeypatch) -> tuple[str, str]:
+        from istota import setup_wizard
+        from tests.vm import lima
+
+        for name, value in lima.NATIVE_KEY_ENV.items():
+            monkeypatch.setenv(name, value)
+        answers = setup_wizard.collect_container_answers(
+            lima._setup_namespace(mode.setup_args), input_fn=None, out=lambda *_: None,
+            getpass_fn=None, prior=setup_wizard.ContainerAnswers(**self.PRIOR))
+        return answers.storage, answers.nextcloud_url
+
+    def test_the_local_mode_drops_a_kept_nextcloud(self, monkeypatch):
+        from tests.vm import lima
+
+        assert self._storage_after(lima.local_mode("http://model.test/v1"), monkeypatch) == ("local", "")
+
+    def test_the_direct_mode_drops_a_kept_nextcloud(self, monkeypatch):
+        from tests.vm import lima
+
+        assert self._storage_after(lima.direct_mode("http://model.test/v1"), monkeypatch) == ("local", "")
+
+
 class TestTheEntrypointControls:
     """The vm tier's entrypoint controls `sed` one line of the deployed
     entrypoint; a line that no longer matches fails the build in the VM, minutes

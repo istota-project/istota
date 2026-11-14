@@ -16,7 +16,8 @@
 #
 # Controls, grouped by the stack mode they run in:
 #
-#   local:     mac-home-mounted (row 7), secret-owned-by-root (row 12),
+#   local:     mac-home-mounted, rclone-rc-outside-nextcloud (row 7),
+#              secret-owned-by-root (row 12),
 #              apparmor-unconfined, apparmor-unnarrowed (row 20), no-egress-unit (row 10),
 #              every-cred-volume-everywhere (row 11), exec-socket-symlink (row 11),
 #              browser-on-default-network, no-browser-firewall (row 17),
@@ -85,6 +86,9 @@ C="$VM/test_confinement.py"
 control mac-home-mounted \
     "row 7: a Mac directory mounted into the VM" \
     "$C::TestTheDaemonCannotSeeTheMachine::test_the_vm_mounts_no_mac_path_but_the_read_only_checkout"
+control rclone-rc-outside-nextcloud \
+    "row 7: the mount's rc bound into the daemon under STORAGE=local" \
+    "$C::TestTheDaemonCannotSeeTheMachine::test_the_istota_container_binds_only_the_stacks_own_paths"
 control secret-owned-by-root \
     "row 12: a secret file on the VM owned by root" \
     "$C::TestTheSecretFilesAreTheDaemons::test_every_secret_file_is_0400_and_owned_by_10001_inside_the_container"
