@@ -29,7 +29,7 @@ from datetime import date, datetime, timedelta
 from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo
 
-from istota.lib.dav_xml import principal_user
+from istota.lib.dav_xml import principal_beside, principal_user
 from istota.skills._cli import parse_and_resolve, run_skill_cli
 
 try:
@@ -125,6 +125,19 @@ def get_calendar_owner(owner) -> str | None:
     return principal_user(owner)
 
 
+def _owned_by(owner, username: str, principal_url) -> bool:
+    """Whether ``owner`` names ``username``'s principal.
+
+    Nextcloud's ``principals/users/<id>`` first; any other server by the
+    layout of the connecting account's own principal (ISSUE-962).
+    """
+    if get_calendar_owner(owner) == username:
+        return True
+    if principal_url is None:
+        return False
+    return principal_beside(owner, str(principal_url)) == username
+
+
 def _calendar_writable(props: dict) -> bool:
     read_only = props.get(_OC_READ_ONLY)
     if read_only is not None and (read_only.text or "").strip().lower() in {"true", "1"}:
@@ -156,11 +169,12 @@ def get_calendars_for_user(
     """
     principal = client.principal()
     calendars = principal.calendars()
+    principal_url = getattr(principal, "url", None)
 
     result = []
     for cal in calendars:
         props = _access_props(cal)
-        if get_calendar_owner(props.get(_OWNER)) != username:
+        if not _owned_by(props.get(_OWNER), username, principal_url):
             continue
         result.append((cal.name, str(cal.url), _calendar_writable(props)))
 
