@@ -1293,6 +1293,17 @@ def _apply_scroll_settings(args, actions):
 #: What a credential that came back in a response is replaced with.
 CREDENTIAL_REDACTION = "[credential]"
 
+#: The card fields that are secrets. Expiry and name are metadata a task can
+#: already read, and scrubbing a month or a year hid every "12" or "2029" on
+#: the page (ISSUE-956). The browser container keeps a copy, held equal by
+#: `tests/test_browser_navigation.py`.
+CARD_SECRET_FIELDS = ("number", "cvc")
+
+
+def _card_secrets(purchase):
+    return [purchase.fields[field].reveal() for field in CARD_SECRET_FIELDS
+            if field in purchase.fields]
+
 
 def _scrub(payload, secrets):
     """The response with any of `secrets` replaced, wherever a string holds one.
@@ -1315,7 +1326,12 @@ def _scrub(payload, secrets):
         return payload
     if isinstance(payload, str):
         for secret in secrets:
-            if secret:
+            if not secret:
+                continue
+            if secret.isascii() and secret.isdigit():
+                # A CVC is three digits: inside a longer number it is a coincidence.
+                payload = re.sub(rf"(?<![0-9]){secret}(?![0-9])", CREDENTIAL_REDACTION, payload)
+            else:
                 payload = payload.replace(secret, CREDENTIAL_REDACTION)
         return payload
     if isinstance(payload, dict):
@@ -1624,8 +1640,7 @@ def cmd_interact(args):
     secrets.extend(recovery_secrets)
     purchase = getattr(args, "purchase", None)
     if isinstance(purchase, CardSecret):
-        secrets.extend(value.reveal() for value in purchase.fields.values())
-        secrets.extend(a["value"] for a in actions if a.get("card_field"))
+        secrets.extend(_card_secrets(purchase))
 
     # Only the POST is wrapped. `_session_capture`'s GET above runs before any
     # action is sent, so a failure there is provably pre-send and must keep
@@ -2167,10 +2182,7 @@ def main(argv=None):
         detail = str(exc).strip()
         purchase = getattr(args, "purchase", None)
         if isinstance(purchase, CardSecret):
-            secrets = [value.reveal() for value in purchase.fields.values()]
-            secrets.extend(_fill_card_action(spec, purchase)["value"]
-                           for spec in (getattr(args, "fill_card", None) or []))
-            detail = _scrub(detail, secrets)
+            detail = _scrub(detail, _card_secrets(purchase))
         return error_envelope(
             f"browse {args.command} against {get_api_url()} failed: "
             f"{type(exc).__name__}{': ' + detail if detail else ''}"

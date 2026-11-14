@@ -1708,6 +1708,9 @@ def render_document_endpoint():
 # Retained across this user's tabs and session closure, like their profile.
 # This is readback redaction, not cleanup of persisted login state.
 _credentials_by_user = {}
+# A copy of the skill's `CARD_SECRET_FIELDS`. Expiry and name fills join no
+# redaction set: they are not secrets, and this one outlives the session.
+CARD_SECRET_FIELDS = ("number", "cvc")
 _credential_values = LocalProxy(lambda: _credentials_by_user.setdefault(str(_user_scope), set()))
 
 _EXTRACT_ELEMENT_JS = """el => {
@@ -1836,6 +1839,16 @@ def detect_secret_shapes(text):
     return []
 
 
+def _secret_pattern(secret):
+    """How `secret` is found in text: literally, or for digits only as a whole number.
+
+    A CVC is three digits, and inside a longer number it is a coincidence.
+    """
+    if secret.isascii() and secret.isdigit():
+        return re.compile(rf"(?<![0-9]){secret}(?![0-9])")
+    return re.compile(re.escape(secret))
+
+
 def _scrub_extracted(value, secrets, mask_secrets=False):
     if isinstance(value, str):
         variants = set()
@@ -1847,7 +1860,7 @@ def _scrub_extracted(value, secrets, mask_secrets=False):
                 variants.update((secret, escape(secret), text_escaped,
                                  attribute_escaped, quote(secret, safe='')))
         for secret in sorted(variants, key=len, reverse=True):
-            value = value.replace(secret, '[REDACTED]')
+            value = _secret_pattern(secret).sub('[REDACTED]', value)
         if mask_secrets:
             value = mask_secret_text(value)
         return value
@@ -1940,7 +1953,7 @@ def extract():
         for el in elements[:limit]:
             entry = el.evaluate(_EXTRACT_ELEMENT_JS)
             value = entry.get("value", "")
-            if any(secret and secret in value for secret in secrets):
+            if any(secret and _secret_pattern(secret).search(value) for secret in secrets):
                 entry.pop("value", None)
             # Scrub before the budgets: truncation can otherwise leave a
             # credential prefix which no longer matches the complete secret.
@@ -3203,7 +3216,8 @@ def _selector_action(session, page, action, others=(), owned=()):
             return {"action": "fill", "selector": selector, "ok": False,
                     "error": "otp_expired"}
         value = action.get("value", "")
-        if value:
+        card_field = action.get("card_field")
+        if value and (not card_field or card_field in CARD_SECRET_FIELDS):
             _credential_values.add(value)
         # Even ElementHandle.fill uses keyboard insertion internally. Keep the
         # origin check and DOM write in one evaluation, with no focus dispatch.
