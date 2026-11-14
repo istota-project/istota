@@ -103,14 +103,14 @@
       <a href="{base}/settings">Settings → Preferences</a> to manage GPS ingest.
     </Alert>
   {:else}
+    <!-- First, and outside the `info` guard below: this card reads the device,
+         not the server, and it is the readout that says whether tracking
+         silently stopped. A transient server failure must not be what hides it. -->
+    <DeviceTrackerCard onDeviceAdded={() => devicesCard?.reload()} />
+
     {#each moduleServices as svc (svc.service)}
       <ServiceCard service={svc} onChanged={reloadServices} />
     {/each}
-
-    <!-- Outside the `info` guard below: this card reads the device, not the
-         server, and it is the readout that says whether tracking silently
-         stopped. A transient server failure must not be what hides it. -->
-    <DeviceTrackerCard onDeviceAdded={() => devicesCard?.reload()} />
 
     <LocationDevicesCard bind:this={devicesCard} />
 

@@ -52,12 +52,17 @@ export default defineConfig(({ command }) => {
     resolve: minot
       ? {
           alias: [
-            // The stylesheet subpaths name files the source tree spells
-            // differently, so they come before the bare package name. The
-            // other subpaths (stores/notices, clipboard, dateFormat, ui/*)
-            // have the same layout in the source as in the exports.
+            // These subpaths name files the source tree spells differently, so
+            // they come before the bare package name. The other subpaths
+            // (stores/notices, clipboard, dateFormat, ui/*) have the same
+            // layout in the source as in the exports.
             { find: '@minot/ui/styles.css', replacement: `${minot}/styles/index.css` },
             { find: '@minot/ui/tokens.css', replacement: `${minot}/styles/tokens.css` },
+            {
+              find: '@minot/ui/stores/headerSave',
+              replacement: `${minot}/stores/headerSave.svelte.ts`,
+            },
+            { find: '@minot/ui/lint', replacement: `${minot}/lint/rules.mjs` },
             { find: '@minot/ui', replacement: minot },
           ],
           // The checkout's source resolves a bare import from its own
