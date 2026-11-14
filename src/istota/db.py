@@ -9922,6 +9922,8 @@ def _migrate_push_tables(conn: sqlite3.Connection) -> None:
         "connection_binding": "TEXT", "connection_generation": "INTEGER",
         "private_version": "INTEGER", "private_content": "TEXT", "encryption_public_key": "TEXT",
         "encryption_key_id": "TEXT", "sender_key_id": "TEXT", "push_generation": "TEXT",
+        "relay_route_id": "TEXT", "relay_credential_ref": "TEXT", "relay_lease_expires_at": "INTEGER",
+        "relay_url": "TEXT", "enrollment_state": "TEXT NOT NULL DEFAULT 'active'",
     })
     conn.execute("CREATE INDEX IF NOT EXISTS idx_push_devices_user ON push_devices (user_id)")
     conn.execute("""
@@ -9931,6 +9933,21 @@ def _migrate_push_tables(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS push_relay_revocations (
+            route_id TEXT PRIMARY KEY,
+            credential_ref TEXT NOT NULL,
+            relay_url TEXT NOT NULL,
+            next_attempt_at INTEGER NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            expires_at INTEGER NOT NULL,
+            last_error TEXT,
+            created_at INTEGER NOT NULL
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_push_relay_revocations_due ON push_relay_revocations (next_attempt_at)"
+    )
 
 
 def _migrate_location_ingest_tokens(conn: sqlite3.Connection) -> None:

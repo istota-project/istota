@@ -10864,9 +10864,11 @@ def build_interval_gates(
         sync_operator_persona(config)
 
     def _push_dispatch(now: float) -> None:
-        from istota.push import run_push_dispatch
+        from istota.push import revocations, run_push_dispatch
 
         run_push_dispatch(config)
+        # After the alerts, which are time-sensitive; neither raises.
+        revocations.run_relay_revocations(config)
 
     def _heartbeats(now: float) -> None:
         _run_heartbeat_checks(config)

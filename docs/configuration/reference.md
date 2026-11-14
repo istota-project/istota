@@ -861,7 +861,7 @@ Calendars and folders shared with Istota over open protocols. See [sharing](../f
 
 ## `[push]`
 
-Native iOS push through APNs. Install the `push` extra and put the APNs signing key on the server, readable only by the service user. `istota doctor --only push.credentials` checks the key's metadata; `istota push test --user U` sends one. `istota doctor --only push.signing_key` checks the private push key: mode 0600, owned by the service user, parses, and matches its `.pub` file.
+Native iOS push through APNs. Install the `push` extra and put the APNs signing key on the server, readable only by the service user. `istota doctor --only push.credentials` checks the key's metadata; `istota push test --user U` sends one. `istota doctor --only push.signing_key` checks the private push key: mode 0600, owned by the service user, parses, and matches its `.pub` file. Under `delivery = "relay"` no APNs key is needed here, and `istota doctor --only push.relay` checks the relay URL and asks the relay's `/healthz`.
 
 | Setting | Default | Description |
 |---|---|---|
@@ -875,6 +875,10 @@ Native iOS push through APNs. Install the `push` extra and put the APNs signing 
 | `alert_batch_limit` | `200` | Pending notifications read per sweep |
 | `content` | `"legacy"` | `legacy` sends plaintext previews, which Apple can read. `private` encrypts previews for devices that enrolled a device key and sends every other device a fixed alert with no preview; see [private push v1](../reference/private-push-v1.md). Any other value stops the load |
 | `signing_key_path` | `""` | The Ed25519 signing key for private push, with its public half at `<path>.pub`. Required when `content = "private"`. Create it with `istota push keygen`, or on the stack `istota-stack push-key create`; `istota push import-key` (`istota-stack push-key import`) writes a saved key from stdin instead. `--force` replaces it, and every enrolled device then has to enroll again. `ISTOTA_PUSH_SIGNING_KEY_PATH` overrides it |
+| `delivery` | `"direct"` | `direct` sends to APNs with the key above. `relay` sends each device's pushes through the push relay with that device's send capability, and reads no APNs settings. `relay` requires `content = "private"` and `signing_key_path`, since the relay forwards only encrypted envelopes. Any other value stops the load |
+| `relay_url` | `""` | The relay's base URL, for example `https://relay.example.com/istota`. It may carry a path, and endpoints are appended to it. Required under `relay`: `https://`, no userinfo, query or fragment, at most 256 characters, and no `..`, `//`, `%2f` or `%2e` in the path. The load lowercases the scheme and host and drops port 443 and a trailing slash; that form is the one discovery reports and the app compares. `ISTOTA_PUSH_RELAY_URL` overrides it |
+| `relay_timeout_seconds` | `15` | How long one request to the relay may take. At least 1 |
+| `push_credentials_dir` | `""` | Where each relay device's send capability is written at registration, as `<device id>.cap` (mode 0600, directory 0700); the database holds only the file name. A route waiting to be revoked keeps its capability here until the relay accepts the revocation, as the removed device's file or, for a route replaced by a new enrollment, `revoke-<route id>.cap`. Empty means `push/relay` beside the framework database (`/data/db/push/relay` on the stack), not the config directory, which the stack mounts read-only. The web process writes it, so it must be writable there and outside the workspace. `istota doctor --only push.relay` checks its modes |
 
 ## `[assignments]`
 

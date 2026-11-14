@@ -11146,6 +11146,8 @@ def check_push_credentials(config: "Config", probe: bool) -> CheckResult:
         push = config.push
         if not push.enabled:
             return CheckResult(name, SKIP, "Push notifications are disabled")
+        if push.delivery == "relay":
+            return CheckResult(name, SKIP, "Relay delivery uses no APNs key on this installation; see push.relay")
         if not all((push.apns_key_path, push.apns_key_id, push.apns_team_id, push.apns_topic)):
             return CheckResult(name, FAIL, "APNs configuration is incomplete", "Set the key path, key id, team id and topic in [push].")
         if importlib.util.find_spec("h2") is None:
@@ -11155,7 +11157,13 @@ def check_push_credentials(config: "Config", probe: bool) -> CheckResult:
             return CheckResult(name, FAIL, "APNs key is not a regular file", "Point apns_key_path at the signing key file.")
         if stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_uid != os.geteuid():
             return CheckResult(name, FAIL, "APNs key permissions or owner differ from the service account", "Set mode 0600 and make the service account the owner of the APNs key.")
-        return CheckResult(name, OK, "APNs key exists with mode 0600 and is owned by this service account")
+        detail = "APNs key exists with mode 0600 and is owned by this service account"
+        # Repair is a relay state; direct delivery sends to these devices regardless.
+        left = _relay_repair_count(config)
+        if left:
+            detail += (f"; {left} device(s) still marked for repair from relay delivery are sent to "
+                       "directly, and the mark clears when each registers again")
+        return CheckResult(name, OK, detail)
     except Exception as exc:
         return CheckResult(name, FAIL, f"APNs key metadata unavailable ({type(exc).__name__})", "Install the signing key at apns_key_path, owned by the service account with mode 0600.")
 
@@ -11200,6 +11208,201 @@ def check_push_signing_key(config: "Config", probe: bool) -> CheckResult:
     return CheckResult(name, OK, f"Push signing key parses and matches its public key (key ID {envelope.key_id(raw)})")
 
 
+def check_push_relay(config: "Config", probe: bool) -> CheckResult:
+    """Relay delivery: the relay URL's shape, and under ``probe`` its ``/healthz``.
+
+    The URL is the operator's own configured value, so it is shown, and the
+    probe is a plain ``httpx.get`` with redirects off, as ``sharing.ocm``'s is.
+    A relay that is down is an outage (WARN); one that answers the path with a
+    redirect or a 4xx is a wrong URL (FAIL). Never the relay's body or the
+    exception's text.
+    """
+    from istota.config import normalize_relay_url
+
+    name = "push.relay"
+    push = config.push
+    if not push.enabled:
+        return CheckResult(name, SKIP, "Push notifications are disabled")
+    if push.delivery != "relay":
+        return CheckResult(name, SKIP, "Push is delivered directly to APNs ([push] delivery is direct)")
+    url_remedy = ("Set [push] relay_url (or ISTOTA_PUSH_RELAY_URL) to the relay's https:// base URL, "
+                  "for example https://relay.example.com/istota.")
+    try:
+        normalized = normalize_relay_url(push.relay_url)
+    except ValueError as exc:
+        return CheckResult(name, FAIL, f"The relay URL is not usable: {exc}", url_remedy)
+    if normalized != push.relay_url:
+        return CheckResult(name, FAIL, "The relay URL is not in its normalized form", url_remedy)
+
+    directory_problem = _relay_credentials_dir_problem(config)
+    if directory_problem is not None and directory_problem.status == FAIL:
+        return directory_problem
+
+    notes = []
+    remedies = []
+    if directory_problem is not None:
+        notes.append(directory_problem.detail)
+        remedies.append(directory_problem.remedy)
+    repair = _relay_repair_count(config, sender_key_id=_current_sender_key_id(config))
+    if repair:
+        notes.append(f"{repair} device(s) in repair: their relay route expired or was revoked, "
+                     "their credential file is missing, or they enrolled under an older signing key")
+        remedies.append("Each such device must enroll again from the app's notification settings.")
+    pending = _relay_revocations_pending(config)
+    if pending:
+        notes.append(f"{pending} route revocation(s) still queued after a day")
+        remedies.append("The relay has not accepted them; check that it is reachable from the daemon. "
+                        "Each is retried with backoff for seven days, then left to lapse with its lease.")
+    if any(value.strip() for value in (push.apns_key_path, push.apns_key_id, push.apns_team_id)):
+        notes.append("APNs settings are set and ignored under relay delivery")
+        remedies.append("Remove apns_key_path, apns_key_id and apns_team_id from [push]; "
+                        "relay delivery does not read them.")
+
+    if probe:
+        import httpx
+
+        try:
+            response = httpx.get(f"{normalized}/healthz", timeout=push.relay_timeout_seconds,
+                                 follow_redirects=False)
+        except httpx.HTTPError as exc:
+            return CheckResult(
+                name, WARN, f"The relay at {normalized} did not answer ({type(exc).__name__})",
+                "Check that the relay is running and that this host can reach it.",
+            )
+        status = response.status_code
+        if status >= 500:
+            return CheckResult(
+                name, WARN, f"The relay at {normalized} answered /healthz with HTTP {status}",
+                "The relay is unavailable; pushes are lost until it answers. Check the relay's status.",
+            )
+        if status != 200:
+            return CheckResult(
+                name, FAIL, f"The relay at {normalized} answered /healthz with HTTP {status}", url_remedy,
+            )
+        reached = f"Relay at {normalized} answers /healthz"
+    else:
+        reached = f"Relay delivery to {normalized} (not probed)"
+
+    if notes:
+        return CheckResult(name, WARN, f"{reached}; " + "; ".join(notes), " ".join(remedies))
+    return CheckResult(name, OK, reached)
+
+
+def _current_sender_key_id(config: "Config") -> str | None:
+    """The push public key's ID, as the web's device list reads it; None when unreadable."""
+    from istota.push import envelope
+
+    try:
+        raw = envelope.load_public_key(envelope.public_key_path(config.push.signing_key_path))
+    except Exception:  # noqa: BLE001 — unreadable marks nothing stale, as in the device list
+        return None
+    return envelope.key_id(raw)
+
+
+def _relay_repair_count(config: "Config", *, sender_key_id: str | None = None) -> int:
+    """Devices that get no alerts under relay delivery until they register again.
+
+    `devices.needs_repair`, the device list's rule: a row a relay result marked
+    `repair`, and with `sender_key_id` an encrypted enrollment under another
+    sender key. 0 with no database or no readable table.
+    """
+    from istota.push import devices
+
+    conn = None
+    try:
+        db_path = Path(getattr(config, "db_path", "") or "")
+        if not db_path.name or not db_path.exists():
+            return 0
+        conn = sqlite_util.connect_read_only(db_path)
+        count = 0
+        for row in conn.execute(
+            "SELECT enrollment_state, private_content, encryption_public_key, sender_key_id FROM push_devices",
+        ):
+            device = {"enrollment_state": row[0], "private_content": row[1],
+                      "encryption_public_key": row[2], "sender_key_id": row[3]}
+            _, stale = devices.device_content("private", device, sender_key_id)
+            if devices.needs_repair("relay", device, stale):
+                count += 1
+        return count
+    except Exception:  # noqa: BLE001 — a check reports, it does not propagate
+        logger.debug("push relay repair count failed", exc_info=True)
+        return 0
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _relay_revocations_pending(config: "Config") -> int:
+    """Queued relay revocations older than a day; 0 with no database or no readable table."""
+    conn = None
+    try:
+        db_path = Path(getattr(config, "db_path", "") or "")
+        if not db_path.name or not db_path.exists():
+            return 0
+        conn = sqlite_util.connect_read_only(db_path)
+        return int(conn.execute(
+            "SELECT COUNT(*) FROM push_relay_revocations WHERE created_at <= ?",
+            (int(time.time()) - 86_400,),
+        ).fetchone()[0])
+    except Exception:  # noqa: BLE001 — a check reports, it does not propagate
+        logger.debug("push relay revocation count failed", exc_info=True)
+        return 0
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _relay_credentials_dir_problem(config: "Config") -> CheckResult | None:
+    """What is wrong with the directory holding relay send capabilities, if anything.
+
+    Looser modes than 0700 on the directory or 0600 on a `.cap` file FAIL, since
+    each file is a bearer credential for one device. A directory this process
+    cannot write or create WARNs: the web process writes it at registration,
+    and on the stack it runs as the same user under the same mounts.
+    """
+    from istota.push.devices import relay_credentials_dir
+
+    name = "push.relay"
+    directory = relay_credentials_dir(config)
+    dir_remedy = ("Set [push] push_credentials_dir to a directory the web process can write, "
+                  "outside the workspace, or create it with mode 0700.")
+    try:
+        info = os.lstat(directory)
+    except FileNotFoundError:
+        info = None
+    except OSError as exc:
+        return CheckResult(name, FAIL, f"Cannot read the push credentials directory {directory} "
+                           f"({type(exc).__name__})", dir_remedy)
+    if info is None:
+        ancestor = directory.parent
+        while not ancestor.exists() and ancestor != ancestor.parent:
+            ancestor = ancestor.parent
+        if not os.access(ancestor, os.W_OK):
+            return CheckResult(name, WARN, f"The push credentials directory {directory} does not exist and "
+                               f"{ancestor} is not writable, so no relay device can register", dir_remedy)
+        return None
+    if not stat.S_ISDIR(info.st_mode):
+        return CheckResult(name, FAIL, f"The push credentials path {directory} is not a directory", dir_remedy)
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        return CheckResult(name, FAIL, f"The push credentials directory {directory} has mode "
+                           f"{stat.S_IMODE(info.st_mode):04o}", f"chmod 0700 {directory}")
+    loose = []
+    try:
+        for entry in os.scandir(directory):
+            if entry.name.endswith(".cap") and stat.S_IMODE(entry.stat(follow_symlinks=False).st_mode) & 0o077:
+                loose.append(entry.name)
+    except OSError as exc:
+        return CheckResult(name, FAIL, f"Cannot list the push credentials directory {directory} "
+                           f"({type(exc).__name__})", dir_remedy)
+    if loose:
+        return CheckResult(name, FAIL, f"{len(loose)} relay credential file(s) in {directory} are readable "
+                           "by others", f"chmod 0600 {directory}/*.cap")
+    if not os.access(directory, os.W_OK):
+        return CheckResult(name, WARN, f"The push credentials directory {directory} is not writable, "
+                           "so no relay device can register", dir_remedy)
+    return None
+
+
 # The name is part of the registry rather than only of the result, so `only=`
 # can select *before* invoking. Filtering afterwards would mean running every
 # check to discard most of them — which is exactly what the config-load path
@@ -11207,6 +11410,7 @@ def check_push_signing_key(config: "Config", probe: bool) -> CheckResult:
 CHECKS: tuple[tuple[str, Check], ...] = (
     ("push.credentials", check_push_credentials),
     ("push.signing_key", check_push_signing_key),
+    ("push.relay", check_push_relay),
     ("runtime.platform", check_platform),
     ("runtime.bwrap", check_bwrap),
     ("runtime.model_cli", check_model_cli),
@@ -11324,6 +11528,7 @@ line for the same reason.
 CHECK_SCOPES: dict[str, str] = {
     "push.credentials": DEPLOYMENT,
     "push.signing_key": DEPLOYMENT,
+    "push.relay": DEPLOYMENT,
     "runtime.platform": IMAGE,
     "runtime.bwrap": IMAGE,
     "runtime.model_cli": IMAGE,

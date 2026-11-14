@@ -14419,6 +14419,7 @@ def _push_devices_list(username: str) -> dict:
     with db.get_db(_config.db_path) as conn:
         return {"devices": devices.list_devices(
             conn, username, content_mode=_config.push.content, sender_key_id=sender_key_id,
+            delivery=_config.push.delivery,
         )}
 
 
@@ -14431,7 +14432,8 @@ def _push_device_register(
     with db.get_db(_config.db_path) as conn:
         device_id = devices.register_device(
             conn, username, **body, auth_method=auth["method"], auth_epoch=auth["epoch"],
-            auth_session_id=session_id, **private,
+            auth_session_id=session_id, credentials_dir=devices.relay_credentials_dir(_config),
+            relay_url=_config.push.relay_url, **private,
         )
         if device_id is None:
             return None
@@ -14443,7 +14445,8 @@ def _push_session_delete(username: str, session_id: str) -> None:
     from istota.push import devices
 
     with db.get_db(_config.db_path) as conn:
-        devices.delete_session_devices(conn, username, session_id)
+        devices.delete_session_devices(conn, username, session_id,
+                                       credentials_dir=devices.relay_credentials_dir(_config))
 
 
 def _push_device_delete(username: str, device_id: int, created_at: str | None = None) -> bool:
@@ -14451,7 +14454,8 @@ def _push_device_delete(username: str, device_id: int, created_at: str | None = 
     from istota.push import devices
 
     with db.get_db(_config.db_path) as conn:
-        return devices.delete_device(conn, device_id, username, created_at=created_at)
+        return devices.delete_device(conn, device_id, username, created_at=created_at,
+                                     credentials_dir=devices.relay_credentials_dir(_config))
 
 
 @api_router.get("/push/categories")
@@ -14489,10 +14493,33 @@ _PRIVATE_ENROLLMENT_KEYS = {
     "encrypted": {"version", "content", "encryption_public_key", "encryption_key_id", "sender_key_id", "generation"},
     "generic": {"version", "content", "generation"},
 }
+_RELAY_ROUTE_KEYS = {"route_id", "send_capability", "lease_expires_at"}
 
 
-def _private_enrollment(private) -> dict:
-    """The validated `private` field as `register_device` columns; HTTP 400 on anything else."""
+def _relay_route(relay) -> dict | None:
+    """The validated relay route, or None: IDs as canonical base64url of 16 and 32 bytes, the lease as Unix time."""
+    from istota.push import envelope
+
+    if not isinstance(relay, dict) or set(relay) != _RELAY_ROUTE_KEYS:
+        return None
+    for key, size in (("route_id", 16), ("send_capability", 32)):
+        try:
+            if len(envelope.b64url_decode(relay[key])) != size:
+                return None
+        except ValueError:
+            return None
+    lease = relay["lease_expires_at"]
+    if type(lease) is not int or not 1 <= lease <= _MAX_SAFE_INTEGER:
+        return None
+    return {key: relay[key] for key in _RELAY_ROUTE_KEYS}
+
+
+def _private_enrollment(private, *, relay_delivery: bool = False) -> dict:
+    """The validated `private` field as `register_device` arguments; HTTP 400 on anything else.
+
+    Under relay delivery an encrypted enrollment must carry its relay route, and
+    under direct delivery it may not.
+    """
     from istota.push import envelope
 
     refused = HTTPException(400, "invalid private enrollment")
@@ -14501,6 +14528,14 @@ def _private_enrollment(private) -> dict:
     content = private.get("content")
     if not isinstance(content, str) or content not in _PRIVATE_ENROLLMENT_KEYS:
         raise refused
+    relay = None
+    if content == "encrypted" and relay_delivery:
+        if "relay" not in private:
+            raise refused
+        relay = _relay_route(private["relay"])
+        if relay is None:
+            raise refused
+        private = {key: value for key, value in private.items() if key != "relay"}
     if set(private) != _PRIVATE_ENROLLMENT_KEYS[content]:
         raise refused
     if type(private["version"]) is not int or private["version"] != 1:
@@ -14530,6 +14565,8 @@ def _private_enrollment(private) -> dict:
     if len(sender_digest) != 32:
         raise refused
     columns.update(encryption_public_key=public_key, encryption_key_id=key_id, sender_key_id=sender_key_id)
+    if relay is not None:
+        columns["relay"] = relay
     return columns
 
 
@@ -14542,6 +14579,9 @@ def _private_enrollment_refusal(private: dict) -> HTTPException | None:
     except envelope.KeyFileError:
         return HTTPException(503, "private push unavailable")
     if raw is None:
+        return HTTPException(409, "private push not offered")
+    # The relay forwards only sealed envelopes, so there is no generic content through it.
+    if _config.push.delivery == "relay" and private["private_content"] != "encrypted":
         return HTTPException(409, "private push not offered")
     if private["sender_key_id"] is not None and private["sender_key_id"] != envelope.key_id(raw):
         return HTTPException(409, "sender key changed")
@@ -14586,13 +14626,22 @@ async def push_devices_register(request: Request, user: dict = Depends(_require_
         raise HTTPException(400, "invalid app version")
     # Absent means a plain registration, which clears an earlier private enrollment.
     private = {}
+    relay_delivery = _config.push.delivery == "relay"
+    if relay_delivery and not _config.push.dispatching:
+        # Discovery then offers no relay, so even a 0.16 app registers plainly;
+        # without this it would be told to update an app that is current.
+        raise HTTPException(409, "push not enabled")
     if "private" in body:
         if "connection_binding" not in body:
             raise HTTPException(400, "invalid private enrollment")
-        private = _private_enrollment(body.pop("private"))
+        private = _private_enrollment(body.pop("private"), relay_delivery=relay_delivery)
         refusal = await asyncio.to_thread(_private_enrollment_refusal, private)
         if refusal is not None:
             raise refusal
+    elif relay_delivery:
+        # A plain row has no route, so nothing could ever reach it; an older
+        # shell is told rather than enrolled.
+        raise HTTPException(409, "private push not offered")
     auth = await asyncio.to_thread(_session_auth, request)
     session_id = request.session.get("session_id")
     if auth["method"] != "none" and (not isinstance(session_id, str) or not session_id):

@@ -8290,10 +8290,22 @@ export interface PushDevice {
   content: 'legacy' | 'generic' | 'encrypted';
   /** Enrolled under an earlier sender key, so it gets the fixed alert until it enrolls again. */
   stale_key: boolean;
+  /** `repair`: the relay refused its route or it has none, so nothing is sent until it enrolls again. */
+  enrollment_state: 'active' | 'repair';
 }
 
 export function listPushDevices(): Promise<{ devices: PushDevice[] }> {
   return apiFetch('/push/devices');
+}
+
+/**
+ * The relay route the app enrolled, carried to the server once and kept nowhere in the page:
+ * the send capability is what lets the server push to this device.
+ */
+export interface PushRelayRoute {
+  route_id: string;
+  send_capability: string;
+  lease_expires_at: number;
 }
 
 /** The `private` field of a registration (docs/reference/private-push-v1.md). */
@@ -8305,6 +8317,8 @@ export type PrivatePushEnrollment =
       encryption_key_id: string;
       sender_key_id: string;
       generation: string;
+      /** Under relay delivery only; the server refuses it under direct delivery. */
+      relay?: PushRelayRoute;
     }
   | { version: 1; content: 'generic'; generation: string };
 
@@ -8333,8 +8347,11 @@ export function getPushSenderKey(): Promise<PushSenderKey> {
 
 /** The push half of the mobile discovery document the native shell reads. */
 export interface MobilePushCapabilities {
+  /** Stays `unavailable` under relay delivery, since 0.12 to 0.14 shells accept nothing else. */
   delivery: 'direct' | 'unavailable';
   private?: { versions: number[] };
+  /** Relay delivery; the app compares `url` with its own relay and never uses this one. */
+  relay?: { versions: number[]; url: string };
 }
 
 export async function getMobilePushCapabilities(): Promise<MobilePushCapabilities> {

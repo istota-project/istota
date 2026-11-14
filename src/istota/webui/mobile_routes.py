@@ -33,8 +33,9 @@ async def mobile_config(request: Request) -> JSONResponse:
     push = config.push
     # The web container need not hold the daemon's signing key. Discovery
     # reports configuration, without opening the key or contacting APNs.
+    dispatching = push.dispatching
     direct_push = (
-        push.enabled and push.dispatch_interval_seconds > 0
+        dispatching and push.delivery == "direct"
         and bool(push.apns_key_path.strip()) and bool(push.apns_key_id.strip())
         and bool(push.apns_team_id.strip()) and bool(push.apns_topic.strip())
     )
@@ -42,8 +43,17 @@ async def mobile_config(request: Request) -> JSONResponse:
     # A separate key, never a third `delivery` value: shells 0.12 to 0.14 refuse one.
     if direct_push and push.content == "private" and push.signing_key_path.strip():
         push_capabilities["private"] = {"versions": [1]}
-    # No config strings are serialized: both capability branches stay below
-    # 512 bytes, well within the client's 64 KiB discovery limit.
+    # The load normalized the URL and held it to private content and a key.
+    # The app compares it, path included, with its compiled-in relay. Relay
+    # delivery is private only: `private` is the envelope, `relay` the
+    # transport. The web page enrolls privately only on `delivery == "direct"`,
+    # and the 0.15 shell enrolls only when the page asks, so an older app does
+    # not enroll on these keys.
+    if dispatching and push.delivery == "relay":
+        push_capabilities["private"] = {"versions": [1]}
+        push_capabilities["relay"] = {"versions": [1], "url": push.relay_url}
+    # The only config string serialized is the relay URL, bounded at load, so
+    # every branch stays well within the client's 64 KiB discovery limit.
     return JSONResponse({
         "product": "istota",
         "mobile_protocol": 1,

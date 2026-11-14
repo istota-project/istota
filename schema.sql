@@ -2835,6 +2835,15 @@ CREATE TABLE IF NOT EXISTS push_devices (
     encryption_key_id TEXT,
     sender_key_id TEXT,
     push_generation TEXT,
+    -- Relay delivery only: the route, the file name of its send capability in the
+    -- push credentials directory (never the capability), the lease as Unix time,
+    -- and the normalized URL of the relay that issued the route, where it is revoked.
+    relay_route_id TEXT,
+    relay_credential_ref TEXT,
+    relay_lease_expires_at INTEGER,
+    relay_url TEXT,
+    -- 'active' or 'repair'; a device in repair is skipped until it registers again.
+    enrollment_state TEXT NOT NULL DEFAULT 'active',
     last_badge INTEGER NOT NULL DEFAULT -1,
     last_error TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -2848,6 +2857,20 @@ CREATE TABLE IF NOT EXISTS push_state (
     last_pushed_message_id INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
+-- Relay routes still to be revoked (istota.push.revocations): one row per route
+-- whose device was removed or re-enrolled. credential_ref names the capability
+-- file in the push credentials directory, never the capability. Unix seconds.
+CREATE TABLE IF NOT EXISTS push_relay_revocations (
+    route_id TEXT PRIMARY KEY,
+    credential_ref TEXT NOT NULL,
+    relay_url TEXT NOT NULL,
+    next_attempt_at INTEGER NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    expires_at INTEGER NOT NULL,
+    last_error TEXT,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_push_relay_revocations_due ON push_relay_revocations (next_attempt_at);
 
 -- Per-device location ingest tokens; only the SHA-256 of a token is kept
 -- (istota.location.ingest_tokens). The legacy shared token stays in `secrets`.

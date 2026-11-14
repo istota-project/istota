@@ -88,6 +88,53 @@ async def test_private_push_is_not_advertised_without_direct_delivery(client, co
     assert push == {"delivery": "unavailable"}
 
 
+RELAY = "https://relay.example.com/istota"
+
+
+def _relay_push(**overrides):
+    fields = dict(enabled=True, delivery="relay", content="private",
+                  signing_key_path="/data/config/push/signing.key", relay_url=RELAY)
+    fields.update(overrides)
+    return PushConfig(**fields)
+
+
+async def test_relay_delivery_is_a_separate_key_and_delivery_stays_unavailable(client, configured):
+    configured._config.push = _relay_push()
+    response = await client.get(URL)
+    # Shells 0.12 to 0.14 accept only `unavailable` and `direct`; the path is
+    # part of the URL the app compares, so it is sent whole. Relay delivery is
+    # private only, so the envelope versions ride beside the transport.
+    assert response.json()["push"] == {
+        "delivery": "unavailable",
+        "private": {"versions": [1]},
+        "relay": {"versions": [1], "url": RELAY},
+    }
+    assert "signing.key" not in response.text
+    assert len(response.content) < 512
+
+
+async def test_relay_delivery_never_reports_direct_even_with_apns_settings(client, configured):
+    configured._config.push = _relay_push(apns_key_path="/run/secrets/apns-key",
+                                          apns_key_id="example-key", apns_team_id="example-team")
+    push = (await client.get(URL)).json()["push"]
+    assert push["delivery"] == "unavailable"
+    assert push["private"] == {"versions": [1]}
+    assert push["relay"] == {"versions": [1], "url": RELAY}
+
+
+@pytest.mark.parametrize("overrides", [{"enabled": False}, {"dispatch_interval_seconds": 0}])
+async def test_relay_is_not_advertised_while_push_is_off(client, configured, overrides):
+    configured._config.push = _relay_push(**overrides)
+    assert (await client.get(URL)).json()["push"] == {"delivery": "unavailable"}
+
+
+async def test_direct_delivery_has_no_relay_key(client, configured):
+    configured._config.push = PushConfig(enabled=True, apns_key_path="/run/secrets/apns-key",
+                                         apns_key_id="example-key", apns_team_id="example-team",
+                                         relay_url=RELAY)
+    assert "relay" not in (await client.get(URL)).json()["push"]
+
+
 @pytest.mark.parametrize("field,value", [
     ("apns_key_path", ""), ("apns_key_id", ""), ("apns_team_id", ""),
     ("apns_topic", ""), ("dispatch_interval_seconds", 0),

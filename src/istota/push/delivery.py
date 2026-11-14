@@ -3,7 +3,8 @@
 The dispatcher and `istota push test` describe an alert once, as a
 `LogicalPush`; `build_delivery` turns it into the exact APNs body for one
 device in that device's content mode, and `send_prepared` is the only caller of
-`apns.send`. The three modes:
+`apns.send` and of `relay_client.send`, which carries the same envelope to the
+push relay under `[push] delivery = "relay"`. The three modes:
 
 - `legacy`: today's plaintext payload, from the helpers below, unchanged.
 - `generic`: a private deployment and a device without an encrypted
@@ -19,7 +20,7 @@ import unicodedata
 from dataclasses import dataclass
 
 from istota.config import Config
-from istota.push import apns, devices, envelope
+from istota.push import apns, devices, envelope, relay_client
 
 _ALERT_TITLE_MAX = 80
 _ALERT_BODY_MAX = 180
@@ -199,6 +200,12 @@ def build_delivery(config: Config, device: dict, logical: LogicalPush, *, now: f
 
 
 def send_prepared(config: Config, device: dict, prepared: PreparedPush) -> apns.ApnsResult:
-    """Send the measured bytes; the one place anything calls `apns.send`."""
+    """Send the measured bytes; the one place anything calls `apns.send` or the relay.
+
+    Under `[push] delivery = "relay"` the same prepared push goes to the relay
+    with the device's send capability; the envelope is the one built above.
+    """
+    if config.push.delivery == "relay":
+        return relay_client.send(config, device, prepared)
     return apns.send(config.push, device, prepared.payload, collapse_id=prepared.collapse_id,
                      priority=prepared.priority, expiration=0)

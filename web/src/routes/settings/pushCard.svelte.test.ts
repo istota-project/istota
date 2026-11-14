@@ -45,6 +45,7 @@ const device: PushDevice = {
   last_error: null,
   content: 'legacy',
   stale_key: false,
+  enrollment_state: 'active',
 };
 
 beforeEach(() => {
@@ -497,6 +498,64 @@ it('enrolls a 0.15.0 app privately when the server offers it', async () => {
   });
   expect(connection.recordPushRegistration).toHaveBeenCalledOnce();
   expect(native.cancelPrivateRegistration).not.toHaveBeenCalled();
+});
+
+it('keeps a lasting line on a device whose relay route needs repair', async () => {
+  api.listPushDevices.mockResolvedValue({
+    devices: [
+      { ...device, id: 1, token_tail: '000001', content: 'encrypted', enrollment_state: 'repair' },
+      { ...device, id: 2, token_tail: '000002', content: 'encrypted' },
+    ],
+  });
+  mount();
+  await screen.findByText(/…000001$/);
+  expect(
+    rowFor('000001').getByText(/Notifications to this device have stopped/),
+  ).toBeInTheDocument();
+  expect(rowFor('000001').getByText(/register it again/)).toBeInTheDocument();
+  expect(rowFor('000002').queryByText(/have stopped/)).toBeNull();
+});
+
+it('shows a stale key under relay delivery as a stopped device, not a preview change', async () => {
+  // The server lists a stale relay enrollment as repair: nothing reaches it until it enrolls again.
+  api.listPushDevices.mockResolvedValue({
+    devices: [{ ...device, content: 'generic', stale_key: true, enrollment_state: 'repair' }],
+  });
+  mount();
+  await screen.findByText(/…ababab$/);
+  rowFor('ababab').getByText(/Notifications to this device have stopped/);
+  expect(rowFor('ababab').queryByText(/to show private previews/)).toBeNull();
+});
+
+it('says a relay installation needs iOS 17 when this device cannot enroll privately', async () => {
+  const { plugin } = genericShell();
+  Object.defineProperty(navigator, 'userAgent', { value: 'IstotaApp/0.16.0', configurable: true });
+  const native = plugin as unknown as Record<string, ReturnType<typeof vi.fn>>;
+  native.preparePrivateRegistration = vi.fn(async () => ({
+    content: 'generic',
+    generation: 'G'.repeat(22),
+    token: 'cd'.repeat(32),
+    environment: 'production',
+    versions: [1],
+  }));
+  native.commitPrivateRegistration = vi.fn(async () => ({}));
+  native.cancelPrivateRegistration = vi.fn(async () => ({}));
+  api.getMobilePushCapabilities.mockResolvedValue({
+    delivery: 'unavailable',
+    private: { versions: [1] },
+    relay: { versions: [1], url: 'https://relay.example.com/istota' },
+  });
+  api.getPushSenderKey.mockResolvedValue({ version: 1, key_id: 'S'.repeat(43), public_key: 'P' });
+  api.registerPushDevice.mockRejectedValueOnce(
+    Object.assign(new Error('private push not offered'), { status: 409 }),
+  );
+  mount();
+  await fireEvent.click(await screen.findByRole('button', { name: 'Register this device' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'Private notifications on this server need iOS 17 or later.',
+  );
+  expect(screen.queryByText('This device is registered.')).not.toBeInTheDocument();
+  expect(native.cancelPrivateRegistration).toHaveBeenCalledOnce();
 });
 
 it('does not claim success when the app refuses the registration receipt', async () => {
