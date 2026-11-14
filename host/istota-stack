@@ -756,17 +756,34 @@ browser_subnet() {
 
 # What the firewall opens for the hosts granted to the browser, one IPv4 address a line:
 # the addresses those names resolve to now, as far as the firewall drops them (a
-# public one passes anyway). A name that will not resolve grants nothing.
+# public one passes anyway). A name that will not resolve grants nothing. A name
+# with HOST_GATEWAY_ADDR among its addresses grants nothing either (#953): a grant
+# names no port and sits above the loopback block, so it would open every port on
+# the Mac's loopback. The egress unit refuses that address too, if one gets through.
 cmd_browser_grant_addresses() {
     [ "$#" -eq 0 ] || { usage >&2; exit 64; }
     local names
     names="$(browser_private_hosts)"
     [ -n "$names" ] || return 0
-    python3 - "$names" <<'PY'
+    python3 - "$names" "$(env_get "$HOST_ENV" HOST_GATEWAY_ADDR)" <<'PY'
 import ipaddress, subprocess, sys
 # The ranges host/istota-devbox-egress.sh drops for the browser, held equal by a test.
 DROPPED = "169.254.0.0/16 168.63.129.16/32 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10"
 networks = [ipaddress.ip_network(n) for n in DROPPED.split()]
+# Read as systemd's EnvironmentFile= and the egress script's is_ipv4 read it: quotes
+# and padding stripped, decimal octets with leading zeros allowed.
+raw = sys.argv[2].strip().strip("\"'").strip()
+gateway = None
+if raw:
+    octets = raw.split(".")
+    try:
+        if len(octets) == 4 and all(o.isdigit() for o in octets):
+            gateway = ipaddress.IPv4Address(".".join(str(int(o)) for o in octets))
+    except ValueError:
+        pass
+    if gateway is None:
+        print("[istota-stack] private_hosts: HOST_GATEWAY_ADDR in host.env is not an IPv4 address; "
+              "a grant naming the host gateway is not refused", file=sys.stderr)
 found = set()
 for name in sys.argv[1].split(","):
     try:
@@ -776,11 +793,17 @@ for name in sys.argv[1].split(","):
     addresses = [line.split()[0] for line in output.splitlines() if line.strip()]
     if not addresses:
         print(f"[istota-stack] private_hosts: {name} has no IPv4 address now; the firewall opens nothing for it", file=sys.stderr)
+    ips = []
     for address in addresses:
         try:
-            ip = ipaddress.ip_address(address)
+            ips.append(ipaddress.ip_address(address))
         except ValueError:
             continue
+    if gateway is not None and gateway in ips:
+        print(f"[istota-stack] private_hosts: {name} is the host gateway, which forwards to the Mac's loopback; "
+              "the browser may not reach it, so the firewall opens nothing for it", file=sys.stderr)
+        continue
+    for ip in ips:
         if any(ip in network for network in networks):
             found.add(ip)
 for ip in sorted(found):
