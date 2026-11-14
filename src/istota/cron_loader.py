@@ -934,6 +934,15 @@ def _parse_jobs(
                 f"Job '{name or '(unnamed)'}': needs both a name and a cron schedule"
             )
             continue
+        # A row with a schedule croniter refuses raised out of `check_scheduled_jobs`
+        # and stopped every user's jobs behind it, every tick (#959).
+        if not croniter.is_valid(cron):
+            logger.warning(
+                "Skipping job '%s' in CRON.md for %s: cron is not a valid expression",
+                name, user_id,
+            )
+            errors.append(f"Job '{name}': cron {cron[:80]!r} is not a cron schedule")
+            continue
         # Resolve prompt_file to prompt contents
         if prompt_file:
             if prompt or command:

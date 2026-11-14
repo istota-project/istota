@@ -30,7 +30,8 @@ Reminders are one-shot scheduled jobs in CRON.md. There is no separate reminder 
    - `once = true`: The job is automatically removed from DB and CRON.md after it fires successfully. No manual cleanup needed
    - For email delivery, use `target = "email"` instead
 5. **Write the updated CRON.md.**
-6. **Confirm to the user** what was set and when it will fire in human-readable form (e.g., "I'll remind you to call the dentist at 4:30 PM today").
+6. **Run `istota-skill schedules check`** and fix every problem it lists, then run it again. A reminder the scheduler drops never fires. If the check is refused, tell the user you could not confirm the reminder was set.
+7. **Confirm to the user** what was set and when it will fire in human-readable form (e.g., "I'll remind you to call the dentist at 4:30 PM today").
 
 ## Critical rule
 
