@@ -806,12 +806,12 @@ def _multistatus(found: str, missing: str = "") -> bytes:
     return (body + "</d:response></d:multistatus>").encode()
 
 
-def _discover(xml: bytes):
+def _discover(xml: bytes, *, base="https://cloud.example.com/remote.php/dav/", principal_url=None):
     """Run discovery for alice over a real caldav Calendar whose PROPFIND answers ``xml``."""
     import caldav
     from caldav.davclient import DAVResponse
 
-    client = caldav.DAVClient(url="https://cloud.example.com/remote.php/dav/")
+    client = caldav.DAVClient(url=base)
     sent = []
 
     def propfind(url, body, depth):
@@ -824,7 +824,10 @@ def _discover(xml: bytes):
 
     client.propfind = propfind
     calendar = caldav.Calendar(client=client, url=CAL_PATH, name="Personal")
-    client.principal = lambda: SimpleNamespace(calendars=lambda: [calendar])
+    principal = SimpleNamespace(calendars=lambda: [calendar])
+    if principal_url is not None:
+        principal.url = caldav.lib.url.URL.objectify(principal_url)
+    client.principal = lambda: principal
     return get_calendars_for_user(client, "alice"), sent
 
 
@@ -856,6 +859,86 @@ class TestCalendarWriteAccess:
         bob = _OWNER_PROP.replace("alice", "bob")
         calendars, _ = _discover(_multistatus(bob + _privileges("write")))
         assert calendars == []
+
+
+RADICALE = "https://dav.example.com/"
+
+
+def _radicale_owner(href: str) -> str:
+    return f"<d:owner><d:href>{href}</d:href></d:owner>" + _privileges("read", "write")
+
+
+class TestOwnerOnAServerWithAnotherPrincipalLayout:
+    """ISSUE-962: a plain Radicale names its principals ``/<user>/``.
+
+    The owner check reads the layout off the connecting account's own
+    principal, so a server with no ``principals/users/`` segment still works
+    and a href outside that layout still names nobody.
+    """
+
+    @pytest.mark.parametrize("principal_url", [
+        f"{RADICALE}alice/", f"{RADICALE}istota/",
+    ], ids=["the-user-connects", "the-bot-connects"])
+    @pytest.mark.parametrize("href", [
+        "/alice/", "/alice", f"{RADICALE}alice/",
+    ], ids=["path", "no-trailing-slash", "absolute"])
+    def test_the_users_own_calendar_is_kept(self, principal_url, href):
+        calendars, _ = _discover(
+            _multistatus(_radicale_owner(href)), base=RADICALE, principal_url=principal_url)
+        assert [name for name, _, _ in calendars] == ["Personal"]
+
+    @pytest.mark.parametrize("href", [
+        "/bob/",
+        "/users/alice/",
+        "/",
+        "/alice/x/",
+        "https://other.example.com/alice/",
+        "/alice/?x=1",
+        "http://dav.example.com/alice/",
+        "https://dav.example.com:8443/alice/",
+        "//other.example.com/alice/",
+        "/al%2Fice/",
+        "/%2E%2E/",
+    ])
+    def test_a_href_naming_anyone_else_is_skipped(self, href):
+        calendars, _ = _discover(
+            _multistatus(_radicale_owner(href)), base=RADICALE,
+            principal_url=f"{RADICALE}istota/")
+        assert calendars == []
+
+    def test_a_nested_layout_is_read_off_the_principal(self):
+        calendars, _ = _discover(
+            _multistatus(_radicale_owner("/dav/people/alice/")), base=RADICALE,
+            principal_url=f"{RADICALE}dav/people/istota/")
+        assert [name for name, _, _ in calendars] == ["Personal"]
+
+    @pytest.mark.parametrize("href", [
+        "/remote.php/dav/principals/groups/alice/",
+        "/remote.php/dav/principals/calendar-resources/alice/",
+        "/remote.php/dav/principals/calendar-rooms/alice/",
+        "/remote.php/dav/principals/users/bob/",
+    ])
+    def test_a_nextcloud_href_naming_anyone_else_is_skipped(self, href):
+        calendars, _ = _discover(
+            _multistatus(_radicale_owner(href)),
+            principal_url="https://cloud.example.com/remote.php/dav/principals/users/istota/")
+        assert calendars == []
+
+    @pytest.mark.parametrize("href, principal_url", [
+        ("https://dav.example.com/alice/", "https://dav.example.com:443/istota/"),
+        ("https://dav.example.com:443/alice/", "https://dav.example.com/istota/"),
+        ("https://DAV.example.com/alice/", "https://dav.example.com/istota/"),
+    ], ids=["port-on-principal", "port-on-href", "host-case"])
+    def test_an_absolute_href_matches_its_host_with_the_default_port(self, href, principal_url):
+        calendars, _ = _discover(
+            _multistatus(_radicale_owner(href)), base=RADICALE, principal_url=principal_url)
+        assert [name for name, _, _ in calendars] == ["Personal"]
+
+    def test_the_nextcloud_layout_still_matches_with_a_principal(self):
+        calendars, _ = _discover(
+            _multistatus(_OWNER_PROP + _privileges("write")),
+            principal_url="https://cloud.example.com/remote.php/dav/principals/users/istota/")
+        assert [name for name, _, _ in calendars] == ["Personal"]
 
 
 # --- Feeds a user shared with Istota: `feed:<id>`, read from the cache --------
