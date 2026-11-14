@@ -1111,6 +1111,58 @@ class TestThePushTask:
         assert apply.get("no_log") is True
 
 
+def _push_refusals(key_file: str, push_config: dict) -> list[str]:
+    """The push input checks that run for these variables and fail, by task name."""
+    env = jinja2.Environment(undefined=jinja2.StrictUndefined)
+    context = {"istota_apns_key_file": key_file, "istota_push_config": push_config}
+    refused = []
+    for task in _load("tasks/push.yml"):
+        check = task.get("ansible.builtin.assert")
+        if not check or "istota_push_config" not in yaml.safe_dump(check):
+            continue
+        if not _when_holds(task, context):
+            continue
+        if not all(env.compile_expression(that)(**context) for that in check["that"]):
+            refused.append(task["name"])
+    return refused
+
+
+class TestPushDeliveryInputs:
+    """Relay delivery reads no APNs setting (#967): the task neither requires
+    nor stages one, and refuses one left over from direct delivery."""
+
+    KEY = "files/AuthKey.p8"
+    DIRECT = {"enabled": True, "apns_key_id": "ABCDEFGHIJ", "apns_team_id": "KLMNOPQRST",
+              "apns_topic": "com.example.app"}
+    RELAY = {"enabled": True, "delivery": "relay", "content": "private",
+             "relay_url": "https://relay.example.com/istota"}
+
+    def test_relay_needs_no_apns_key_or_ids(self):
+        assert _push_refusals("", self.RELAY) == []
+
+    def test_direct_keeps_todays_checks(self):
+        assert _push_refusals(self.KEY, self.DIRECT) == []
+        assert _push_refusals(self.KEY, {**self.DIRECT, "delivery": "direct"}) == []
+        assert _push_refusals("", self.DIRECT) == ["Check direct delivery inputs"]
+        without_id = {k: v for k, v in self.DIRECT.items() if k != "apns_key_id"}
+        assert _push_refusals(self.KEY, without_id) == ["Check direct delivery inputs"]
+
+    @pytest.mark.parametrize("key,extra", [
+        (KEY, {}), ("", {"apns_key_id": "ABCDEFGHIJ"}), ("", {"apns_team_id": "KLMNOPQRST"}),
+        ("", {"apns_topic": "com.example.app"}),
+    ])
+    def test_relay_refuses_a_leftover_apns_input(self, key, extra):
+        assert _push_refusals(key, {**self.RELAY, **extra}) == ["Check relay delivery inputs"]
+
+    def test_an_unknown_delivery_is_refused(self):
+        assert _push_refusals(self.KEY, {**self.DIRECT, "delivery": "pigeon"}) == ["Check push deployment inputs"]
+
+    def test_the_apns_key_is_staged_only_for_direct_delivery(self):
+        task = _tasks()[_index("Stage the vaulted APNs signing key")]
+        assert _when_holds(task, {"istota_push_config": self.DIRECT})
+        assert not _when_holds(task, {"istota_push_config": self.RELAY})
+
+
 class TestTheProvisionDecisionIsDurable:
     """A play that dies after host.env, .env or rclone.conf changed and before
     provision.sh finished must still provision on the next play, so the

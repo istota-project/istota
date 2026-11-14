@@ -108,7 +108,7 @@ ansible-playbook site.yml --limit istota-vm --tags istota_update -e istota_updat
 
 ### iOS push deployment
 
-`--tags istota_push` installs an APNs signing key and updates only `[push]` in the live config. It skips the saved settings plan, user provisioning, release updates and firewall tasks. The deployed image must already include native push and HTTP/2 support. A normal role run does not select these tasks; check mode refuses before staging a credential.
+`--tags istota_push` updates only `[push]` in the live config and, for direct delivery to APNs, installs an APNs signing key. It skips the saved settings plan, user provisioning, release updates and firewall tasks. The deployed image must already include native push, and for direct delivery HTTP/2 support. A normal role run does not select these tasks; check mode refuses before staging a credential.
 
 ```yaml
 istota_apns_key_file: "{{ playbook_dir }}/files/app-keys/AuthKey.p8"
@@ -119,11 +119,23 @@ istota_push_config:
   apns_topic: com.example.app
 ```
 
+For relay delivery, the push relay holds the APNs key and the installation reads no APNs setting. Leave `istota_apns_key_file` empty and give no APNs IDs or topic:
+
+```yaml
+istota_push_config:
+  enabled: true
+  delivery: relay
+  content: private
+  relay_url: https://relay.example.com/istota
+```
+
+The task then stages no APNs key, removes `apns_key_path`, `apns_key_id`, `apns_team_id` and `apns_topic` from the live `[push]`, and deletes the key a direct run staged at `config/apns/AuthKey.p8`, after the config stops naming it. The vaulted source in the inventory stays the copy, and a later direct run writes it again. No other file is removed, whatever `apns_key_path` named before. It refuses an APNs input it would only ignore: a set `istota_apns_key_file`, an APNs ID or topic, or an `ISTOTA_APNS_KEY_PATH` override in the host's environment. A `[push]` already on relay delivery is not switched back by settings that leave `delivery` out; set `delivery: direct` to switch back. `istota doctor --only push.relay` then has no APNs setting to warn about.
+
 For private push, add `content: private` to `istota_push_config`. The task handles a signing key only when the merged content is `private`; under `legacy` it ignores `signing_key_path`. On the first enable, the task creates the key: at `signing_key_path` if the config sets it, otherwise at `/data/config/push/signing.pem`, which it writes into `[push]`. It is an Ed25519 key, mode 0600 and owned by the service account, with its public half beside it as `signing.pem.pub`. A rerun leaves a valid key alone. It repairs two things and counts each as a change: a missing `.pub` is written from the private key, and a key owned by the service account with a mode other than 0600 is set to 0600. Everything else refuses the change rather than replacing the key, because a new key makes every enrolled phone enroll again: a key that does not parse, a `.pub` that does not match it, a `.pub` with no private key, a key owned by another account, and a conflicting `ISTOTA_PUSH_SIGNING_KEY_PATH` override.
 
 A lost key is refused too. When the live config already has `content = "private"` and the same `signing_key_path`, and both key files are gone, the task does not create a new pair. Restore the pair from a backup, or accept that every device enrolls again and set `istota_push_replace_signing_key: true` for one run. That variable only creates a missing pair; it never overwrites a valid one, which stays `istota-stack push-key create --force` on the VM (or `istota push keygen --force` wherever the config directory is writable). `istota-stack push-key import` writes a saved key from stdin instead. The apply task is `no_log`, so a refusal is reported by a following task that prints only the helper's error output.
 
-Keep the `.p8` source vault-encrypted. The role stages it with `no_log` and diff output disabled, then uses the installed stack's container privilege drop to write `config/apns/AuthKey.p8` as the service account, mode 0600. The configured path inside the container is `/data/config/apns/AuthKey.p8`. A conflicting `ISTOTA_APNS_KEY_PATH` override refuses the change. The key's P-256 format is checked locally; matching its key ID and Apple authorization still needs an APNs send.
+Keep the `.p8` source vault-encrypted. Under direct delivery the role stages it with `no_log` and diff output disabled, then uses the installed stack's container privilege drop to write `config/apns/AuthKey.p8` as the service account, mode 0600. The configured path inside the container is `/data/config/apns/AuthKey.p8`. A conflicting `ISTOTA_APNS_KEY_PATH` override refuses the change. The key's P-256 format is checked locally; matching its key ID and Apple authorization still needs an APNs send.
 
 ```sh
 ansible-playbook site.yml --limit istota-vm --tags istota_push -e @push-deployment.yml

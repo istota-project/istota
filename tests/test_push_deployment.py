@@ -309,6 +309,136 @@ def test_legacy_content_ignores_a_signing_key_path(deployment, monkeypatch):
     assert not target.parent.exists()
 
 
+RELAY = {"enabled": True, "delivery": "relay", "content": "private",
+         "relay_url": "https://relay.example.com/istota"}
+APNS_SETTINGS = ("apns_key_path", "apns_key_id", "apns_team_id", "apns_topic")
+
+
+def test_switching_to_relay_drops_every_apns_setting_and_the_staged_key(deployment, monkeypatch):
+    from istota import doctor
+    from istota.config import load_config
+
+    module, config, _, _, key, settings = deployment
+    staged = config.parent / "apns/AuthKey.p8"
+    assert module.configure(config, settings, key) == 2
+    assert staged.exists()
+    assert module.configure(config, dict(RELAY), None) == 2
+    push = tomllib.loads(config.read_text())["push"]
+    assert not set(APNS_SETTINGS) & set(push)
+    assert push["delivery"] == "relay" and push["chat_delay_seconds"] == 28
+    assert not staged.exists() and not staged.parent.exists()
+    assert envelope.load_signing_key(Path(push["signing_key_path"]))
+    stamp = config.stat().st_mtime_ns
+    assert module.configure(config, dict(RELAY), None) == 0
+    assert config.stat().st_mtime_ns == stamp
+    monkeypatch.delenv("ISTOTA_PUSH_RELAY_URL", raising=False)
+    result = doctor.check_push_relay(load_config(config, apply_db_overlays=False), probe=False)
+    assert result.status == doctor.OK, result.detail
+
+
+def test_a_first_relay_deployment_needs_no_apns_input(deployment):
+    module, config, _, _, _, _ = deployment
+    assert module.configure(config, dict(RELAY), None) == 2
+    push = tomllib.loads(config.read_text())["push"]
+    assert not set(APNS_SETTINGS) & set(push)
+    assert not (config.parent / "apns").exists()
+
+
+@pytest.mark.parametrize("extra", [{"apns_key_id": "ABCDEFGHIJ"}, {"apns_team_id": "KLMNOPQRST"},
+                                   {"apns_topic": "com.example.app"}, {"key": True}])
+def test_relay_refuses_apns_input_and_writes_nothing(deployment, extra):
+    module, config, _, _, key, _ = deployment
+    settings = {**RELAY, **{name: value for name, value in extra.items() if name != "key"}}
+    original = config.read_bytes()
+    with pytest.raises(ValueError, match="[Rr]elay"):
+        module.configure(config, settings, key if "key" in extra else None)
+    assert config.read_bytes() == original
+    assert not (config.parent / "push").exists()
+
+
+def test_relay_refuses_an_apns_key_path_override(deployment, monkeypatch):
+    module, config, _, _, _, _ = deployment
+    monkeypatch.setenv("ISTOTA_APNS_KEY_PATH", str(config.parent / "apns/AuthKey.p8"))
+    original = config.read_bytes()
+    with pytest.raises(ValueError, match="ISTOTA_APNS_KEY_PATH"):
+        module.configure(config, dict(RELAY), None)
+    assert config.read_bytes() == original
+
+
+def test_relay_leaves_a_symlinked_key_directory_alone(deployment, tmp_path):
+    module, config, _, _, _, _ = deployment
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "AuthKey.p8").write_bytes(b"someone else's file")
+    (config.parent / "apns").symlink_to(elsewhere)
+    with pytest.raises(ValueError, match="symlink"):
+        module.configure(config, dict(RELAY), None)
+    assert (elsewhere / "AuthKey.p8").exists()
+
+
+def test_a_key_left_by_an_interrupted_relay_run_is_removed_on_the_rerun(deployment):
+    module, config, _, _, _, _ = deployment
+    assert module.configure(config, dict(RELAY), None) == 2
+    staged = config.parent / "apns/AuthKey.p8"
+    staged.parent.mkdir(mode=0o700)
+    staged.write_bytes(b"left behind")
+    stamp = config.stat().st_mtime_ns
+    assert module.configure(config, dict(RELAY), None) == 2
+    assert not staged.exists()
+    assert config.stat().st_mtime_ns == stamp
+
+
+def test_a_key_that_cannot_be_removed_owes_a_restart(deployment):
+    module, config, _, _, key, settings = deployment
+    assert module.configure(config, settings, key) == 2
+    staged = config.parent / "apns/AuthKey.p8"
+    staged.unlink()
+    staged.mkdir()
+    assert module.configure(config, dict(RELAY), None) == 3
+    assert tomllib.loads(config.read_text())["push"]["delivery"] == "relay"
+
+
+def test_settings_that_omit_delivery_do_not_switch_a_relay_installation_back(deployment):
+    module, config, _, _, key, settings = deployment
+    assert module.configure(config, dict(RELAY), None) == 2
+    original = config.read_bytes()
+    with pytest.raises(ValueError, match="delivery"):
+        module.configure(config, settings, key)
+    assert config.read_bytes() == original
+    assert not (config.parent / "apns").exists()
+
+
+def test_direct_delivery_still_needs_the_apns_key(deployment):
+    module, config, _, _, _, settings = deployment
+    original = config.read_bytes()
+    with pytest.raises(ValueError, match="APNs key"):
+        module.configure(config, settings, None)
+    assert config.read_bytes() == original
+
+
+def test_an_unknown_delivery_is_refused(deployment):
+    module, config, _, _, key, settings = deployment
+    with pytest.raises(ValueError, match="Unknown push delivery"):
+        module.configure(config, {**settings, "delivery": "carrier-pigeon"}, key)
+
+
+def test_main_passes_no_key_when_none_was_staged(deployment, monkeypatch, tmp_path):
+    module = deployment[0]
+    seen = {}
+
+    def configure(config_path, settings, key_data, *, replace_signing_key=False):
+        seen["key"] = key_data
+        return 0
+
+    inputs = tmp_path / "relay-inputs"
+    inputs.mkdir()
+    (inputs / "settings.json").write_text("{}")
+    monkeypatch.setattr(module, "configure", configure)
+    monkeypatch.setattr(module.sys, "argv", ["configure_push.py", str(inputs)])
+    assert module.main() == 0
+    assert seen == {"key": None}
+
+
 def _run_main(module, monkeypatch, inputs, configure, marker=False):
     inputs.mkdir()
     (inputs / "settings.json").write_text("{}")

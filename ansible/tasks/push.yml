@@ -2,14 +2,33 @@
 - name: Check push deployment inputs
   ansible.builtin.assert:
     that:
-      - istota_apns_key_file | length > 0
       - istota_push_config is mapping
       - istota_push_config.enabled is defined
+      - (istota_push_config.delivery | default('direct')) in ['direct', 'relay']
+    fail_msg: Set istota_push_config, with enabled and a delivery of direct or relay, before running istota_push.
+    quiet: true
+
+- name: Check direct delivery inputs
+  ansible.builtin.assert:
+    that:
+      - istota_apns_key_file | length > 0
       - istota_push_config.apns_key_id is defined
       - istota_push_config.apns_team_id is defined
       - istota_push_config.apns_topic is defined
-    fail_msg: Set istota_apns_key_file and istota_push_config before running istota_push.
+    fail_msg: Direct delivery needs istota_apns_key_file and apns_key_id, apns_team_id and apns_topic in istota_push_config.
     quiet: true
+  when: (istota_push_config.delivery | default('direct')) == 'direct'
+
+- name: Check relay delivery inputs
+  ansible.builtin.assert:
+    that:
+      - istota_apns_key_file | length == 0
+      - istota_push_config.apns_key_id is not defined
+      - istota_push_config.apns_team_id is not defined
+      - istota_push_config.apns_topic is not defined
+    fail_msg: Relay delivery reads no APNs settings. Unset istota_apns_key_file and remove apns_key_id, apns_team_id and apns_topic from istota_push_config.
+    quiet: true
+  when: (istota_push_config.delivery | default('direct')) == 'relay'
 
 - name: Refuse push deployment in check mode
   ansible.builtin.assert:
@@ -51,6 +70,7 @@
       no_log: true
       diff: false
       changed_when: false
+      when: (istota_push_config.delivery | default('direct')) == 'direct'
 
     - name: Stage the push settings
       ansible.builtin.copy:
