@@ -23,7 +23,9 @@ not name is unreachable from the istota and the browser containers, and
 reachable from the VM itself, whose own traffic is not filtered. The browser
 reaches the allowed port no more than the other: its own drop of the private
 ranges (#884), which takes in the gateway, sits in front of the block's
-returns, so the allow list opens nothing to it (#952).
+returns, so the allow list opens nothing to it (#952). Nor does a
+`[private_hosts]` grant: one naming the gateway, by a name that resolves to it
+or as the literal address, is left out of what the grants unit opens (#953).
 
 Row L3: only the workspace folder, and in developer mode the checkout
 read-only, crosses from the Mac. The VM mounts exactly the template's two
@@ -48,6 +50,8 @@ Controls (`scripts/test-vm-negative-control.sh`):
   unit re-run, as on a VM set up without the block;
 - `no-browser-firewall-on-host-folder`: the browser's own DOCKER-USER rules
   (#884) removed, which are what close the allowed port to the browser;
+- `gateway-grant-not-refused`: the gateway's refusal removed from the installed
+  `istota-stack browser-grant-addresses` and the grants unit's script (#953);
 - `default-mounts-in-template`: the VM gets the mounts Lima resolves from the
   template with `template:_default/mounts` added to its `base:`, which is what
   `template:debian-13` would bring in: the Mac home, read-only;
@@ -57,6 +61,7 @@ Controls (`scripts/test-vm-negative-control.sh`):
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
@@ -296,6 +301,49 @@ class TestTheMacLoopbackIsClosedToContainers:
         outcome = _connect(loopback, targets, cid=cid)
         reached = sorted(target for target, result in outcome.items() if result == "reached")
         assert reached == [], f"row L2: the browser container reached a Mac port: {outcome}"
+
+
+GATEWAY_GRANT_NAME = "mac.vmtier.test"
+
+
+@pytest.fixture(scope="class")
+def gateway_granted(loopback):
+    """A browser grant for a name resolving to the gateway, and for the gateway's
+    literal address. Under `gateway-grant-not-refused` both installed scripts lose
+    the refusal first."""
+    gateway = lima.env_value(loopback, f"{lima.STACK}/host.env", "HOST_GATEWAY_ADDR")
+    assert gateway == lima.mac_address(loopback), "the in-session control: HOST_GATEWAY_ADDR is the Mac"
+    control = (lima.gateway_grant_refusal_removed(loopback)
+               if lima.control() == "gateway-grant-not-refused" else contextlib.nullcontext())
+    with control, lima.browser_grant(loopback, {GATEWAY_GRANT_NAME: gateway}, [GATEWAY_GRANT_NAME, gateway]):
+        yield loopback, gateway
+
+
+@parity.witness("L2")
+class TestABrowserGrantCannotOpenTheMac:
+    """#953: a grant's rule names no port and sits above the block, so a grant the
+    gateway answered would open every port on the Mac's loopback to the browser.
+
+    Control `gateway-grant-not-refused`: the refusal removed from `istota-stack
+    browser-grant-addresses` and from the grants unit's script.
+    """
+
+    def test_the_lookup_leaves_the_gateway_out(self, gateway_granted):
+        vm, gateway = gateway_granted
+        result = vm.run("istota-stack browser-grant-addresses")
+        assert gateway not in result.stdout.split(), f"the gateway is granted: {result.stdout!r}"
+        assert GATEWAY_GRANT_NAME in result.stderr, result.stderr
+
+    def test_the_browser_reaches_neither_mac_port(self, gateway_granted, model, mac_listener):
+        vm, gateway = gateway_granted
+        targets = [f"{gateway}:{mac_listener}", f"{gateway}:{model.port}"]
+        from_vm = _connect(vm, targets)
+        assert set(from_vm.values()) == {"reached"}, f"the in-session control: the VM reaches both: {from_vm}"
+        cid = lima.container(vm, "browser")
+        assert cid, "browser is not running"
+        outcome = _connect(vm, targets, cid=cid)
+        reached = sorted(target for target, result in outcome.items() if result == "reached")
+        assert reached == [], f"row L2: a grant opened a Mac port to the browser: {outcome}"
 
 
 class TestTheBlockLeavesDnsAlone:

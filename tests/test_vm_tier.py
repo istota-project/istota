@@ -122,6 +122,18 @@ class TestTheRoleControls:
             assert old != new, name
 
 
+class TestTheGatewayGrantControl:
+    def test_each_mutation_applies_once_to_its_script(self):
+        """The control edits the installed scripts in the VM; a fragment that no
+        longer matches would fail it minutes into a session."""
+        from tests.vm import lima
+
+        assert len(lima.GATEWAY_GRANT_CONTROL) == 2
+        for source, old, new in lima.GATEWAY_GRANT_CONTROL.values():
+            assert (REPO / source).read_text().count(old) == 1, source
+            assert old != new, source
+
+
 class TestTheMacShimControl:
     def test_it_applies_once_to_the_mac_cli(self):
         """Row L4's control edits a copy of the Mac CLI; a forward line that

@@ -34,6 +34,14 @@ is_ipv4() {
     done
 }
 
+# An address is_ipv4 accepted, its octets without leading zeros, for comparing two.
+canonical_ipv4() {
+    local IFS=.
+    local -a octets
+    read -r -a octets <<< "$1"
+    echo "$((10#${octets[0]})).$((10#${octets[1]})).$((10#${octets[2]})).$((10#${octets[3]}))"
+}
+
 DEVBOX_SUBNET_DEFAULT="172.30.0.0/24"
 devbox_failed=0
 SUBNET="${ISTOTA_DEVBOX_SUBNET:-$DEVBOX_SUBNET_DEFAULT}"
@@ -80,11 +88,18 @@ refresh_browser_grants() {
         answer="$("$stack" browser-grant-addresses)" \
             || { echo "could not read the browser's private hosts; granting none" >&2; answer=""; }
     fi
+    local gateway=""
+    if [ -n "${HOST_GATEWAY_ADDR:-}" ] && is_ipv4 "$HOST_GATEWAY_ADDR"; then
+        gateway="$(canonical_ipv4 "$HOST_GATEWAY_ADDR")"
+    fi
     for entry in $answer; do
-        if is_ipv4 "$entry"; then
-            wanted="${wanted} ${entry}/32"
-        else
+        if ! is_ipv4 "$entry"; then
             echo "browser-grant-addresses printed '${entry}', not an address; ignoring it" >&2
+        elif [ -n "$gateway" ] && [ "$(canonical_ipv4 "$entry")" = "$gateway" ]; then
+            # A grant names no port, so this would open every port on the Mac's loopback (#953).
+            echo "browser-grant-addresses printed the host gateway; the browser may not reach it" >&2
+        else
+            wanted="${wanted} ${entry}/32"
         fi
     done
     current="$(iptables -w 5 -S DOCKER-USER | { grep -F -- "--comment \"${BROWSER_GRANT_COMMENT}\"" || true; })"

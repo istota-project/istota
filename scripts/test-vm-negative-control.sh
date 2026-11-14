@@ -31,7 +31,7 @@
 #   nextcloud: no-storage-refusal (row 9), localize-without-config and
 #              localize-stops-mount-at-once (istota-stack localize-workspace)
 #   host-folder: no-workspace-marker (row L1), host-loopback-unblocked,
-#              no-browser-firewall-on-host-folder (row L2),
+#              no-browser-firewall-on-host-folder, gateway-grant-not-refused (row L2),
 #              default-mounts-in-template (row L3), mac-shim-without-drop (row L4)
 #   proxied:   no-allow-list, no-docker-user-rule (row 18),
 #              role-user-settings-unchecked (the management role's --check)
@@ -195,6 +195,11 @@ control host-loopback-unblocked \
 control no-browser-firewall-on-host-folder \
     "row L2: the browser's own DOCKER-USER rules removed, so the allow list opens the model port to it" \
     "$H::test_the_browser_reaches_neither_port"
+G="$VM/test_host_folder.py::TestABrowserGrantCannotOpenTheMac"
+control gateway-grant-not-refused \
+    "row L2: the host gateway's refusal removed from browser-grant-addresses and the grants unit (#953)" \
+    "$G::test_the_lookup_leaves_the_gateway_out" \
+    "$G::test_the_browser_reaches_neither_mac_port"
 M="$VM/test_host_folder.py::TestOnlyTheFolderCrossesFromTheMac"
 control default-mounts-in-template \
     "row L3: the template with template:_default/mounts in its base, so the Mac home is mounted" \

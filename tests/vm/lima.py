@@ -1117,6 +1117,82 @@ done
 """)
 
 
+@contextlib.contextmanager
+def browser_grant(vm: Vm, hosts: dict[str, str], grants: list[str]):
+    """`[private_hosts]` grants to the browser in the stack's config, with `hosts`
+    (name: address) in the VM's /etc/hosts, and the grants unit run. Both files and
+    the firewall are put back after."""
+    config = f"{STACK}/config/config.toml"
+    script = f"{SCRATCH}/browser-grant.py"
+    lines = "".join(f"{address} {name}\n" for name, address in hosts.items())
+    vm.run(f"cp -p {config} {SCRATCH}/config.toml.browser-grant && "
+           f"cp /etc/hosts {SCRATCH}/hosts.browser-grant && "
+           f"printf %s {shlex.quote(lines)} >> /etc/hosts")
+    vm.run(f"""cat > {script} <<'PY'
+import re, sys
+path, names = sys.argv[1], sys.argv[2:]
+text = open(path).read()
+lines = "\\n".join(f'"{{name}}" = ["browser"]' for name in names)
+if re.search(r"^\\[private_hosts\\]$", text, flags=re.M):
+    text = re.sub(r"^\\[private_hosts\\]$", "[private_hosts]\\n" + lines, text, count=1, flags=re.M)
+else:
+    text += "\\n[private_hosts]\\n" + lines + "\\n"
+open(path, "w").write(text)
+PY
+python3 {script} {config} {' '.join(shlex.quote(g) for g in grants)}""")
+    try:
+        vm.run("systemctl start istota-browser-grants.service")
+        yield
+    finally:
+        vm.run(f"cp -p {SCRATCH}/config.toml.browser-grant {config} && "
+               f"cp {SCRATCH}/hosts.browser-grant /etc/hosts && "
+               "systemctl start istota-browser-grants.service")
+
+
+#: The `gateway-grant-not-refused` control (row L2, #953): the host gateway's refusal
+#: taken out of both places a browser grant becomes a firewall rule, by installed
+#: path, with the source file a default-suite test holds each fragment to.
+GATEWAY_GRANT_CONTROL: dict[str, tuple[str, str, str]] = {
+    STACK_COMMAND: (
+        "host/istota-stack",
+        "    if gateway is not None and gateway in ips:\n",
+        "    if False:\n",
+    ),
+    "/usr/local/sbin/istota-devbox-egress": (
+        "host/istota-devbox-egress.sh",
+        '        elif [ -n "$gateway" ] && [ "$(canonical_ipv4 "$entry")" = "$gateway" ]; then\n',
+        "        elif false; then\n",
+    ),
+}
+
+
+@contextlib.contextmanager
+def gateway_grant_refusal_removed(vm: Vm):
+    """The installed scripts with GATEWAY_GRANT_CONTROL applied, put back after."""
+    edits = {path: [old, new] for path, (_, old, new) in GATEWAY_GRANT_CONTROL.items()}
+    # Every script is checked before any is written, so a refusal leaves none edited.
+    vm.run(f"""
+python3 - <<'PY'
+import json, shutil, sys
+edits = json.loads({json.dumps(edits)!r})
+texts = {{path: open(path).read() for path in edits}}
+for path, (old, _) in edits.items():
+    if texts[path].count(old) != 1:
+        sys.exit("the control does not apply to " + path)
+for path, (old, new) in edits.items():
+    shutil.copy2(path, "{SCRATCH}/" + path.rsplit("/", 1)[1] + ".gateway-grant")
+for path, (old, new) in edits.items():
+    open(path, "w").write(texts[path].replace(old, new))
+PY
+""")
+    try:
+        yield
+    finally:
+        restore = " && ".join(
+            f"cp -p {SCRATCH}/{path.rsplit('/', 1)[1]}.gateway-grant {path}" for path in GATEWAY_GRANT_CONTROL)
+        vm.run(restore)
+
+
 def remove_browser_rules(vm: Vm) -> None:
     """The browser's DOCKER-USER rules gone, as on a VM that never ran the
     egress unit: `no-browser-firewall` (row 17) and its host-folder twin (L2)."""

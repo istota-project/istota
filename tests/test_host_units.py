@@ -708,6 +708,29 @@ class TestTheBrowserFirewall:
         rig._run(tmp_path, {"ISTOTA_STACK_BIN": self._stack_bin(tmp_path, junk + "\n")})
         assert self._grants(rig, tmp_path) == []
 
+    def test_the_gateway_is_never_opened_even_if_the_lookup_names_it(self, rig, tmp_path):
+        """#953: istota-stack leaves it out; this holds if an answer carries it anyway,
+        since a grant names no port and would open every port on the Mac's loopback."""
+        env = {"ISTOTA_STACK_BIN": self._stack_bin(tmp_path, f"{GATEWAY}\n10.0.0.5\n"),
+               "HOST_LOOPBACK_BLOCK": "1", "HOST_GATEWAY_ADDR": GATEWAY, "HOST_LOOPBACK_ALLOW": "11434"}
+        result = rig._run(tmp_path, env)
+        assert [g[g.index("-d") + 1] for g in self._grants(rig, tmp_path)] == ["10.0.0.5/32"]
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 5432) == "DROP"
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 11434) == "DROP"
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 443, dst="10.0.0.5") == "RETURN"
+        assert "host gateway" in result.stderr
+        rig._run(tmp_path, env, args=["--browser-grants"])
+        assert [g[g.index("-d") + 1] for g in self._grants(rig, tmp_path)] == ["10.0.0.5/32"]
+
+    def test_the_gateway_is_matched_whatever_its_spelling(self, rig, tmp_path):
+        """is_ipv4 takes leading zeros, so the block is written for 192.168.005.2,
+        and a string compare would let 192.168.5.2 through."""
+        env = {"ISTOTA_STACK_BIN": self._stack_bin(tmp_path, "192.168.5.2\n"),
+               "HOST_LOOPBACK_BLOCK": "1", "HOST_GATEWAY_ADDR": "192.168.005.2"}
+        rig._run(tmp_path, env)
+        assert self._grants(rig, tmp_path) == []
+        assert rig._verdict(tmp_path, BROWSER, "tcp", 5432) == "DROP"
+
     def test_a_full_run_keeps_grants_in_front_of_the_drops_and_converges(self, rig, tmp_path):
         env = {"ISTOTA_STACK_BIN": self._stack_bin(tmp_path, "10.0.0.5\n")}
         rig._run(tmp_path, env)

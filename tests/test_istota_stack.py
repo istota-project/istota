@@ -2867,6 +2867,70 @@ class TestTheBrowsersGrantReachesTheFirewall:
         assert result.stdout.split() == ["10.0.0.5"]
         assert "gone.example" in result.stderr
 
+    def _on_the_local_vm(self, fx, gateway: str = "192.168.5.2") -> None:
+        host_env = fx.stack / "host.env"
+        host_env.write_text(host_env.read_text() + f"HOST_LOOPBACK_BLOCK=1\nHOST_GATEWAY_ADDR={gateway}\n")
+
+    @pytest.mark.parametrize("spelling", ["192.168.5.2 ", '"192.168.5.2"', "192.168.005.2"])
+    def test_the_gateway_is_read_as_the_units_read_it(self, fx, tmp_path, spelling):
+        """systemd strips quotes and padding and the egress script takes leading
+        zeros; a gateway this verb could not parse would switch its refusal off."""
+        self._on_the_local_vm(fx, spelling)
+        result = self._lookup(fx, tmp_path, '["mac.example.internal"]', {
+            "mac.example.internal": "10.0.0.7 STREAM\\n192.168.5.2 STREAM\\n",
+        })
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == []
+        assert "mac.example.internal" in result.stderr
+
+    def test_an_unreadable_gateway_is_said(self, fx, tmp_path):
+        self._on_the_local_vm(fx, "not-an-address")
+        result = self._lookup(fx, tmp_path, '["wiki.example.internal"]', {
+            "wiki.example.internal": "10.0.0.5 STREAM\\n",
+        })
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == ["10.0.0.5"]
+        assert "HOST_GATEWAY_ADDR" in result.stderr
+
+    def test_a_name_resolving_to_the_gateway_is_left_out_and_named(self, fx, tmp_path):
+        """#953: a grant's rule names no port and sits above the loopback block, so the
+        gateway would open every port on the Mac's loopback to the browser."""
+        self._on_the_local_vm(fx)
+        result = self._lookup(fx, tmp_path, '["mac.example.internal", "wiki.example.internal"]', {
+            "mac.example.internal": "192.168.5.2 STREAM\\n",
+            "wiki.example.internal": "10.0.0.5 STREAM\\n",
+        })
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == ["10.0.0.5"]
+        assert "mac.example.internal" in result.stderr
+        assert "10.0.0.5" not in result.stderr
+        assert "wiki.example.internal" not in result.stderr
+
+    def test_a_name_with_the_gateway_among_its_addresses_is_left_out_whole(self, fx, tmp_path):
+        self._on_the_local_vm(fx)
+        result = self._lookup(fx, tmp_path, '["both.example.internal"]', {
+            "both.example.internal": "10.0.0.7 STREAM\\n192.168.5.2 STREAM\\n",
+        })
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == []
+        assert "both.example.internal" in result.stderr
+
+    def test_the_literal_gateway_is_refused_the_same_way(self, fx, tmp_path):
+        self._on_the_local_vm(fx)
+        result = self._lookup(fx, tmp_path, "[]", {"192.168.5.2": "192.168.5.2 STREAM\\n"},
+                              config='[private_hosts]\n"192.168.5.2" = ["browser"]\n')
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == []
+        assert "192.168.5.2" in result.stderr
+
+    def test_with_no_gateway_set_the_same_address_is_an_ordinary_grant(self, fx, tmp_path):
+        """A server has no Mac behind it: there 192.168.5.2 is just a private address."""
+        result = self._lookup(fx, tmp_path, '["nas.example.internal"]', {
+            "nas.example.internal": "192.168.5.2 STREAM\\n",
+        })
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == ["192.168.5.2"]
+
     def test_a_name_cannot_be_read_as_an_option(self, fx, tmp_path):
         self._lookup(fx, tmp_path, '["-s"]', {"-s": "10.0.0.5 STREAM\\n"})
         assert (tmp_path / "getent-calls").read_text().strip() == "ahostsv4 -- -s"
