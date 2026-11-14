@@ -22,6 +22,7 @@ Also provides a CLI for calendar operations from Claude Code:
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -41,6 +42,13 @@ try:
 except ImportError:
     Calendar = None
     Event = None
+
+try:
+    import recurring_ical_events
+except ImportError:
+    recurring_ical_events = None
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -85,11 +93,14 @@ _WRITE_PRIVILEGES = ("{DAV:}write", "{DAV:}all")
 def _access_props(calendar: caldav.Calendar) -> dict:
     """The calendar's owner, privilege set and ``oc:read-only``, as raw elements.
 
-    caldav has no element for ``current-user-privilege-set``, and its parsed
-    path logs a traceback on it, so this asks for unparsed elements instead.
-    A calendar whose properties cannot be read gives ``{}``.
+    caldav 1.x has an element for none of the three (``DAV:owner`` included),
+    so each is declared here and the properties come back as unparsed
+    elements. A calendar whose properties cannot be read gives ``{}``.
     """
     from caldav.elements.base import BaseElement
+
+    class Owner(BaseElement):
+        tag = _OWNER
 
     class CurrentUserPrivilegeSet(BaseElement):
         tag = _PRIVILEGE_SET
@@ -99,10 +110,13 @@ def _access_props(calendar: caldav.Calendar) -> dict:
 
     try:
         return calendar.get_properties(
-            [caldav.dav.Owner(), CurrentUserPrivilegeSet(), ReadOnly()],
+            [Owner(), CurrentUserPrivilegeSet(), ReadOnly()],
             parse_props=False,
         )
-    except Exception:
+    except Exception as exc:
+        # Visible, since an empty answer makes the calendar nobody's: a
+        # missing caldav element once hid every calendar this way.
+        logger.warning("calendar access properties unreadable class=%s", type(exc).__name__)
         return {}
 
 
@@ -200,7 +214,11 @@ def get_events(
     UTC end boundary extends into the next day).
     """
     calendar = client.calendar(url=calendar_url)
-    events = calendar.search(start=start, end=end, expand=True)
+    # caldav 1.x: without `event=True` the time range sits on VCALENDAR, which
+    # Nextcloud refuses with a 400 before caldav retries. Recurrences are
+    # expanded here, not by caldav: the server's expansion turns every time to
+    # UTC, and caldav's own skips a series stored after one of its overrides.
+    events = calendar.search(start=start, end=end, event=True)
 
     # Derive local date boundaries for all-day event filtering.
     # All-day events use DATE (no time component), so we compare dates.
@@ -213,7 +231,7 @@ def get_events(
     result = []
     for event in events:
         ical = Calendar.from_ical(event.data)
-        for component in ical.walk():
+        for component in recurring_ical_events.of(ical).between(start, end):
             if component.name == "VEVENT":
                 dtstart = component.get("dtstart")
                 dtend = component.get("dtend")
@@ -1184,8 +1202,7 @@ def cmd_list(args) -> dict:
         events.sort(key=lambda e: e["start"])
         return {"status": "ok", "date": label, "event_count": len(events), "events": events, **notes}
 
-    # ISSUE-101: DAVClient owns urllib3 pools whose watchdog threads
-    # leak unless close() is called.
+    # ISSUE-101: close DAVClient so its pooled connections are released.
     with _get_client_from_env() as client:
         if not args.calendar:
             all_events = []
@@ -1231,7 +1248,7 @@ def cmd_calendars(args) -> dict:
     user_id = task_user_id()
     calendars: list[dict] = []
     if _caldav_configured():
-        # ISSUE-101: close DAVClient to drop the urllib3 watchdog thread.
+        # ISSUE-101: close DAVClient so its pooled connections are released.
         with _get_client_from_env() as client:
             for name, url, writable in get_calendars_for_user(client, user_id):
                 calendars.append({
@@ -1285,7 +1302,7 @@ def cmd_create(args) -> dict:
         end = end.replace(tzinfo=tz)
 
     user_id = task_user_id()
-    # ISSUE-101: close DAVClient to drop the urllib3 watchdog thread.
+    # ISSUE-101: close DAVClient so its pooled connections are released.
     with _get_client_from_env() as client:
         uid = create_event(
             client,
@@ -1315,7 +1332,7 @@ def cmd_delete(args) -> dict:
     if is_istota_calendar(args.calendar):
         return _istota_delete(args, task_user_id())
     user_id = task_user_id()
-    # ISSUE-101: close DAVClient to drop the urllib3 watchdog thread.
+    # ISSUE-101: close DAVClient so its pooled connections are released.
     with _get_client_from_env() as client:
         calendar_url = resolve_owned_calendar(client, user_id, args.calendar)
         deleted = delete_event(client, calendar_url, args.uid)
@@ -1372,7 +1389,7 @@ def cmd_update(args) -> dict:
         return {"status": "error", "error": "No fields to update. Provide at least one of --summary, --start, --end, --location, --description, --clear-location, --clear-description."}
 
     user_id = task_user_id()
-    # ISSUE-101: close DAVClient to drop the urllib3 watchdog thread.
+    # ISSUE-101: close DAVClient so its pooled connections are released.
     with _get_client_from_env() as client:
         calendar_url = resolve_owned_calendar(client, user_id, args.calendar)
         updated = update_event(client, calendar_url, args.uid, **kwargs)

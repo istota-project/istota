@@ -15,13 +15,18 @@ Calling ``client.close()`` (or using DAVClient as a context manager)
 closes the session, which closes the urllib3 pools, which sets each
 pool's ``_background_monitoring_stop`` event and lets the watchdog
 thread exit.
+
+That watchdog was urllib3-future's, which caldav 2.x pulled in through
+niquests. caldav 1.x (pinned since ISSUE-944) sits on requests and plain
+urllib3, which start no such thread, so counting threads could no longer
+fail. The test now checks the invariant itself: every DAVClient that
+discovery opens is closed.
 """
 
 from __future__ import annotations
 
 import http.server
 import threading
-import time
 
 import pytest
 
@@ -71,22 +76,31 @@ def caldav_server():
         srv.server_close()
 
 
-def _watchdog_thread_count() -> int:
-    return sum(
-        1
-        for t in threading.enumerate()
-        if "idle_conn_watch_task" in (t.name or "")
-    )
+def test_discover_calendars_closes_every_client_it_opens(caldav_server, monkeypatch):
+    """``discover_calendars_for_task`` closes each DAVClient, failed requests included.
 
-
-def test_discover_calendars_does_not_leak_urllib3_watchdog_threads(caldav_server):
-    """``discover_calendars_for_task`` must not leak background threads.
-
-    Each leaked ``urllib3.HTTPConnectionPool`` spawns an
-    ``idle_conn_watch_task`` daemon thread that lives forever unless the
-    pool is closed. In a long-running daemon this kills the process.
+    The stub answers 401, so every discovery fails inside the client:
+    the path where a missing ``close()`` used to leak.
     """
+    import caldav
+
     from istota import executor
+
+    opened = []
+    closed = []
+    real_init = caldav.DAVClient.__init__
+    real_close = caldav.DAVClient.close
+
+    def counting_init(self, *args, **kwargs):
+        opened.append(self)
+        real_init(self, *args, **kwargs)
+
+    def counting_close(self):
+        closed.append(self)
+        real_close(self)
+
+    monkeypatch.setattr(caldav.DAVClient, "__init__", counting_init)
+    monkeypatch.setattr(caldav.DAVClient, "close", counting_close)
 
     class _Task:
         user_id = "alice"
@@ -99,19 +113,10 @@ def test_discover_calendars_does_not_leak_urllib3_watchdog_threads(caldav_server
         )
     )
 
-    baseline = _watchdog_thread_count()
-
     for _ in range(10):
         executor.discover_calendars_for_task(_Task(), config)
 
-    # Watchdog threads are daemons that exit on the next wait() iteration
-    # once their pool's stop event fires. Give them a beat to actually
-    # die so we measure after-cleanup state.
-    time.sleep(0.1)
-
-    leaked = _watchdog_thread_count() - baseline
-    assert leaked == 0, (
-        f"Leaked {leaked} urllib3 idle_conn_watch_task threads after 10 "
-        "discover_calendars_for_task calls. The DAVClient is not being "
-        "closed — see ISSUE-101."
+    assert len(opened) == 10
+    assert {id(c) for c in closed} == {id(c) for c in opened}, (
+        "A DAVClient opened by discover_calendars_for_task was not closed; see ISSUE-101."
     )

@@ -188,6 +188,112 @@ class TestAllDayEventFiltering:
         assert result[0].summary == "Naive Event"
 
 
+_STANDUP_ICS = (
+    "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Example//EN\r\n"
+    "BEGIN:VEVENT\r\nUID:standup@example\r\nDTSTAMP:20261001T000000Z\r\n"
+    "SUMMARY:Standup\r\n"
+    "DTSTART;TZID=America/Los_Angeles:20261019T090000\r\n"
+    "DTEND;TZID=America/Los_Angeles:20261019T093000\r\n"
+    "RRULE:FREQ=WEEKLY;COUNT=10\r\n"
+    "EXDATE;TZID=America/Los_Angeles:20261109T090000\r\n"
+    "END:VEVENT\r\n"
+    "BEGIN:VEVENT\r\nUID:standup@example\r\nDTSTAMP:20261001T000000Z\r\n"
+    "SUMMARY:Standup (moved)\r\n"
+    "RECURRENCE-ID;TZID=America/Los_Angeles:20261116T090000\r\n"
+    "DTSTART;TZID=America/Los_Angeles:20261116T100000\r\n"
+    "DTEND;TZID=America/Los_Angeles:20261116T103000\r\n"
+    "END:VEVENT\r\nEND:VCALENDAR\r\n"
+)
+_HOLIDAY_ICS = _make_ical_allday("holiday@example", "Holiday", date(2026, 11, 10), date(2026, 11, 11))
+
+
+def _calendar_query_server(objects: dict[str, str]):
+    """A CalDAV REPORT handler that answers the way Nextcloud's sabre does.
+
+    sabre refuses a time-range on the VCALENDAR comp-filter with a 400, and
+    a ``C:expand`` would hand every instance back in UTC, so both are what
+    the client has to avoid. Returns the handler and the bodies it was sent.
+    """
+    from xml.sax.saxutils import escape
+
+    from caldav.davclient import DAVResponse
+
+    sent = []
+
+    def report(url, body, depth):
+        text = body.decode() if isinstance(body, bytes) else body
+        sent.append(text)
+        if '<C:comp-filter name="VEVENT">' not in text:
+            content = b"You cannot add time-range filters on the VCALENDAR component"
+            return DAVResponse(SimpleNamespace(
+                headers={"Content-Type": "text/plain"}, status_code=400,
+                reason="Bad Request", content=content, text=content.decode(),
+            ))
+        responses = "".join(
+            f"<d:response><d:href>/remote.php/dav/calendars/alice/personal/{name}</d:href>"
+            "<d:propstat><d:prop>"
+            f"<cal:calendar-data>{escape(ics)}</cal:calendar-data>"
+            "</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
+            for name, ics in objects.items()
+        )
+        xml = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<d:multistatus xmlns:d="DAV:" xmlns:cal="urn:ietf:params:xml:ns:caldav">'
+            f"{responses}</d:multistatus>"
+        ).encode()
+        return DAVResponse(SimpleNamespace(
+            headers={"Content-Type": "application/xml; charset=utf-8"},
+            status_code=207, reason="Multi-Status", content=xml, text=xml.decode(),
+        ))
+
+    return report, sent
+
+
+@pytest.mark.skipif(not _has_icalendar, reason="icalendar not installed")
+class TestGetEventsThroughCaldav:
+    """get_events over a real caldav Calendar, with only the HTTP exchange faked."""
+
+    def _events(self, objects):
+        import caldav
+
+        client = caldav.DAVClient(url="https://cloud.example.com/remote.php/dav/")
+        client.report, sent = _calendar_query_server(objects)
+        la = ZoneInfo("America/Los_Angeles")
+        events = get_events(
+            client, "https://cloud.example.com/remote.php/dav/calendars/alice/personal/",
+            datetime(2026, 11, 1, tzinfo=la), datetime(2026, 11, 22, tzinfo=la),
+        )
+        return events, sent
+
+    def test_recurring_and_all_day_events_come_back_in_their_own_zone(self):
+        events, _ = self._events({"standup.ics": _STANDUP_ICS, "holiday.ics": _HOLIDAY_ICS})
+        assert [(e.summary, e.start, e.timezone, e.all_day) for e in events] == [
+            ("Standup", datetime(2026, 11, 2, 9, 0), "America/Los_Angeles", False),
+            ("Holiday", datetime(2026, 11, 10), None, True),
+            ("Standup (moved)", datetime(2026, 11, 16, 10, 0), "America/Los_Angeles", False),
+        ]
+
+    def test_a_moved_instance_stored_before_its_series_still_expands(self):
+        master, moved = _STANDUP_ICS.split("END:VEVENT\r\n", 1)
+        master_event = master.split("BEGIN:VEVENT\r\n", 1)[1]
+        override_first = (
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Example//EN\r\n"
+            + moved.replace("END:VCALENDAR\r\n", "")
+            + "BEGIN:VEVENT\r\n" + master_event + "END:VEVENT\r\nEND:VCALENDAR\r\n"
+        )
+        events, _ = self._events({"standup.ics": override_first})
+        assert [(e.summary, e.start) for e in events] == [
+            ("Standup", datetime(2026, 11, 2, 9, 0)),
+            ("Standup (moved)", datetime(2026, 11, 16, 10, 0)),
+        ]
+
+    def test_one_query_for_events_and_no_server_expansion(self):
+        _, sent = self._events({"holiday.ics": _HOLIDAY_ICS})
+        assert len(sent) == 1
+        assert '<C:comp-filter name="VEVENT"><C:time-range' in sent[0]
+        assert "C:expand" not in sent[0]
+
+
 # =============================================================================
 # CLI Tests
 # =============================================================================
@@ -303,7 +409,8 @@ class TestCmdListRange:
         ))
         la = ZoneInfo("America/Los_Angeles")
         as_alice.calendar.return_value.search.assert_called_once_with(
-            start=datetime(2026, 11, 1, tzinfo=la), end=datetime(2026, 12, 1, tzinfo=la), expand=True,
+            start=datetime(2026, 11, 1, tzinfo=la), end=datetime(2026, 12, 1, tzinfo=la),
+            event=True,
         )
         assert result["date"] == "2026-11-01..2026-11-30"
         assert [e["summary"] for e in result["events"]] == ["Last day"]
