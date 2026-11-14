@@ -13,7 +13,7 @@
  * Supports the full CommonMark grammar plus markdown-it's built-in GFM tables
  * and strikethrough: fenced/indented code, inline code, bold, italic, strike,
  * links, autolinks, headings, nested ordered/unordered lists, blockquotes,
- * tables, and paragraphs.
+ * tables, and paragraphs. GFM task lists come from the `task_list` rule below.
  *
  * Fenced code blocks are syntax-highlighted with highlight.js (the `lib/common`
  * build — ~37 common languages). highlight.js escapes the code body itself, so
@@ -61,6 +61,11 @@ function linkDestination(href: string): string {
 export const CHAT_FILES_PREFIX = `${base}/api/chat/files?`;
 
 const SAFE_URL = /^(https?:\/\/|mailto:|\/)/i;
+
+// Matched against the item's source as written, so an escaped `\[x]` or an
+// entity `&#91;x]` stays text: by the time the rule runs both are plain text.
+const TASK_MARKER_SOURCE = /^\[([ xX])\]\s/;
+const TASK_MARKER_TEXT = /^\[[ xX]\](?:[ \t]|$)/;
 
 /**
  * Is this token inside an `<a>`? Walk left for an unmatched `link_open`.
@@ -357,6 +362,54 @@ function createRenderer(opts: { breaks: boolean; imageAffordance: boolean; untru
     const cls = tok.meta?.self ? 'mention mention-self' : 'mention';
     return `<span class="${cls}">${md.utils.escapeHtml(tok.content)}</span>`;
   };
+
+  /**
+   * GitHub task lists (ISSUE-960): a list item whose first paragraph opens with
+   * `[ ]`, `[x]` or `[X]` and whitespace gets a disabled checkbox in place of the
+   * marker, and GitHub's class names on the item and its list.
+   *
+   * Read-only on purpose: the box reflects the source and nothing writes it
+   * back. The checkbox is a fixed string from its own renderer, so `html: false`
+   * still holds; no input the source wrote reaches the output.
+   */
+  md.core.ruler.after('mention', 'task_list', (state) => {
+    const tokens = state.tokens;
+    for (let i = 2; i < tokens.length; i++) {
+      const inline = tokens[i];
+      if (inline.type !== 'inline' || !inline.children) continue;
+      if (tokens[i - 1].type !== 'paragraph_open' || tokens[i - 2].type !== 'list_item_open') {
+        continue;
+      }
+      const source = TASK_MARKER_SOURCE.exec(inline.content);
+      const first = inline.children[0];
+      if (!source || !first || first.type !== 'text') continue;
+      const marker = TASK_MARKER_TEXT.exec(first.content);
+      if (!marker) continue;
+
+      first.content = first.content.slice(marker[0].length);
+      const box = new state.Token('task_checkbox', '', 0);
+      box.meta = { checked: source[1] !== ' ' };
+      inline.children.unshift(box);
+
+      const item = tokens[i - 2];
+      item.attrJoin('class', 'task-list-item');
+      // The item's own list is the first token before it at a lower level.
+      for (let j = i - 3; j >= 0; j--) {
+        if (tokens[j].level < item.level) {
+          const classes = (tokens[j].attrGet('class') ?? '').split(' ');
+          if (!classes.includes('contains-task-list')) {
+            tokens[j].attrJoin('class', 'contains-task-list');
+          }
+          break;
+        }
+      }
+    }
+  });
+
+  md.renderer.rules.task_checkbox = (tokens, idx) =>
+    tokens[idx].meta?.checked
+      ? '<input class="task-list-item-checkbox" type="checkbox" checked disabled>'
+      : '<input class="task-list-item-checkbox" type="checkbox" disabled>';
 
   return {
     linkify: md.linkify,
