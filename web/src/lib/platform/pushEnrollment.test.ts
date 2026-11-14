@@ -492,6 +492,16 @@ it('tells an older app on a relay installation to update', async () => {
   );
 });
 
+it('says push is off rather than asking a current app to update', async () => {
+  // With push off, discovery carries no relay, so a 0.16 app registers plainly.
+  onPrivateShell('0.16.0');
+  discovery = { status: 200, body: { push: { delivery: 'unavailable' } } };
+  postReplies = [{ status: 409, body: { detail: 'push not enabled' } }];
+  await expect(saveEnrollment(registration, context)).rejects.toThrow(
+    'Notifications are turned off on this server.',
+  );
+});
+
 it('leaves a relay row for repair rather than re-registering it plainly after a failed commit', async () => {
   onRelayShell();
   privatePush.commitPrivateRegistration.mockRejectedValueOnce(new Error('CONNECTION_CHANGED'));

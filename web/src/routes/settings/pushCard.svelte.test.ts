@@ -516,6 +516,17 @@ it('keeps a lasting line on a device whose relay route needs repair', async () =
   expect(rowFor('000002').queryByText(/have stopped/)).toBeNull();
 });
 
+it('shows a stale key under relay delivery as a stopped device, not a preview change', async () => {
+  // The server lists a stale relay enrollment as repair: nothing reaches it until it enrolls again.
+  api.listPushDevices.mockResolvedValue({
+    devices: [{ ...device, content: 'generic', stale_key: true, enrollment_state: 'repair' }],
+  });
+  mount();
+  await screen.findByText(/…ababab$/);
+  rowFor('ababab').getByText(/Notifications to this device have stopped/);
+  expect(rowFor('ababab').queryByText(/to show private previews/)).toBeNull();
+});
+
 it('says a relay installation needs iOS 17 when this device cannot enroll privately', async () => {
   const { plugin } = genericShell();
   Object.defineProperty(navigator, 'userAgent', { value: 'IstotaApp/0.16.0', configurable: true });

@@ -228,7 +228,9 @@
             {#if contentLabels[device.content]}<span class="caption"
                 >{contentLabels[device.content]}</span
               >{/if}
-            {#if device.stale_key}<Alert appearance="inline" variant="warn"
+            {#if device.stale_key && device.enrollment_state !== 'repair'}<Alert
+                appearance="inline"
+                variant="warn"
                 >This server's notification key changed. Register this device again to show private
                 previews.</Alert
               >{/if}

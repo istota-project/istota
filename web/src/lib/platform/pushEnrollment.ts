@@ -30,6 +30,7 @@ type PrivateDelivery = 'direct' | 'relay';
 const UNUSABLE = 'The app returned an unusable private enrollment.';
 const RELAY_NEEDS_IOS_17 = 'Private notifications on this server need iOS 17 or later.';
 const RELAY_NEEDS_UPDATE = 'Update the Istota app to get notifications from this server.';
+const PUSH_OFF = 'Notifications are turned off on this server.';
 
 /**
  * How the server offers private push to this app, if it does. Discovery keeps `delivery` at
@@ -197,8 +198,10 @@ export async function saveEnrollment(
     });
   } catch (e) {
     // Only a relay installation refuses a plain registration, and only an app that cannot
-    // enroll with its relay sends one there.
+    // enroll with its relay sends one there. With push off, discovery offers no relay, so a
+    // current app lands here too and is told that rather than to update.
     if (conflict(e, 'private push not offered')) throw new Error(RELAY_NEEDS_UPDATE);
+    if (conflict(e, 'push not enabled')) throw new Error(PUSH_OFF);
     throw e;
   }
   if (context) await recordPushRegistration(saved.id, context);
