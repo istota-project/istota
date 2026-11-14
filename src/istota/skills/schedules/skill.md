@@ -2,6 +2,7 @@
 name: schedules
 triggers: [schedule, scheduled, recurring, cron, every day, every week, every morning, every evening, periodic, nightly, daily, weekly]
 description: Scheduled recurring job management
+cli: true
 egress: local
 ---
 **Always use CRON.md for all scheduled jobs.** Never use session-scoped cron tools (like CronCreate) — they don't survive restarts. CRON.md is persistent and the only supported way to schedule recurring work.
@@ -59,7 +60,7 @@ These are TOML basic strings: a backslash or a double quote inside one must be e
 - `enabled`: Set to `false` to pause the job (default: true). Use `!cron disable/enable` for runtime control
 - `once`: When `true`, the job auto-deletes from both the DB and CRON.md after successful execution. Failed jobs are kept for retry. Used by the reminders skill for one-shot fire-and-forget entries
 - `reach`: `"limited"` (the default if you leave it out), `"public"` or `"full"`. `"limited"` runs as the user, with memory and files, and fetches only hosts its owner approved in Settings, Scheduled jobs. `"public"` is for research: open web and nothing private, no memory, files or credentials. `"full"` runs as the user with their browser profile, every skill and any public host. Choose the narrowest that does the job, and use `"public"` when a job only needs to read the web. The deployment decides how far a job gets with no approval; past that it runs limited until the owner approves its exact text, and editing the text drops the approval. Tell the user when you set it
-- `egress`: The hosts and skills this job needs, as a list: `egress = ["news.example.com", "skill:browse"]`. It asks the owner in Settings, Scheduled jobs as soon as the job is written, and grants nothing: the job runs with what it already has until they approve. A `once` job that declares `egress` waits and does not fire until every entry is approved. A `once` job whose `reach` needs approval waits for that instead, whatever it declares. So set it on any one-shot job that needs the network. A `once` job with no `egress` and a plain `reach` runs limited and deletes itself, leaving nothing for the owner to approve. Tell the user when you set it
+- `egress`: The hosts and skills this job needs, as a list: `egress = ["news.example.com", "skill:browse"]`. A `skill:` entry is only for a skill that reaches the network itself and needs its owner's approval; `istota-skill schedules check` lists the ones this user can name under `egress_skills`. Any other skill (`feeds`, `calendar`, `kv` and the like) needs no entry, and naming one is a problem the scheduler reports. It asks the owner in Settings, Scheduled jobs as soon as the job is written, and grants nothing: the job runs with what it already has until they approve. A `once` job that declares `egress` waits and does not fire until every entry is approved. A `once` job whose `reach` needs approval waits for that instead, whatever it declares. So set it on any one-shot job that needs the network. A `once` job with no `egress` and a plain `reach` runs limited and deletes itself, leaving nothing for the owner to approve. Tell the user when you set it
 - `silent_unless_action`: When `true`, only posts output if response starts with `ACTION:`. Useful for monitoring jobs
 - `skip_log_channel`: When `true`, this job's run is not mirrored to the verbose execution log channel. Useful for noisy, frequent jobs
 - `model`: Per-job model override (canonical id, provider alias like `opus-high`, or a role alias like `fast`/`general`/`smart`). Empty = the instance default
@@ -164,5 +165,7 @@ To add a job: append a new `[[jobs]]` entry to the TOML block in the file.
 To remove a job: delete its `[[jobs]]` entry from the file.
 To modify a job: edit the relevant fields in the file.
 To temporarily disable: set `enabled = false` in the file, or use the `!cron disable <name>` command.
+
+**After every edit, run `istota-skill schedules check`.** It reads the file the way the scheduler does and lists the problems the scheduler reports: a job it will drop, a field it refuses, an `egress` entry it will not ask for, a job outside the ```` ```toml ```` block. Reading the file back, or parsing its TOML, does not tell you that. On `"status": "ok"`, confirm that `jobs` names every job you wrote. Anything else lists `problems`: fix each one and run it again before you tell the user the job is set.
 
 To deliver into the room this task is in, copy the `target` and `room` values the prompt header gives you. See "Delivering into a room" above — the conversation token alone is not a `target`, and `target = "talk"` with a web room's token posts nowhere.

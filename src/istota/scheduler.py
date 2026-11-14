@@ -10360,6 +10360,15 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
         for job in user_jobs:
             should_run = False
 
+            # The parser refuses one now; a row stored before that would raise here and
+            # stop every job after it, for every user (#959).
+            if not croniter.is_valid(job.cron_expression):
+                logger.warning(
+                    "Skipping scheduled job '%s' for %s: its cron is not a valid expression",
+                    job.name, user_id,
+                )
+                continue
+
             if job.last_run_at:
                 last_run = datetime.fromisoformat(job.last_run_at)
                 if last_run.tzinfo is None:
