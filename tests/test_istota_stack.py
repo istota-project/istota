@@ -167,6 +167,11 @@ case "$args" in
     if [ -n "$vm" ] && [ -n "${STUB_RESTORED_STACK_ENV:-}" ]; then printf '%s' "$STUB_RESTORED_STACK_ENV" > "$vm/stack.env"; fi
     if [ -n "$vm" ] && [ -n "${STUB_RESTORED_HOST_ENV:-}" ]; then printf '%s' "$STUB_RESTORED_HOST_ENV" > "$vm/host.env"; fi
     exit "${STUB_RESTORE_RC:-0}" ;;
+  *" istota push "*)
+    echo "push read-only=${ISTOTA_CONFIG_READ_ONLY:-unset}" >> "$STUB_CALLS"
+    cat > "$STUB_CALLS.stdin"
+    echo "Key ID: stub-key-id"
+    exit "${STUB_PUSH_RC:-0}" ;;
   *" migrate import-standalone"*)
     cat > "$STUB_CALLS.stdin"
     vm=""; prev=""
@@ -2011,6 +2016,87 @@ class TestRestore:
         assert result.returncode == 0, result.stdout + result.stderr
         builds = [call for call in fx.docker_calls() if " build " in f"{call} "]
         assert builds and builds[-1].endswith(" build browser"), builds
+
+
+class TestPushKey:
+    """#948: the private push signing key on a stack the management role does
+    not manage. `push-key create|import` runs `istota push keygen` or
+    `istota push import-key` in a one-shot container with the config
+    directory open; import's key arrives on stdin and is on no argv."""
+
+    KEY = "-----BEGIN PRIVATE KEY-----\nstub-not-a-real-key\n-----END PRIVATE KEY-----\n"
+
+    def _run(self, fx: Fixture, *args: str, stdin: str = "", **extra_env: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["bash", str(SCRIPT), "push-key", *args], capture_output=True, text=True,
+            input=stdin, env={**fx.env, **extra_env}, timeout=60,
+        )
+
+    def _push_run(self, fx: Fixture) -> str:
+        return next(call for call in fx.docker_calls() if " istota push " in f"{call} ")
+
+    @pytest.mark.parametrize("args, command", [
+        (("create",), "keygen"),
+        (("create", "--force"), "keygen --force"),
+        (("import",), "import-key"),
+        (("import", "--force"), "import-key --force"),
+    ])
+    def test_each_action_runs_its_cli_verb_with_the_config_open(self, fx, args, command):
+        result = self._run(fx, *args, stdin=self.KEY if args[0] == "import" else "")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert re.search(
+            r"run --rm --no-deps -T --entrypoint istota-drop daemon istota push " + re.escape(command) + "$",
+            self._push_run(fx)), fx.docker_calls()
+        assert "push read-only=false" in fx.docker_calls()
+        assert "Key ID: stub-key-id" in result.stdout
+
+    def test_the_imported_key_reaches_the_one_shot_on_stdin_alone(self, fx):
+        result = self._run(fx, "import", stdin=self.KEY)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert Path(f"{fx.calls}.stdin").read_text() == self.KEY
+        assert not any("stub-not-a-real-key" in call for call in fx.docker_calls())
+        assert "stub-not-a-real-key" not in result.stdout + result.stderr
+
+    def test_import_refuses_a_terminal_on_stdin_even_with_stdout_piped(self, fx):
+        """With stdout piped, oneshot passes -T and the container would read
+        an echoing terminal as a plain stream, so the refusal is in bash."""
+        import pty
+
+        primary, secondary = pty.openpty()
+        try:
+            result = subprocess.run(
+                ["bash", str(SCRIPT), "push-key", "import"], capture_output=True, text=True,
+                stdin=secondary, env=fx.env, timeout=60,
+            )
+        finally:
+            os.close(secondary)
+            os.close(primary)
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "pipe the key on stdin" in result.stderr
+        assert not any(" run " in f"{call} " for call in fx.docker_calls()), fx.docker_calls()
+
+    def test_its_exit_status_comes_back(self, fx):
+        result = self._run(fx, "create", STUB_PUSH_RC="1")
+        assert result.returncode == 1, result.stdout + result.stderr
+
+    @pytest.mark.parametrize("args", [(), ("rotate",), ("create", "--bogus"), ("import", "--force", "extra"),
+                                      ("import", "/path/to/key.pem")])
+    def test_anything_else_is_a_usage_error(self, fx, args):
+        result = self._run(fx, *args)
+        assert result.returncode == 64, result.stdout + result.stderr
+        assert not any(" run " in f"{call} " for call in fx.docker_calls()), fx.docker_calls()
+
+    def test_without_an_image_nothing_runs(self, fx):
+        (fx.stack / ".env").write_text("COMPOSE_PROFILES=\n")
+        result = self._run(fx, "create")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert not any(" run " in f"{call} " for call in fx.docker_calls())
+
+    def test_the_usage_names_it_on_one_line(self, fx):
+        result = fx.run("help")
+        lines = [line for line in result.stdout.splitlines() if "push-key" in line]
+        assert len(lines) == 1, lines
+        assert lines[0].strip().startswith("istota-stack push-key create|import [--force]")
 
 
 class TestImportStandalone:
@@ -3946,6 +4032,7 @@ class TestTheStackLock:
         ("update",), ("rollback",), ("setup",), ("apply",), ("import-bare-metal",),
         ("restore",), ("import-standalone",), ("retire-bare-metal",), ("put-files",),
         ("localize-workspace",), ("up",), ("down",), ("host-env", "STORAGE=local"),
+        ("push-key", "create"), ("push-key", "import"),
     ])
     def test_every_writing_verb_is_locked(self, fx, args):
         before = (fx.stack / "host.env").read_text()

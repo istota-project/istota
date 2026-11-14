@@ -225,3 +225,152 @@ def test_keygen_on_a_read_only_config_names_the_deployment_route(key_config, mon
     err = capsys.readouterr().err
     assert "read-only" in err
     assert "istota_push" in err
+
+
+def test_keygen_on_a_read_only_config_names_the_stack_verb(key_config, monkeypatch, capsys):
+    """#948: a stack the role does not manage has `istota-stack push-key`."""
+    import errno
+
+    config_path, _ = key_config
+
+    def read_only(*args, **kwargs):
+        raise OSError(errno.EROFS, "Read-only file system")
+
+    monkeypatch.setattr(envelope, "write_signing_key", read_only)
+    assert run_cli(monkeypatch, config_path) == 1
+    err = capsys.readouterr().err
+    assert "istota-stack push-key create" in err
+    assert "--force" not in err
+    assert run_cli(monkeypatch, config_path, "--force") == 1
+    assert "istota-stack push-key create --force" in capsys.readouterr().err
+
+
+def test_doctor_names_the_stack_verb_for_a_missing_key(private_config):
+    config, key = private_config
+    config.push.signing_key_path += ".missing"
+    result = doctor.check_push_signing_key(config, False)
+    assert result.status == doctor.FAIL
+    assert "istota-stack push-key create" in result.remedy
+    assert "istota_push" in result.remedy
+
+
+# --- import-key -------------------------------------------------------------
+
+
+def _pem(key) -> bytes:
+    return key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+    )
+
+
+class _Stdin:
+    """A piped stdin carrying `data`, as `istota-stack push-key import` hands it over."""
+
+    def __init__(self, data: bytes, tty: bool = False):
+        import io
+
+        self.buffer = io.BytesIO(data)
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty
+
+
+def run_import(monkeypatch, config_path, data: bytes, *argv, tty: bool = False):
+    monkeypatch.setattr("sys.stdin", _Stdin(data, tty))
+    monkeypatch.setattr(cli, "setup_logging", lambda *args, **kwargs: None)
+    monkeypatch.setattr("sys.argv", ["istota", "-c", str(config_path), "push", "import-key", *argv])
+    try:
+        cli.main()
+    except SystemExit as exc:
+        return exc.code or 0
+    return 0
+
+
+def test_write_signing_key_writes_a_given_key(tmp_path):
+    given = Ed25519PrivateKey.generate()
+    key = tmp_path / "push" / "signing.pem"
+    written = envelope.write_signing_key(key, given=given)
+    assert written is given
+    assert envelope.load_signing_key(key).private_bytes_raw() == given.private_bytes_raw()
+    assert envelope.load_public_key(f"{key}.pub") == given.public_key().public_bytes_raw()
+
+
+def test_import_writes_the_given_key_and_its_public_half(key_config, monkeypatch, capsys):
+    config_path, key = key_config
+    given = Ed25519PrivateKey.generate()
+    assert run_import(monkeypatch, config_path, _pem(given)) == 0
+    pub = Path(f"{key}.pub")
+    assert stat.S_IMODE(key.stat().st_mode) == 0o600
+    assert stat.S_IMODE(pub.stat().st_mode) == 0o644
+    assert envelope.load_signing_key(key).private_bytes_raw() == given.private_bytes_raw()
+    raw = envelope.load_public_key(pub)
+    assert raw == given.public_key().public_bytes_raw()
+    out = capsys.readouterr()
+    assert envelope.key_id(raw) in out.out
+    assert "PRIVATE" not in out.out + out.err
+    assert envelope.b64url(given.private_bytes_raw()) not in out.out + out.err
+    assert "re-enroll" not in out.out
+
+
+def test_import_refuses_an_existing_key_without_force(key_config, monkeypatch, capsys):
+    config_path, key = key_config
+    assert run_cli(monkeypatch, config_path) == 0
+    before = key.read_bytes(), Path(f"{key}.pub").read_bytes()
+    capsys.readouterr()
+    assert run_import(monkeypatch, config_path, _pem(Ed25519PrivateKey.generate())) == 1
+    assert "--force" in capsys.readouterr().err
+    assert (key.read_bytes(), Path(f"{key}.pub").read_bytes()) == before
+
+
+def test_import_force_replaces_and_warns_about_re_enrollment(key_config, monkeypatch, capsys):
+    config_path, key = key_config
+    assert run_cli(monkeypatch, config_path) == 0
+    capsys.readouterr()
+    given = Ed25519PrivateKey.generate()
+    assert run_import(monkeypatch, config_path, _pem(given), "--force") == 0
+    assert envelope.load_public_key(f"{key}.pub") == given.public_key().public_bytes_raw()
+    assert "re-enroll" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("make", ["ec", "garbage", "empty", "encrypted"])
+def test_import_refuses_anything_but_an_unencrypted_ed25519_key(key_config, monkeypatch, capsys, make):
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    config_path, key = key_config
+    if make == "ec":
+        data = _pem(ec.generate_private_key(ec.SECP256R1()))
+    elif make == "garbage":
+        data = b"not-a-key-secret-material\n"
+    elif make == "empty":
+        data = b""
+    else:
+        data = Ed25519PrivateKey.generate().private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+            serialization.BestAvailableEncryption(b"passphrase"),
+        )
+    assert run_import(monkeypatch, config_path, data) == 1
+    out = capsys.readouterr()
+    assert "not-a-key-secret-material" not in out.out + out.err
+    assert "PRIVATE" not in out.out + out.err
+    assert not key.exists() and not Path(f"{key}.pub").exists()
+
+
+def test_import_refuses_a_terminal_on_stdin(key_config, monkeypatch, capsys):
+    config_path, key = key_config
+    assert run_import(monkeypatch, config_path, b"", tty=True) == 1
+    assert "stdin" in capsys.readouterr().err
+    assert not key.exists()
+
+
+def test_import_on_a_read_only_config_names_the_stack_verb(key_config, monkeypatch, capsys):
+    import errno
+
+    config_path, _ = key_config
+
+    def read_only(*args, **kwargs):
+        raise OSError(errno.EROFS, "Read-only file system")
+
+    monkeypatch.setattr(envelope, "write_signing_key", read_only)
+    assert run_import(monkeypatch, config_path, _pem(Ed25519PrivateKey.generate())) == 1
+    assert "istota-stack push-key import" in capsys.readouterr().err

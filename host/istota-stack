@@ -62,6 +62,9 @@
 #                               write secrets/ and config/admins from JSON on stdin, as uid 10001
 #   istota-stack config-apply   apply what the web config editor requested (istota-config-apply.service)
 #   istota-stack check-image    exit 2 when the image lacks what config.toml needs (Claude Code)
+#   istota-stack push-key create|import [--force]
+#                               write the private push signing key, a new one or one on
+#                               stdin, as uid 10001; prints its key ID, never the key
 #   istota-stack up | down      start or stop the stack (istota-stack.service)
 #   istota-stack hold [on|off]  whether the stack's containers are kept off the network,
 #                               across reboots, until `hold off`; or put that on or lift it
@@ -2764,6 +2767,32 @@ cmd_restore() {
     exit "$rc"
 }
 
+# `istota push keygen` or `istota push import-key` in a one-shot container with
+# the config directory open, as uid 10001: the private push signing key on a
+# stack the management role does not manage (#948). import's key comes on
+# stdin and is on no argv; the CLI prints the key ID and never the key.
+cmd_push_key() {
+    local action="${1:-}" verb force=()
+    [ "$#" -gt 0 ] && shift
+    case "$action" in
+        create) verb=keygen ;;
+        import) verb=import-key ;;
+        *) usage >&2; exit 64 ;;
+    esac
+    case "$#:${1:-}" in
+        0:) ;;
+        1:--force) force=(--force) ;;
+        *) usage >&2; exit 64 ;;
+    esac
+    # Here and not only in the CLI: with stdout redirected, oneshot passes -T
+    # and the container would read an echoing terminal as a plain stream.
+    if [ "$verb" = import-key ] && [ -t 0 ]; then
+        die "pipe the key on stdin: \`istota-stack push-key import < signing.pem\`; it is never read from a terminal."
+    fi
+    [ -n "$(env_get "$ENV_FILE" ISTOTA_TAG)" ] || die "no image yet: run \`istota-stack update <tag>\` first."
+    ISTOTA_CONFIG_READ_ONLY=false oneshot "$(main_service)" istota push "$verb" ${force[@]+"${force[@]}"}
+}
+
 # `istota migrate import-standalone` in a one-shot container: a standalone
 # install the Mac's istota-stack staged in <dir> (read-only at /import), its
 # istota.env on stdin, onto a stack made with `create --no-setup`. The module
@@ -3903,7 +3932,7 @@ main() {
             fi ;;
         # Holds the update's lock through descriptor 9 or refuses; never waits.
         update-from-checkout) ;;
-        update|rollback|apply|import-bare-metal|restore|import-standalone|retire-bare-metal|put-files|localize-workspace|down|trust-signer)
+        update|rollback|apply|import-bare-metal|restore|import-standalone|retire-bare-metal|put-files|localize-workspace|down|trust-signer|push-key)
             take_stack_lock "$command" ;;
         # Reading the layers' status is a read.
         local-layers)
@@ -3943,6 +3972,7 @@ main() {
         browser-grant-addresses) cmd_browser_grant_addresses "$@" ;;
         up) cmd_up_verb ;;
         hold) cmd_hold "$@" ;;
+        push-key) cmd_push_key "$@" ;;
         down) compose down ;;
         exec) [ "$#" -gt 0 ] || { usage >&2; exit 64; }; stack_exec "$@" ;;
         compose) compose "$@" ;;

@@ -182,6 +182,11 @@ def load_signing_key(path) -> Ed25519PrivateKey:
         data = Path(path).read_bytes()
     except OSError as error:
         raise KeyFileError(f"cannot read the push signing key: {error.__class__.__name__}") from error
+    return parse_signing_key(data)
+
+
+def parse_signing_key(data: bytes) -> Ed25519PrivateKey:
+    """An Ed25519 key from unencrypted PKCS8 PEM bytes; the errors never quote them."""
     try:
         key = serialization.load_pem_private_key(data, password=None)
     except (ValueError, TypeError) as error:
@@ -217,8 +222,8 @@ def public_key_path(signing_key_path) -> Path:
     return Path(f"{signing_key_path}.pub")
 
 
-def write_signing_key(path, *, force: bool = False) -> Ed25519PrivateKey:
-    """Write a fresh key to `path` (0600) and its `.pub` sibling (0644).
+def write_signing_key(path, *, force: bool = False, given: Ed25519PrivateKey | None = None) -> Ed25519PrivateKey:
+    """Write the `given` key, or a fresh one, to `path` (0600) and its `.pub` sibling (0644).
 
     Refuses with `FileExistsError` when either file exists, unless `force`.
     Each file is replaced atomically, the private key first, so a crash
@@ -232,7 +237,7 @@ def write_signing_key(path, *, force: bool = False) -> Ed25519PrivateKey:
     if not path.parent.is_dir():
         path.parent.mkdir(parents=True, mode=0o700)
         os.chmod(path.parent, 0o700)
-    key = Ed25519PrivateKey.generate()
+    key = given if given is not None else Ed25519PrivateKey.generate()
     pem = key.private_bytes(
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
     )
