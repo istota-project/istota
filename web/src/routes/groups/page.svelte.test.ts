@@ -106,6 +106,17 @@ it('opens the notebook on the overview and saves through the shared editor with 
     expect(api.saveGroupMemory).toHaveBeenCalledWith('team', 'Updated plans', 'r1'),
   );
 });
+it('hides the starter GROUP.md comment on the notebook card (ISSUE-964)', async () => {
+  api.getGroupMemory.mockResolvedValue({
+    ...notebook,
+    content: '<!-- Group memory for "Team". Written only when a member asks. -->\n\n# Team\n',
+  });
+  render(Groups);
+  const card = (await screen.findByRole('heading', { name: 'Notebook' })).closest('section')!;
+  await waitFor(() => expect(card.querySelector('.markdown h1')).toHaveTextContent('Team'));
+  expect(card.textContent).not.toContain('Group memory for');
+  expect(card.textContent).not.toContain('<!--');
+});
 it('preserves a conflicting draft and offers the shared reload action', async () => {
   api.saveGroupMemory.mockRejectedValue(new api.TextFileConflictError());
   render(Groups);
