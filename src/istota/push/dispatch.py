@@ -1,6 +1,6 @@
 """One background sweeper for inbox alerts, delayed chat and badge repair.
 
-No write transaction spans APNs I/O. Flags are acknowledged after attempts,
+No write transaction spans APNs or relay I/O. Flags are acknowledged after attempts,
 including failures; chat watermarks stop at the delay cutoff. A process killed
 between a send and its acknowledgement can repeat that alert on restart.
 """
@@ -92,7 +92,8 @@ def _send(config: Config, device: dict, prepared):
     # next alert. APNs itself cannot participate in the registration transaction.
     with db.get_db(config.db_path) as conn:
         current = conn.execute(
-            "SELECT 1 FROM push_devices WHERE id = ? AND user_id = ? AND created_at = ?",
+            "SELECT 1 FROM push_devices WHERE id = ? AND user_id = ? AND created_at = ?"
+            " AND enrollment_state = 'active'",
             (device["id"], device["user_id"], device["created_at"]),
         ).fetchone()
     if current is None or not devices.registration_authorized(config, device):
@@ -104,13 +105,15 @@ def _send(config: Config, device: dict, prepared):
         return
     result = delivery.send_prepared(config, device, prepared)
     with db.get_db(config.db_path) as conn:
-        devices.record_result(conn, device["id"], result)
+        devices.record_result(conn, device["id"], result, credentials_dir=devices.relay_credentials_dir(config))
 
 
 def _dispatch_user(config: Config, user_id: str, pending: list[dict], ceiling: int, now: float,
                    signing_key=None):
     with db.get_db(config.db_path) as conn:
-        registered = devices.devices_for_user(conn, user_id)
+        # A device in repair is skipped until it registers again.
+        registered = [device for device in devices.devices_for_user(conn, user_id)
+                      if device["enrollment_state"] == "active"]
         if not registered:
             store.clear_push_pending(conn, [], snapshots=pending)
             return
@@ -187,10 +190,17 @@ def run_push_dispatch(config: Config) -> None:
     if not _dispatch_lock.acquire(blocking=False):
         return
     try:
-        if (not config.push.enabled or importlib.util.find_spec("h2") is None
+        if config.push.delivery == "relay":
+            # The relay holds the APNs key and speaks HTTP/2 to Apple; nothing here needs either.
+            unavailable = None if config.push.enabled else "enable push"
+        elif (not config.push.enabled or importlib.util.find_spec("h2") is None
                 or not config.push.apns_key_path or not Path(config.push.apns_key_path).is_file()):
+            unavailable = "enable push, install h2 and configure the APNs key"
+        else:
+            unavailable = None
+        if unavailable:
             if not _warned_unavailable:
-                logger.warning("Native push unavailable: enable push, install h2 and configure the APNs key")
+                logger.warning("Native push unavailable: %s", unavailable)
                 _warned_unavailable = True
             return
         with db.get_db(config.db_path) as conn:

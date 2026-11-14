@@ -3690,7 +3690,13 @@ def cmd_push_test(args):
         logical = delivery.alert("Istota push test", args.message, badge, thread="test", group="test",
                                  target={"kind": "notification", "link": "/chat"})
         failed = False
+        receiver = "the relay" if config.push.delivery == "relay" else "APNs"
+        credentials_dir = devices.relay_credentials_dir(config)
         for device in registered:
+            if device["enrollment_state"] != "active":
+                print(f"Device {device['id']}: relay route expired or revoked; enroll again in the app")
+                failed = True
+                continue
             if not devices.registration_authorized(config, device):
                 print(f"Device {device['id']}: registration authorization expired; register again")
                 failed = True
@@ -3707,8 +3713,8 @@ def cmd_push_test(args):
                 continue
             result = delivery.send_prepared(config, device, prepared)
             with db.get_db(config.db_path) as conn:
-                devices.record_result(conn, device["id"], result)
-            outcome = "accepted by APNs" if result.success else f"failed: {result.status} {result.reason}"
+                devices.record_result(conn, device["id"], result, credentials_dir=credentials_dir)
+            outcome = f"accepted by {receiver}" if result.success else f"failed: {result.status} {result.reason}"
             print(f"{label}: {outcome}")
             failed = failed or not result.success
         return int(failed)

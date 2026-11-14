@@ -19,11 +19,17 @@ if TYPE_CHECKING:
     from istota.push.apns import ApnsResult
 
 from istota.db import iso_utc_now
+from istota.push.envelope import b64url_decode
 from istota.lib.atomic_write import write_bytes_atomic
 
 logger = logging.getLogger(__name__)
 
 _CREDENTIAL_REF = re.compile(r"[0-9]+\.cap")
+# A capability file holds one 43-character capability; anything longer is not one.
+_CAPABILITY_FILE_MAX = 64
+CREDENTIAL_MISSING = "relay_credential_missing"
+# Relay results that leave a route unusable until the device enrolls again.
+REPAIR_REASONS = frozenset({"unauthorized_route", "expired_route", CREDENTIAL_MISSING})
 
 
 def relay_credentials_dir(config: "Config") -> Path:
@@ -50,6 +56,29 @@ def write_relay_capability(directory: Path | None, device_id: int, capability: s
     name = f"{int(device_id)}.cap"
     write_bytes_atomic(directory / name, capability.encode("ascii"), mode=0o600, fsync=True)
     return name
+
+
+def read_relay_capability(directory: Path, ref: str | None) -> str | None:
+    """The send capability a row's file holds, or None when it is missing, a link or not a capability."""
+    if not ref or not _CREDENTIAL_REF.fullmatch(ref):
+        return None
+    try:
+        fd = os.open(Path(directory) / ref, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        data = os.read(fd, _CAPABILITY_FILE_MAX + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    try:
+        capability = data.decode("ascii")
+        if len(capability) == 43 and len(b64url_decode(capability)) == 32:
+            return capability
+    except ValueError:
+        pass
+    return None
 
 
 def remove_relay_capability(directory: Path, ref: str | None) -> None:
@@ -257,23 +286,38 @@ def record_refusal(conn: sqlite3.Connection, device: dict, reason: str) -> None:
         logger.warning("Push refusal recording failed: %s", type(exc).__name__)
 
 
-def record_result(conn: sqlite3.Connection, device_id: int, result: "ApnsResult") -> None:
-    """Apply a response to the registration that was actually sent to APNs."""
+def record_result(conn: sqlite3.Connection, device_id: int, result: "ApnsResult", *,
+                  credentials_dir: Path | None = None) -> None:
+    """Apply a response to the registration that was actually sent to APNs or the relay.
+
+    A deleted row's relay capability file goes with it, from `credentials_dir`:
+    the relay revokes the route itself when it reports the device invalid.
+    A route result in `REPAIR_REASONS` marks the device `repair`.
+    """
     try:
         if result.reason in {"BadTopic", "InvalidProviderToken"}:
             return  # Deployment mistakes must not change device state.
         generation = result.device_created_at
         guard = "id = ? AND (? IS NULL OR created_at = ?)"
         params = (device_id, generation, generation)
+        deleted = None
         if result.status == 400 and result.reason in {"BadDeviceToken", "DeviceTokenNotForTopic"}:
-            conn.execute(f"DELETE FROM push_devices WHERE {guard}", params)
+            deleted = conn.execute(
+                f"DELETE FROM push_devices WHERE {guard} RETURNING relay_credential_ref", params,
+            ).fetchall()
         elif result.status == 410 and result.reason == "Unregistered":
             if result.timestamp is not None:
                 invalidated = datetime.fromtimestamp(result.timestamp / 1000, timezone.utc).isoformat()
-                conn.execute(
-                    f"DELETE FROM push_devices WHERE {guard} AND julianday(created_at) <= julianday(?)",
+                deleted = conn.execute(
+                    f"DELETE FROM push_devices WHERE {guard} AND julianday(created_at) <= julianday(?)"
+                    " RETURNING relay_credential_ref",
                     (*params, invalidated),
-                )
+                ).fetchall()
+        elif result.reason in REPAIR_REASONS:
+            conn.execute(
+                f"UPDATE push_devices SET last_error = ?, enrollment_state = 'repair' WHERE {guard}",
+                (f"{result.status} {result.reason}", *params),
+            )
         elif result.success:
             conn.execute(
                 f"UPDATE push_devices SET last_seen_at = ?, last_error = NULL, "
@@ -285,5 +329,8 @@ def record_result(conn: sqlite3.Connection, device_id: int, result: "ApnsResult"
                 f"UPDATE push_devices SET last_error = ? WHERE {guard}",
                 (f"{result.status} {result.reason}".strip(), *params),
             )
+        if deleted and credentials_dir is not None:
+            for (ref,) in deleted:
+                remove_relay_capability(credentials_dir, ref)
     except Exception as exc:
         logger.warning("Push result recording failed: %s", type(exc).__name__)
