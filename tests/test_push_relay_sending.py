@@ -511,10 +511,12 @@ def test_registering_again_brings_a_repaired_device_back(relay):
     assert len(relay.mock.requests) == 1
 
 
-def test_the_direct_dispatcher_also_skips_a_device_in_repair(tmp_path, monkeypatch):
+def _direct_config(tmp_path, monkeypatch):
     key = tmp_path / "apns.p8"
     key.write_text("unused")
-    config = Config(db_path=tmp_path / "test.db", push=PushConfig(enabled=True, apns_key_path=str(key)))
+    key.chmod(0o600)
+    config = Config(db_path=tmp_path / "test.db", push=PushConfig(
+        enabled=True, apns_key_path=str(key), apns_key_id="KEY", apns_team_id="TEAM"))
     db.init_db(config.db_path)
     monkeypatch.setattr(dispatch, "_warned_unavailable", False)
     sent = []
@@ -526,10 +528,38 @@ def test_the_direct_dispatcher_also_skips_a_device_in_repair(tmp_path, monkeypat
         healthy = devices.register_device(conn, ACCOUNT, "cd" * 32, "sandbox", auth_method="nextcloud",
                                           auth_epoch=0)
         conn.execute("UPDATE push_devices SET enrollment_state = 'repair' WHERE id = ?", (repaired,))
+    return config, sent, repaired, healthy
+
+
+def test_the_direct_dispatcher_sends_to_a_device_left_in_repair(tmp_path, monkeypatch):
+    # Repair is a relay state: after a switch to direct, APNs reaches the token whatever a relay said.
+    config, sent, repaired, healthy = _direct_config(tmp_path, monkeypatch)
+    with db.get_db(config.db_path) as conn:
         store.write_notification(conn, ACCOUNT, source="confirmation", dedup_key="k", title="T", body="B",
                                  link="/chat")
     dispatch.run_push_dispatch(config)
-    assert sent == [healthy]
+    assert sent == [repaired, healthy]
+
+
+def test_cli_push_test_sends_to_a_device_left_in_repair_under_direct_delivery(tmp_path, monkeypatch, capsys):
+    from istota import cli
+    config, sent, repaired, healthy = _direct_config(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli, "load_config", lambda *args, **kwargs: config)
+    assert cli.cmd_push_test(SimpleNamespace(config=None, user=ACCOUNT, message="Hello")) == 0
+    assert sent == [repaired, healthy]
+    assert "enroll again" not in capsys.readouterr().out
+
+
+def test_the_push_credentials_check_reports_devices_left_in_repair(tmp_path, monkeypatch):
+    from istota import doctor
+    config, _, _, _ = _direct_config(tmp_path, monkeypatch)
+    monkeypatch.setattr(doctor.importlib.util, "find_spec", lambda name: object())
+    result = doctor.check_push_credentials(config, False)
+    assert result.status == doctor.OK
+    assert "1 device" in result.detail and "relay" in result.detail
+    with db.get_db(config.db_path) as conn:
+        conn.execute("UPDATE push_devices SET enrollment_state = 'active'")
+    assert "relay" not in doctor.check_push_credentials(config, False).detail
 
 
 # --- The CLI -----------------------------------------------------------------------------
@@ -575,3 +605,23 @@ def test_doctor_counts_devices_in_repair(relay):
     assert result.status == doctor.WARN
     assert "1 device" in result.detail and "repair" in result.detail
     assert result.remedy
+
+
+def test_doctor_counts_a_device_enrolled_under_an_older_key_as_needing_repair(relay):
+    from istota import doctor
+    device_id = relay.enroll()
+    with db.get_db(relay.config.db_path) as conn:
+        conn.execute("UPDATE push_devices SET sender_key_id = ? WHERE id = ?", ("A" * 43, device_id))
+    result = doctor.check_push_relay(relay.config, False)
+    assert result.status == doctor.WARN
+    assert "1 device" in result.detail and "older" in result.detail
+
+
+def test_doctor_does_not_count_a_stale_key_while_the_public_key_is_unreadable(relay):
+    from istota import doctor
+    from pathlib import Path
+    device_id = relay.enroll()
+    with db.get_db(relay.config.db_path) as conn:
+        conn.execute("UPDATE push_devices SET sender_key_id = ? WHERE id = ?", ("A" * 43, device_id))
+    Path(relay.config.push.signing_key_path + ".pub").unlink()
+    assert doctor.check_push_relay(relay.config, False).status == doctor.OK

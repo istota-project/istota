@@ -2654,6 +2654,11 @@ class PushConfig:
     # empty means `push/relay` beside the framework database.
     push_credentials_dir: str = ""
 
+    @property
+    def dispatching(self) -> bool:
+        """Whether the dispatcher sends at all; discovery offers push only then."""
+        return self.enabled and self.dispatch_interval_seconds > 0
+
 
 PUSH_CONTENT_MODES = ("legacy", "private")
 PUSH_DELIVERY_MODES = ("direct", "relay")

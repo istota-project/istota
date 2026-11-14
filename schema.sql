@@ -2836,10 +2836,12 @@ CREATE TABLE IF NOT EXISTS push_devices (
     sender_key_id TEXT,
     push_generation TEXT,
     -- Relay delivery only: the route, the file name of its send capability in the
-    -- push credentials directory (never the capability), the lease as Unix time.
+    -- push credentials directory (never the capability), the lease as Unix time,
+    -- and the normalized URL of the relay that issued the route, where it is revoked.
     relay_route_id TEXT,
     relay_credential_ref TEXT,
     relay_lease_expires_at INTEGER,
+    relay_url TEXT,
     -- 'active' or 'repair'; a device in repair is skipped until it registers again.
     enrollment_state TEXT NOT NULL DEFAULT 'active',
     last_badge INTEGER NOT NULL DEFAULT -1,

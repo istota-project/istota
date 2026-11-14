@@ -3694,7 +3694,7 @@ def cmd_push_test(args):
         receiver = "the relay" if config.push.delivery == "relay" else "APNs"
         credentials_dir = devices.relay_credentials_dir(config)
         for device in registered:
-            if device["enrollment_state"] != "active":
+            if devices.held_for_repair(config.push.delivery, device):
                 print(f"Device {device['id']}: relay route expired or revoked; enroll again in the app")
                 failed = True
                 continue

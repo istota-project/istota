@@ -33,7 +33,7 @@ async def mobile_config(request: Request) -> JSONResponse:
     push = config.push
     # The web container need not hold the daemon's signing key. Discovery
     # reports configuration, without opening the key or contacting APNs.
-    dispatching = push.enabled and push.dispatch_interval_seconds > 0
+    dispatching = push.dispatching
     direct_push = (
         dispatching and push.delivery == "direct"
         and bool(push.apns_key_path.strip()) and bool(push.apns_key_id.strip())

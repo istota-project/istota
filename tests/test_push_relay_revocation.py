@@ -86,7 +86,7 @@ def queued(state) -> list[dict]:
 
 def delete(state, device_id, user="alice"):
     with db.get_db(state.config.db_path) as conn:
-        return devices.delete_device(conn, device_id, user, relay_url=state.config.push.relay_url)
+        return devices.delete_device(conn, device_id, user, credentials_dir=state.directory)
 
 
 def sweep(state):
@@ -143,7 +143,7 @@ def test_a_session_deletion_queues_every_relay_route_it_removes(revoking):
     second = revoking.enroll_route("cd" * 32, route=2, capability=OTHER_CAPABILITY)
     with db.get_db(revoking.config.db_path) as conn:
         conn.execute("UPDATE push_devices SET auth_session_id = 'login-1'")
-        devices.delete_session_devices(conn, "alice", "login-1", relay_url=RELAY_URL)
+        devices.delete_session_devices(conn, "alice", "login-1")
     assert row(revoking, first) is None and row(revoking, second) is None
     assert [(r["route_id"], r["credential_ref"]) for r in queued(revoking)] == [
         (route_id(1), f"{first}.cap"), (route_id(2), f"{second}.cap")]
@@ -170,7 +170,7 @@ def test_a_session_deletion_whose_queue_insert_fails_deletes_nothing(revoking):
         conn.execute("UPDATE push_devices SET auth_session_id = 'login-1'")
     with pytest.raises(sqlite3.Error):
         with db.get_db(revoking.config.db_path) as conn:
-            devices.delete_session_devices(conn, "alice", "login-1", relay_url=RELAY_URL)
+            devices.delete_session_devices(conn, "alice", "login-1")
     assert row(revoking, device_id) is not None
     assert queued(revoking) == []
 
@@ -179,7 +179,7 @@ def test_a_deletion_inside_the_callers_transaction_rolls_back_with_it(revoking):
     device_id = revoking.enroll_route()
     with db.get_db(revoking.config.db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
-        assert devices.delete_device(conn, device_id, "alice", relay_url=RELAY_URL)
+        assert devices.delete_device(conn, device_id, "alice")
         conn.rollback()
     assert row(revoking, device_id) is not None
     assert queued(revoking) == []
@@ -228,6 +228,73 @@ def test_a_re_registration_that_fails_leaves_no_queue_entry_and_no_file(revoking
             credentials_dir=revoking.directory, relay_url=RELAY_URL) is None
     assert queued(revoking) == []
     assert not (revoking.directory / f"revoke-{route_id(1)}.cap").exists()
+
+
+def test_a_token_replacement_leaves_one_row_and_one_revocation_for_the_route(revoking):
+    # The relay keeps the route and its capabilities when the app replaces its
+    # token (istota-relay `enroll._replace_token`), and the app registers again
+    # under the new token: the old row holds the same capability and must go.
+    old = revoking.enroll_route("ab" * 32)
+    new = revoking.enroll_route("cd" * 32)
+    assert row(revoking, old) is None
+    assert row(revoking, new)["relay_route_id"] == route_id(1)
+    assert queued(revoking) == []
+    assert sorted(p.name for p in revoking.directory.iterdir()) == [f"{new}.cap"]
+    assert delete(revoking, new)
+    assert [(e["route_id"], e["credential_ref"]) for e in queued(revoking)] == [(route_id(1), f"{new}.cap")]
+    sweep(revoking)
+    assert len(revoking.revoker.requests) == 1
+    assert queued(revoking) == []
+
+
+def test_a_route_a_surviving_row_still_names_is_not_queued(revoking):
+    first = revoking.enroll_route("ab" * 32)
+    second = revoking.enroll_route("cd" * 32, route=2)
+    with db.get_db(revoking.config.db_path) as conn:
+        conn.execute("UPDATE push_devices SET relay_route_id = ? WHERE id = ?", (route_id(1), second))
+    assert delete(revoking, first)
+    assert queued(revoking) == []
+    assert not (revoking.directory / f"{first}.cap").exists()
+    assert row(revoking, second)["relay_route_id"] == route_id(1)
+    assert delete(revoking, second)
+    assert [e["route_id"] for e in queued(revoking)] == [route_id(1)]
+
+
+def test_a_replaced_route_a_surviving_row_still_names_is_not_queued(revoking):
+    device_id = revoking.enroll_route("ab" * 32)
+    other = revoking.enroll_route("cd" * 32, route=2)
+    with db.get_db(revoking.config.db_path) as conn:
+        conn.execute("UPDATE push_devices SET relay_route_id = ? WHERE id = ?", (route_id(1), other))
+    revoking.enroll_route("ab" * 32, route=3)
+    assert row(revoking, device_id)["relay_route_id"] == route_id(3)
+    assert queued(revoking) == []
+    assert not (revoking.directory / f"revoke-{route_id(1)}.cap").exists()
+
+
+def test_a_removal_after_a_switch_to_direct_revokes_at_the_relay_that_issued_the_route(revoking):
+    device_id = revoking.enroll_route()
+    assert row(revoking, device_id)["relay_url"] == RELAY_URL
+    revoking.config.push.delivery = "direct"
+    revoking.config.push.relay_url = ""
+    assert delete(revoking, device_id)
+    entry, = queued(revoking)
+    assert entry["relay_url"] == RELAY_URL
+    sweep(revoking)
+    request, = revoking.revoker.requests
+    assert str(request.url) == f"{RELAY_URL}/v1/routes/{route_id(1)}"
+    assert queued(revoking) == []
+
+
+def test_a_replacement_after_a_switch_to_direct_revokes_at_the_relay_that_issued_the_route(revoking):
+    device_id = revoking.enroll_route()
+    revoking.config.push.delivery = "direct"
+    revoking.config.push.relay_url = ""
+    with db.get_db(revoking.config.db_path) as conn:
+        devices.register_device(conn, "alice", "ab" * 32, "production", auth_method="nextcloud", auth_epoch=0,
+                                credentials_dir=revoking.directory)
+    assert row(revoking, device_id)["relay_url"] is None
+    entry, = queued(revoking)
+    assert entry["relay_url"] == RELAY_URL
 
 
 def test_an_invalid_device_from_the_relay_is_deleted_without_a_revocation(revoking):
@@ -413,9 +480,10 @@ def test_an_entry_past_its_lifetime_is_dropped_without_a_request(revoking, caplo
 @pytest.mark.parametrize("damage", ["missing", "garbage", "no_url", "bad_url"])
 def test_an_entry_that_cannot_be_sent_is_dropped(revoking, damage):
     device_id = revoking.enroll_route()
-    relay_url = {"no_url": "", "bad_url": "http://relay.example.com/istota"}.get(damage, RELAY_URL)
+    relay_url = {"no_url": None, "bad_url": "http://relay.example.com/istota"}.get(damage, RELAY_URL)
     with db.get_db(revoking.config.db_path) as conn:
-        devices.delete_device(conn, device_id, "alice", relay_url=relay_url)
+        conn.execute("UPDATE push_devices SET relay_url = ? WHERE id = ?", (relay_url, device_id))
+        devices.delete_device(conn, device_id, "alice")
     cap = revoking.directory / f"{device_id}.cap"
     if damage == "missing":
         cap.unlink()
@@ -432,7 +500,7 @@ def test_a_sweep_sends_at_most_twenty(revoking):
         revoking.enroll_route(f"{n:02x}" * 32, route=n, capability=CAPABILITY)
     with db.get_db(revoking.config.db_path) as conn:
         conn.execute("UPDATE push_devices SET auth_session_id = 'login-1'")
-        devices.delete_session_devices(conn, "alice", "login-1", relay_url=RELAY_URL)
+        devices.delete_session_devices(conn, "alice", "login-1")
     sweep(revoking)
     assert len(revoking.revoker.requests) == 20
     assert len(queued(revoking)) == 3

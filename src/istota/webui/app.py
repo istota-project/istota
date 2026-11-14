@@ -14419,6 +14419,7 @@ def _push_devices_list(username: str) -> dict:
     with db.get_db(_config.db_path) as conn:
         return {"devices": devices.list_devices(
             conn, username, content_mode=_config.push.content, sender_key_id=sender_key_id,
+            delivery=_config.push.delivery,
         )}
 
 
@@ -14444,7 +14445,8 @@ def _push_session_delete(username: str, session_id: str) -> None:
     from istota.push import devices
 
     with db.get_db(_config.db_path) as conn:
-        devices.delete_session_devices(conn, username, session_id, relay_url=_config.push.relay_url)
+        devices.delete_session_devices(conn, username, session_id,
+                                       credentials_dir=devices.relay_credentials_dir(_config))
 
 
 def _push_device_delete(username: str, device_id: int, created_at: str | None = None) -> bool:
@@ -14453,7 +14455,7 @@ def _push_device_delete(username: str, device_id: int, created_at: str | None = 
 
     with db.get_db(_config.db_path) as conn:
         return devices.delete_device(conn, device_id, username, created_at=created_at,
-                                     relay_url=_config.push.relay_url)
+                                     credentials_dir=devices.relay_credentials_dir(_config))
 
 
 @api_router.get("/push/categories")
@@ -14625,6 +14627,10 @@ async def push_devices_register(request: Request, user: dict = Depends(_require_
     # Absent means a plain registration, which clears an earlier private enrollment.
     private = {}
     relay_delivery = _config.push.delivery == "relay"
+    if relay_delivery and not _config.push.dispatching:
+        # Discovery then offers no relay, so even a 0.16 app registers plainly;
+        # without this it would be told to update an app that is current.
+        raise HTTPException(409, "push not enabled")
     if "private" in body:
         if "connection_binding" not in body:
             raise HTTPException(400, "invalid private enrollment")

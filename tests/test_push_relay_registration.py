@@ -33,6 +33,7 @@ def relay_push(private_push):  # noqa: F811
     key_path = mod._config.db_path.parent / "config" / "push" / "signing.key"
     raw = envelope.write_signing_key(key_path).public_key().public_bytes_raw()
     mod._config.push.signing_key_path = str(key_path)
+    mod._config.push.enabled = True
     mod._config.push.delivery = "relay"
     mod._config.push.relay_url = RELAY_URL
     return {"path": key_path, "raw": raw, "kid": _kid(raw),
@@ -105,7 +106,9 @@ async def test_a_registration_without_a_route_clears_it_and_queues_its_revocatio
     cookies = await _login(client, "alice")
     first = await client.post(URL, cookies=cookies, headers=ORIGIN, json=_relay_body(relay_push["kid"]))
     assert first.status_code == 200
+    # Under direct delivery the relay URL may be empty: the row's own is the one queued.
     mod._config.push.delivery = "direct"
+    mod._config.push.relay_url = ""
     second = await client.post(URL, cookies=cookies, headers=ORIGIN, json=_encrypted(relay_push["kid"]))
     assert second.json() == first.json()
     assert _relay_columns() == (None, None, None, "active")
@@ -291,3 +294,64 @@ async def test_logout_queues_the_session_relay_route(client, relay_push):  # noq
     assert response.status_code == 302
     assert _device_count() == 0
     assert _queued_routes() == [(ROUTE_ID, f"{first.json()['id']}.cap", RELAY_URL)]
+
+
+async def test_removal_after_a_switch_to_direct_queues_the_issuing_relay(client, relay_push):  # noqa: F811
+    import istota.webui.app as mod
+
+    cookies = await _login(client, "alice")
+    device_id = (await client.post(URL, cookies=cookies, headers=ORIGIN, json=_relay_body(relay_push["kid"]))).json()["id"]
+    mod._config.push.delivery = "direct"
+    mod._config.push.relay_url = ""
+    removed = await client.delete(f"{URL}/{device_id}", cookies=cookies, headers=ORIGIN)
+    assert removed.status_code == 200
+    assert _queued_routes() == [(ROUTE_ID, f"{device_id}.cap", RELAY_URL)]
+
+
+async def test_a_token_replacement_through_the_route_keeps_one_row(client, relay_push):  # noqa: F811
+    cookies = await _login(client, "alice")
+    first = await client.post(URL, cookies=cookies, headers=ORIGIN, json=_relay_body(relay_push["kid"]))
+    body = _relay_body(relay_push["kid"])
+    body["token"] = "ef" * 32
+    second = await client.post(URL, cookies=cookies, headers=ORIGIN, json=body)
+    assert second.status_code == 200 and second.json() != first.json()
+    assert _device_count() == 1
+    assert _queued_routes() == []
+    assert [p.name for p in relay_push["dir"].iterdir()] == [f"{second.json()['id']}.cap"]
+
+
+async def test_a_stale_sender_key_lists_as_repair_under_relay_delivery(client, relay_push):  # noqa: F811
+    cookies = await _login(client, "alice")
+    await client.post(URL, cookies=cookies, headers=ORIGIN, json=_relay_body(relay_push["kid"]))
+    with db.get_db(_db_path()) as conn:
+        conn.execute("UPDATE push_devices SET sender_key_id = ?", ("A" * 43,))
+    listed, = (await client.get(URL, cookies=cookies)).json()["devices"]
+    assert (listed["stale_key"], listed["enrollment_state"]) == (True, "repair")
+    # An unreadable key is an outage, not a stale enrollment: nothing to repair.
+    Path(str(relay_push["path"]) + ".pub").unlink()
+    listed, = (await client.get(URL, cookies=cookies)).json()["devices"]
+    assert (listed["stale_key"], listed["enrollment_state"]) == (False, "active")
+
+
+async def test_a_device_left_in_repair_lists_as_active_under_direct_delivery(client, relay_push):  # noqa: F811
+    import istota.webui.app as mod
+
+    cookies = await _login(client, "alice")
+    await client.post(URL, cookies=cookies, headers=ORIGIN, json=_relay_body(relay_push["kid"]))
+    with db.get_db(_db_path()) as conn:
+        conn.execute("UPDATE push_devices SET enrollment_state = 'repair'")
+    assert (await client.get(URL, cookies=cookies)).json()["devices"][0]["enrollment_state"] == "repair"
+    mod._config.push.delivery = "direct"
+    assert (await client.get(URL, cookies=cookies)).json()["devices"][0]["enrollment_state"] == "active"
+
+
+async def test_a_registration_with_push_disabled_on_a_relay_installation_says_so(client, relay_push):  # noqa: F811
+    import istota.webui.app as mod
+
+    mod._config.push.enabled = False
+    cookies = await _login(client, "alice")
+    for body in (_relay_body(relay_push["kid"]), {"token": "ab" * 32, "environment": "production"}):
+        response = await client.post(URL, cookies=cookies, headers=ORIGIN, json=body)
+        assert response.status_code == 409
+        assert response.json()["detail"] == "push not enabled"
+    assert _device_count() == 0

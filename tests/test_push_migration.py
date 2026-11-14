@@ -91,7 +91,7 @@ def test_private_enrollment_columns_are_added_and_legacy_rows_untouched(tmp_path
         assert tuple(row) == ("ab" * 32, "b", 2, None, None, None, None, None, None)
 
 
-RELAY_COLUMNS = ("relay_route_id", "relay_credential_ref", "relay_lease_expires_at", "enrollment_state")
+RELAY_COLUMNS = ("relay_route_id", "relay_credential_ref", "relay_lease_expires_at", "relay_url", "enrollment_state")
 
 
 def test_relay_columns_are_added_and_existing_rows_stay_active(tmp_path):
@@ -109,7 +109,7 @@ def test_relay_columns_are_added_and_existing_rows_stay_active(tmp_path):
         assert set(RELAY_COLUMNS) <= set(info)
         assert info["enrollment_state"]["notnull"] == 1
         row = conn.execute(f"SELECT token, private_content, {', '.join(RELAY_COLUMNS)} FROM push_devices").fetchone()
-        assert tuple(row) == ("ab" * 32, "encrypted", None, None, None, "active")
+        assert tuple(row) == ("ab" * 32, "encrypted", None, None, None, None, "active")
         conn.execute("INSERT INTO push_devices(user_id,token,environment) VALUES('bob',?,'sandbox')", ("cd" * 32,))
         assert conn.execute("SELECT enrollment_state FROM push_devices WHERE user_id='bob'").fetchone()[0] == "active"
 

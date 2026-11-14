@@ -11157,7 +11157,13 @@ def check_push_credentials(config: "Config", probe: bool) -> CheckResult:
             return CheckResult(name, FAIL, "APNs key is not a regular file", "Point apns_key_path at the signing key file.")
         if stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_uid != os.geteuid():
             return CheckResult(name, FAIL, "APNs key permissions or owner differ from the service account", "Set mode 0600 and make the service account the owner of the APNs key.")
-        return CheckResult(name, OK, "APNs key exists with mode 0600 and is owned by this service account")
+        detail = "APNs key exists with mode 0600 and is owned by this service account"
+        # Repair is a relay state; direct delivery sends to these devices regardless.
+        left = _relay_repair_count(config)
+        if left:
+            detail += (f"; {left} device(s) still marked for repair from relay delivery are sent to "
+                       "directly, and the mark clears when each registers again")
+        return CheckResult(name, OK, detail)
     except Exception as exc:
         return CheckResult(name, FAIL, f"APNs key metadata unavailable ({type(exc).__name__})", "Install the signing key at apns_key_path, owned by the service account with mode 0600.")
 
@@ -11237,10 +11243,10 @@ def check_push_relay(config: "Config", probe: bool) -> CheckResult:
     if directory_problem is not None:
         notes.append(directory_problem.detail)
         remedies.append(directory_problem.remedy)
-    repair = _relay_repair_count(config)
+    repair = _relay_repair_count(config, sender_key_id=_current_sender_key_id(config))
     if repair:
         notes.append(f"{repair} device(s) in repair: their relay route expired or was revoked, "
-                     "or its credential file is missing")
+                     "their credential file is missing, or they enrolled under an older signing key")
         remedies.append("Each such device must enroll again from the app's notification settings.")
     pending = _relay_revocations_pending(config)
     if pending:
@@ -11282,17 +11288,42 @@ def check_push_relay(config: "Config", probe: bool) -> CheckResult:
     return CheckResult(name, OK, reached)
 
 
-def _relay_repair_count(config: "Config") -> int:
-    """Devices marked `repair` by a relay result; 0 with no database or no readable table."""
+def _current_sender_key_id(config: "Config") -> str | None:
+    """The push public key's ID, as the web's device list reads it; None when unreadable."""
+    from istota.push import envelope
+
+    try:
+        raw = envelope.load_public_key(envelope.public_key_path(config.push.signing_key_path))
+    except Exception:  # noqa: BLE001 — unreadable marks nothing stale, as in the device list
+        return None
+    return envelope.key_id(raw)
+
+
+def _relay_repair_count(config: "Config", *, sender_key_id: str | None = None) -> int:
+    """Devices that get no alerts under relay delivery until they register again.
+
+    `devices.needs_repair`, the device list's rule: a row a relay result marked
+    `repair`, and with `sender_key_id` an encrypted enrollment under another
+    sender key. 0 with no database or no readable table.
+    """
+    from istota.push import devices
+
     conn = None
     try:
         db_path = Path(getattr(config, "db_path", "") or "")
         if not db_path.name or not db_path.exists():
             return 0
         conn = sqlite_util.connect_read_only(db_path)
-        return int(conn.execute(
-            "SELECT COUNT(*) FROM push_devices WHERE enrollment_state = 'repair'",
-        ).fetchone()[0])
+        count = 0
+        for row in conn.execute(
+            "SELECT enrollment_state, private_content, encryption_public_key, sender_key_id FROM push_devices",
+        ):
+            device = {"enrollment_state": row[0], "private_content": row[1],
+                      "encryption_public_key": row[2], "sender_key_id": row[3]}
+            _, stale = devices.device_content("private", device, sender_key_id)
+            if devices.needs_repair("relay", device, stale):
+                count += 1
+        return count
     except Exception:  # noqa: BLE001 — a check reports, it does not propagate
         logger.debug("push relay repair count failed", exc_info=True)
         return 0

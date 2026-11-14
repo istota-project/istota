@@ -92,11 +92,12 @@ def _send(config: Config, device: dict, prepared):
     # next alert. APNs itself cannot participate in the registration transaction.
     with db.get_db(config.db_path) as conn:
         current = conn.execute(
-            "SELECT 1 FROM push_devices WHERE id = ? AND user_id = ? AND created_at = ?"
-            " AND enrollment_state = 'active'",
+            "SELECT enrollment_state FROM push_devices WHERE id = ? AND user_id = ? AND created_at = ?",
             (device["id"], device["user_id"], device["created_at"]),
         ).fetchone()
-    if current is None or not devices.registration_authorized(config, device):
+    if current is None or devices.held_for_repair(config.push.delivery, dict(current)):
+        return
+    if not devices.registration_authorized(config, device):
         return
     if isinstance(prepared, delivery.DeliveryError):
         logger.warning("Native push payload refused device=%s: %s", device["id"], prepared.cause or prepared.reason)
@@ -111,9 +112,9 @@ def _send(config: Config, device: dict, prepared):
 def _dispatch_user(config: Config, user_id: str, pending: list[dict], ceiling: int, now: float,
                    signing_key=None):
     with db.get_db(config.db_path) as conn:
-        # A device in repair is skipped until it registers again.
+        # Under relay delivery a device in repair is skipped until it registers again.
         registered = [device for device in devices.devices_for_user(conn, user_id)
-                      if device["enrollment_state"] == "active"]
+                      if not devices.held_for_repair(config.push.delivery, device)]
         if not registered:
             store.clear_push_pending(conn, [], snapshots=pending)
             return
