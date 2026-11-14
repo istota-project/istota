@@ -839,6 +839,8 @@ Explicit CalDAV override. When any field is set it wins over the value derived f
 
 Set all three fields or none. Each falls back to `[nextcloud]` on its own rather than as a group, so a half-set block mixes the two: a URL with no password names a foreign host and hands it the Nextcloud app password, and a password with no URL authenticates to Nextcloud's own DAV endpoint with the wrong secret. `istota setup` refuses the first pairing outright. Where there is no Nextcloud, `istota setup` offers this block, writing the URL and username into the config and the password to the stack's `secrets/istota_caldav_password`, which reaches the daemon as `ISTOTA_CALDAV_PASSWORD`.
 
+A user's calendars are the ones whose `DAV:owner` names that user's principal. On Nextcloud that is `principals/users/<user id>`; on any other server the owner must sit beside the connecting account's own principal, with the Istota user id as its last segment, so on a plain Radicale a calendar owned by `/alice/` belongs to the user `alice`. A server whose principals do not carry the Istota user id that way shows no calendars.
+
 ## `[sharing]`
 
 Calendars and folders shared with Istota over open protocols. See [sharing](../features/sharing.md). A feed or sharing server on a private address or plain http needs a `sharing` grant in [`[private_hosts]`](#private_hosts).

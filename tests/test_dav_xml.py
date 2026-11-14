@@ -2,7 +2,7 @@ from xml.etree import ElementTree as ET
 
 import pytest
 
-from istota.lib.dav_xml import DavXmlError, parse_multistatus, principal_user, safe_segment
+from istota.lib.dav_xml import DavXmlError, parse_multistatus, principal_beside, principal_user, safe_segment
 
 
 def _multistatus(*responses: str) -> bytes:
@@ -78,3 +78,19 @@ def test_safe_segment_accepts_plain_names(value):
 @pytest.mark.parametrize("value", ["", "a/b", "a\\b", "a%2Fb", "a?b", "a#b", "..", "a\x00b", "a\x7fb"])
 def test_safe_segment_refuses_separators_escapes_and_controls(value):
     assert not safe_segment(value)
+
+
+@pytest.mark.parametrize("href, own, expected", [
+    ("/alice/", "https://dav.example.com/istota/", "alice"),
+    ("<d:owner xmlns:d=\"DAV:\"><d:href>/alice/</d:href></d:owner>", "https://dav.example.com/istota/", "alice"),
+    ("/people/alice", "https://dav.example.com/people/istota/", "alice"),
+    ("/alice/", "https://dav.example.com/people/istota/", None),
+    ("/other/alice/", "https://dav.example.com/people/istota/", None),
+    ("/al%2Fice/", "https://dav.example.com/istota/", None),
+    ("/alice/#x", "https://dav.example.com/istota/", None),
+    ("https://dav.example.com:99999/alice/", "https://dav.example.com/istota/", None),
+    ("/alice/", "https://dav.example.com/", None),
+])
+def test_principal_beside_reads_the_id_off_the_principals_layout(href, own, expected):
+    prop = ET.fromstring(href) if href.startswith("<") else href
+    assert principal_beside(prop, own) == expected
