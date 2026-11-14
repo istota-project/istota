@@ -176,11 +176,15 @@ istota_secrets: {}
 # /srv/app/istota/rclone.conf (0600, uid 10001) when non-empty.
 istota_rclone_conf: ""
 
-# A vaulted controller-side .p8 file. Used only with --tags istota_push.
+# A vaulted controller-side .p8 file. Used only with --tags istota_push, and
+# only for direct delivery; leave it empty under relay delivery.
 istota_apns_key_file: ""
 # Explicit push settings merged into the live config, not the saved plan.
-# Set enabled, apns_key_id, apns_team_id and apns_topic. The file path is fixed
-# at /data/config/apns/AuthKey.p8 inside the container.
+# Direct delivery (the default): set enabled, apns_key_id, apns_team_id and
+# apns_topic. The file path is fixed at /data/config/apns/AuthKey.p8 inside the
+# container. Relay delivery: set enabled, delivery: relay, content: private and
+# relay_url, and no APNs setting; the task removes the apns_* keys from [push]
+# and deletes the key it staged at that path.
 istota_push_config: {}
 # True for one run creates a new private push signing key when the config
 # already uses one and both key files are gone. Every enrolled device then
