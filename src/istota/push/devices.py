@@ -1,16 +1,61 @@
-"""APNs registrations, scoped to the current account on each install."""
+"""APNs registrations, scoped to the current account on each install.
+
+Under relay delivery a registration also carries the relay route. Its send
+capability is a bearer credential, so it is written to a 0600 file named for
+the device (`<id>.cap`) in the push credentials directory, and the row holds
+only that file name: never the database, a log line or the device list.
+"""
 
 import logging
+import os
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from istota.config import PushConfig
     from istota.push.apns import ApnsResult
 
 from istota.db import iso_utc_now
+from istota.lib.atomic_write import write_bytes_atomic
 
 logger = logging.getLogger(__name__)
+
+_CREDENTIAL_REF = re.compile(r"[0-9]+\.cap")
+
+
+def relay_credentials_dir(push: "PushConfig") -> Path | None:
+    """`push_credentials_dir`, else `relay/` beside the signing key, else None."""
+    if push.push_credentials_dir.strip():
+        return Path(push.push_credentials_dir)
+    if push.signing_key_path.strip():
+        return Path(push.signing_key_path).parent / "relay"
+    return None
+
+
+def write_relay_capability(directory: Path | None, device_id: int, capability: str) -> str:
+    """Write one device's send capability (0600, directory 0700) and return its file name."""
+    if directory is None:
+        raise FileNotFoundError("no push credentials directory")
+    directory = Path(directory)
+    if not directory.is_dir():
+        directory.mkdir(parents=True, mode=0o700)
+        os.chmod(directory, 0o700)
+    name = f"{int(device_id)}.cap"
+    write_bytes_atomic(directory / name, capability.encode("ascii"), mode=0o600, fsync=True)
+    return name
+
+
+def remove_relay_capability(directory: Path, ref: str | None) -> None:
+    """Best-effort removal of a capability file named by a row; anything else is left alone."""
+    if not ref or not _CREDENTIAL_REF.fullmatch(ref):
+        return
+    try:
+        (Path(directory) / ref).unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("Push relay credential removal failed: %s", type(exc).__name__)
 
 
 def register_device(
@@ -22,12 +67,19 @@ def register_device(
     private_version: int | None = None, private_content: str | None = None,
     encryption_public_key: str | None = None, encryption_key_id: str | None = None,
     sender_key_id: str | None = None, push_generation: str | None = None,
+    relay: dict | None = None, credentials_dir: Path | None = None,
 ) -> int | None:
     """Move a token to its current account and seed only a new user's watermark.
 
     A registration without a connection binding clears any earlier one: the same
     token from an older binary is a legacy enrollment again. The private
-    enrollment columns follow the same rule.
+    enrollment and relay columns follow the same rule, and every registration
+    is `active` again.
+
+    `relay` is the validated `{route_id, send_capability, lease_expires_at}`;
+    its capability is written to `credentials_dir` inside the savepoint, so a
+    file that cannot be written registers nothing. A registration that drops a
+    route removes the old file once the row no longer names it.
     """
     try:
         # One savepoint makes the registration and watermark atomic, including
@@ -36,7 +88,7 @@ def register_device(
             conn.execute("BEGIN IMMEDIATE")
         conn.execute("SAVEPOINT register_push_device")
         previous = conn.execute(
-            "SELECT user_id, created_at FROM push_devices WHERE token = ? AND environment = ?",
+            "SELECT user_id, created_at, relay_credential_ref FROM push_devices WHERE token = ? AND environment = ?",
             (token, environment),
         ).fetchone()
         now = iso_utc_now()
@@ -60,6 +112,8 @@ def register_device(
                     encryption_public_key = excluded.encryption_public_key,
                     encryption_key_id = excluded.encryption_key_id, sender_key_id = excluded.sender_key_id,
                     push_generation = excluded.push_generation,
+                    relay_route_id = NULL, relay_credential_ref = NULL, relay_lease_expires_at = NULL,
+                    enrollment_state = 'active',
                     last_error = NULL, last_seen_at = NULL,
                     created_at = excluded.created_at, updated_at = excluded.updated_at
                 RETURNING id""",
@@ -73,7 +127,21 @@ def register_device(
                 ON CONFLICT(user_id) DO NOTHING""",
             (user_id,),
         )
+        ref = None
+        if relay is not None:
+            # Last before the release, so a write that fails rolls back the row
+            # and nothing after it can leave a row naming a file never written.
+            ref = f"{int(row[0])}.cap"
+            conn.execute(
+                "UPDATE push_devices SET relay_route_id = ?, relay_credential_ref = ?, relay_lease_expires_at = ?"
+                " WHERE id = ?",
+                (relay["route_id"], ref, relay["lease_expires_at"], row[0]),
+            )
+            write_relay_capability(credentials_dir, row[0], relay["send_capability"])
         conn.execute("RELEASE register_push_device")
+        stale_ref = previous["relay_credential_ref"] if previous else None
+        if stale_ref and stale_ref != ref and credentials_dir is not None:
+            remove_relay_capability(credentials_dir, stale_ref)
         if previous and previous[0] != user_id:
             logger.info("Push device %s moved from user %s to user %s", row[0], previous[0], user_id)
         return int(row[0])
@@ -111,7 +179,7 @@ def list_devices(
         listed = []
         for row in conn.execute(
             """SELECT id, platform, app_version, environment,
-                substr(token, -6) AS token_tail, created_at, last_seen_at, last_error,
+                substr(token, -6) AS token_tail, created_at, last_seen_at, last_error, enrollment_state,
                 private_content, encryption_public_key, sender_key_id
                 FROM push_devices WHERE user_id = ? ORDER BY id""", (user_id,),
         ):

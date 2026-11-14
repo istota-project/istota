@@ -2650,6 +2650,9 @@ class PushConfig:
     # A base URL that may carry a path; normalized once at load.
     relay_url: str = ""
     relay_timeout_seconds: int = 15
+    # Where each relay device's send capability is written (`<device id>.cap`);
+    # empty means `relay/` beside signing_key_path.
+    push_credentials_dir: str = ""
 
 
 PUSH_CONTENT_MODES = ("legacy", "private")

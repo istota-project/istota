@@ -188,11 +188,11 @@ def test_the_relay_check_skips_without_relay_delivery(push):
     assert doctor.check_push_relay(Config(push=push), True).status == doctor.SKIP
 
 
-def test_the_relay_check_without_a_probe_reads_config_only(monkeypatch):
+def test_the_relay_check_without_a_probe_reads_config_only(monkeypatch, tmp_path):
     def no_network(*args, **kwargs):
         pytest.fail("no request without --probe")
     monkeypatch.setattr(httpx, "get", no_network)
-    result = doctor.check_push_relay(relay_config(), False)
+    result = doctor.check_push_relay(relay_config(push_credentials_dir=str(tmp_path / "caps")), False)
     assert result.status == doctor.OK
     assert RELAY in result.detail
 
@@ -237,9 +237,10 @@ def relay_probe(monkeypatch):
     return seen, answer
 
 
-def test_the_probe_asks_healthz_under_the_base_path_without_redirects(relay_probe):
+def test_the_probe_asks_healthz_under_the_base_path_without_redirects(relay_probe, tmp_path):
     seen, _ = relay_probe
-    result = doctor.check_push_relay(relay_config(relay_timeout_seconds=7), True)
+    result = doctor.check_push_relay(
+        relay_config(relay_timeout_seconds=7, push_credentials_dir=str(tmp_path / "caps")), True)
     assert result.status == doctor.OK
     assert [str(r.url) for r in seen["requests"]] == [f"{RELAY}/healthz"]
     assert seen["requests"][0].method == "GET"
@@ -273,3 +274,82 @@ def test_an_unreachable_relay_is_a_warning_naming_the_exception_type_only(relay_
     assert result.status == doctor.WARN
     assert "ConnectError" in result.detail
     assert "private failure detail" not in result.detail + result.remedy
+
+
+# --- The credentials directory arm -------------------------------------------
+
+
+def caps_config(directory) -> Config:
+    return relay_config(push_credentials_dir=str(directory))
+
+
+def test_a_private_credentials_directory_passes(tmp_path):
+    directory = tmp_path / "caps"
+    directory.mkdir(mode=0o700)
+    (directory / "4.cap").write_text("x")
+    (directory / "4.cap").chmod(0o600)
+    assert doctor.check_push_relay(caps_config(directory), False).status == doctor.OK
+
+
+def test_the_default_directory_is_beside_the_signing_key(tmp_path):
+    key_dir = tmp_path / "push"
+    (key_dir / "relay").mkdir(parents=True, mode=0o755)
+    (key_dir / "relay").chmod(0o755)
+    config = relay_config(signing_key_path=str(key_dir / "signing.pem"))
+    result = doctor.check_push_relay(config, False)
+    assert result.status == doctor.FAIL
+    assert str(key_dir / "relay") in result.detail
+
+
+@pytest.mark.parametrize("mode", [0o750, 0o705, 0o755])
+def test_a_directory_others_can_read_fails(tmp_path, mode):
+    directory = tmp_path / "caps"
+    directory.mkdir()
+    directory.chmod(mode)
+    result = doctor.check_push_relay(caps_config(directory), False)
+    assert result.status == doctor.FAIL
+    assert f"{mode:04o}" in result.detail
+
+
+def test_a_readable_capability_file_fails_without_naming_its_contents(tmp_path):
+    directory = tmp_path / "caps"
+    directory.mkdir(mode=0o700)
+    (directory / "4.cap").write_text("private-capability-text")
+    (directory / "4.cap").chmod(0o644)
+    result = doctor.check_push_relay(caps_config(directory), False)
+    assert result.status == doctor.FAIL
+    assert "private-capability-text" not in result.detail + result.remedy
+
+
+def test_a_file_where_the_directory_should_be_fails(tmp_path):
+    (tmp_path / "caps").write_text("")
+    assert doctor.check_push_relay(caps_config(tmp_path / "caps"), False).status == doctor.FAIL
+
+
+def test_a_missing_directory_under_a_writable_parent_passes(tmp_path):
+    assert doctor.check_push_relay(caps_config(tmp_path / "a" / "caps"), False).status == doctor.OK
+
+
+@pytest.mark.requires_dac
+def test_a_directory_that_cannot_be_created_warns(tmp_path):
+    parent = tmp_path / "readonly"
+    parent.mkdir()
+    parent.chmod(0o500)
+    try:
+        result = doctor.check_push_relay(caps_config(parent / "caps"), False)
+    finally:
+        parent.chmod(0o700)
+    assert result.status == doctor.WARN
+    assert "push_credentials_dir" in result.remedy
+
+
+@pytest.mark.requires_dac
+def test_an_unwritable_directory_warns(tmp_path):
+    directory = tmp_path / "caps"
+    directory.mkdir(mode=0o500)
+    directory.chmod(0o500)
+    try:
+        result = doctor.check_push_relay(caps_config(directory), False)
+    finally:
+        directory.chmod(0o700)
+    assert result.status == doctor.WARN

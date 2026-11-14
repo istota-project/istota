@@ -11227,9 +11227,19 @@ def check_push_relay(config: "Config", probe: bool) -> CheckResult:
     if normalized != push.relay_url:
         return CheckResult(name, FAIL, "The relay URL is not in its normalized form", url_remedy)
 
+    directory_problem = _relay_credentials_dir_problem(push)
+    if directory_problem is not None and directory_problem.status == FAIL:
+        return directory_problem
+
     notes = []
+    remedies = []
+    if directory_problem is not None:
+        notes.append(directory_problem.detail)
+        remedies.append(directory_problem.remedy)
     if any(value.strip() for value in (push.apns_key_path, push.apns_key_id, push.apns_team_id)):
         notes.append("APNs settings are set and ignored under relay delivery")
+        remedies.append("Remove apns_key_path, apns_key_id and apns_team_id from [push]; "
+                        "relay delivery does not read them.")
 
     if probe:
         import httpx
@@ -11257,11 +11267,62 @@ def check_push_relay(config: "Config", probe: bool) -> CheckResult:
         reached = f"Relay delivery to {normalized} (not probed)"
 
     if notes:
-        return CheckResult(
-            name, WARN, f"{reached}; " + "; ".join(notes),
-            "Remove apns_key_path, apns_key_id and apns_team_id from [push]; relay delivery does not read them.",
-        )
+        return CheckResult(name, WARN, f"{reached}; " + "; ".join(notes), " ".join(remedies))
     return CheckResult(name, OK, reached)
+
+
+def _relay_credentials_dir_problem(push) -> CheckResult | None:
+    """What is wrong with the directory holding relay send capabilities, if anything.
+
+    Looser modes than 0700 on the directory or 0600 on a `.cap` file FAIL, since
+    each file is a bearer credential for one device. A directory this process
+    cannot write or create WARNs: the web process writes it at registration,
+    and on the stack it runs as the same user under the same mounts.
+    """
+    from istota.push.devices import relay_credentials_dir
+
+    name = "push.relay"
+    directory = relay_credentials_dir(push)
+    dir_remedy = ("Set [push] push_credentials_dir to a directory the web process can write, "
+                  "outside the workspace, or create it with mode 0700.")
+    if directory is None:
+        return CheckResult(name, FAIL, "No push credentials directory: set signing_key_path or push_credentials_dir",
+                           dir_remedy)
+    try:
+        info = os.lstat(directory)
+    except FileNotFoundError:
+        info = None
+    except OSError as exc:
+        return CheckResult(name, FAIL, f"Cannot read the push credentials directory {directory} "
+                           f"({type(exc).__name__})", dir_remedy)
+    if info is None:
+        ancestor = directory.parent
+        while not ancestor.exists() and ancestor != ancestor.parent:
+            ancestor = ancestor.parent
+        if not os.access(ancestor, os.W_OK):
+            return CheckResult(name, WARN, f"The push credentials directory {directory} does not exist and "
+                               f"{ancestor} is not writable, so no relay device can register", dir_remedy)
+        return None
+    if not stat.S_ISDIR(info.st_mode):
+        return CheckResult(name, FAIL, f"The push credentials path {directory} is not a directory", dir_remedy)
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        return CheckResult(name, FAIL, f"The push credentials directory {directory} has mode "
+                           f"{stat.S_IMODE(info.st_mode):04o}", f"chmod 0700 {directory}")
+    loose = []
+    try:
+        for entry in os.scandir(directory):
+            if entry.name.endswith(".cap") and stat.S_IMODE(entry.stat(follow_symlinks=False).st_mode) & 0o077:
+                loose.append(entry.name)
+    except OSError as exc:
+        return CheckResult(name, FAIL, f"Cannot list the push credentials directory {directory} "
+                           f"({type(exc).__name__})", dir_remedy)
+    if loose:
+        return CheckResult(name, FAIL, f"{len(loose)} relay credential file(s) in {directory} are readable "
+                           "by others", f"chmod 0600 {directory}/*.cap")
+    if not os.access(directory, os.W_OK):
+        return CheckResult(name, WARN, f"The push credentials directory {directory} is not writable, "
+                           "so no relay device can register", dir_remedy)
+    return None
 
 
 # The name is part of the registry rather than only of the result, so `only=`

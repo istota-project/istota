@@ -9922,6 +9922,8 @@ def _migrate_push_tables(conn: sqlite3.Connection) -> None:
         "connection_binding": "TEXT", "connection_generation": "INTEGER",
         "private_version": "INTEGER", "private_content": "TEXT", "encryption_public_key": "TEXT",
         "encryption_key_id": "TEXT", "sender_key_id": "TEXT", "push_generation": "TEXT",
+        "relay_route_id": "TEXT", "relay_credential_ref": "TEXT", "relay_lease_expires_at": "INTEGER",
+        "enrollment_state": "TEXT NOT NULL DEFAULT 'active'",
     })
     conn.execute("CREATE INDEX IF NOT EXISTS idx_push_devices_user ON push_devices (user_id)")
     conn.execute("""

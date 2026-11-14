@@ -2835,6 +2835,13 @@ CREATE TABLE IF NOT EXISTS push_devices (
     encryption_key_id TEXT,
     sender_key_id TEXT,
     push_generation TEXT,
+    -- Relay delivery only: the route, the file name of its send capability in the
+    -- push credentials directory (never the capability), the lease as Unix time.
+    relay_route_id TEXT,
+    relay_credential_ref TEXT,
+    relay_lease_expires_at INTEGER,
+    -- 'active' or 'repair'; a device in repair is skipped until it registers again.
+    enrollment_state TEXT NOT NULL DEFAULT 'active',
     last_badge INTEGER NOT NULL DEFAULT -1,
     last_error TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),

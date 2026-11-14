@@ -1817,3 +1817,10 @@ timezone = "America/Los_Angeles"
 # delivery = "direct"
 # relay_url = "https://relay.example.com/istota"
 # relay_timeout_seconds = 15
+#
+# Under relay delivery each device's send capability is written to
+# <push_credentials_dir>/<device id>.cap (0600, directory 0700) when it
+# registers, and the database holds only the file name. Empty means relay/
+# beside signing_key_path. The web process writes it, so it must be writable
+# there and outside the workspace.
+# push_credentials_dir = ""

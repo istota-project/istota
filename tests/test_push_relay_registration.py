@@ -1,0 +1,245 @@
+"""Relay registration: the route on the row, the send capability in a 0600 file and nowhere else."""
+
+import logging
+import stat
+from pathlib import Path
+
+import pytest
+
+from istota import db
+from istota.config import PushConfig
+from tests.test_push_routes import (  # noqa: F401
+    BOUND, DEVICE_KEY, GENERATION, URL, _b64, _device_count, _encrypted, _kid, private_push,
+)
+from tests.test_settings_snapshot import install, invoke  # noqa: F401
+from tests.test_web_notifications import (  # noqa: F401
+    ORIGIN, _db_path, _login, client,
+)
+
+RELAY_URL = "https://relay.example.com/istota"
+ROUTE_ID = _b64(b"\x11" * 16)
+CAPABILITY = _b64(b"\x5a" * 32)
+LEASE = 1_900_000_000
+RELAY = {"route_id": ROUTE_ID, "send_capability": CAPABILITY, "lease_expires_at": LEASE}
+
+
+@pytest.fixture
+def relay_push(private_push):  # noqa: F811
+    import istota.webui.app as mod
+
+    mod._config.push.delivery = "relay"
+    mod._config.push.relay_url = RELAY_URL
+    return {**private_push, "dir": private_push["path"].parent / "relay"}
+
+
+def _relay_body(kid, **relay_patch):
+    body = _encrypted(kid)
+    body["private"]["relay"] = {**RELAY, **relay_patch}
+    return body
+
+
+def _relay_columns():
+    with db.get_db(_db_path()) as conn:
+        return tuple(conn.execute(
+            "SELECT relay_route_id, relay_credential_ref, relay_lease_expires_at, enrollment_state FROM push_devices"
+        ).fetchone())
+
+
+def _database_text() -> str:
+    with db.get_db(_db_path()) as conn:
+        return "\n".join(conn.iterdump())
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+async def test_relay_registration_stores_the_route_and_a_private_capability_file(client, relay_push, caplog):  # noqa: F811
+    caplog.set_level(logging.DEBUG)
+    cookies = await _login(client, "alice")
+    response = await client.post(URL, cookies=cookies, headers=ORIGIN, json=_relay_body(relay_push["kid"]))
+    assert response.status_code == 200
+    device_id = response.json()["id"]
+    ref = f"{device_id}.cap"
+    assert _relay_columns() == (ROUTE_ID, ref, LEASE, "active")
+    cap = relay_push["dir"] / ref
+    assert cap.read_text("ascii") == CAPABILITY
+    assert _mode(cap) == 0o600
+    assert _mode(relay_push["dir"]) == 0o700
+    listed = (await client.get(URL, cookies=cookies)).json()["devices"]
+    assert listed[0]["content"] == "encrypted"
+    assert listed[0]["enrollment_state"] == "active"
+    for secret in (CAPABILITY, ROUTE_ID, ref):
+        assert secret not in str(listed)
+    assert CAPABILITY not in _database_text()
+    assert CAPABILITY not in caplog.text
+
+
+async def test_re_registration_replaces_the_capability_in_place(client, relay_push):  # noqa: F811
+    cookies = await _login(client, "alice")
+    first = await client.post(URL, cookies=cookies, headers=ORIGIN, json=_relay_body(relay_push["kid"]))
+    newer = _b64(b"\x77" * 32)
+    second = await client.post(URL, cookies=cookies, headers=ORIGIN, json=_relay_body(
+        relay_push["kid"], send_capability=newer, route_id=_b64(b"\x22" * 16), lease_expires_at=LEASE + 1))
+    assert second.json() == first.json()
+    ref = f"{first.json()['id']}.cap"
+    assert _relay_columns() == (_b64(b"\x22" * 16), ref, LEASE + 1, "active")
+    assert [p.name for p in relay_push["dir"].iterdir()] == [ref]
+    assert (relay_push["dir"] / ref).read_text("ascii") == newer
+
+
+async def test_a_registration_without_a_route_clears_it_and_removes_the_file(client, relay_push):  # noqa: F811
+    import istota.webui.app as mod
+
+    cookies = await _login(client, "alice")
+    first = await client.post(URL, cookies=cookies, headers=ORIGIN, json=_relay_body(relay_push["kid"]))
+    assert first.status_code == 200
+    mod._config.push.delivery = "direct"
+    second = await client.post(URL, cookies=cookies, headers=ORIGIN, json=_encrypted(relay_push["kid"]))
+    assert second.json() == first.json()
+    assert _relay_columns() == (None, None, None, "active")
+    assert list(relay_push["dir"].iterdir()) == []
+
+
+async def test_an_explicit_credentials_dir_is_used(client, relay_push, tmp_path):  # noqa: F811
+    import istota.webui.app as mod
+
+    explicit = tmp_path / "elsewhere" / "caps"
+    mod._config.push.push_credentials_dir = str(explicit)
+    cookies = await _login(client, "alice")
+    response = await client.post(URL, cookies=cookies, headers=ORIGIN, json=_relay_body(relay_push["kid"]))
+    assert response.status_code == 200
+    assert (explicit / f"{response.json()['id']}.cap").read_text("ascii") == CAPABILITY
+    assert _mode(explicit) == 0o700
+    assert not relay_push["dir"].exists()
+
+
+async def test_a_capability_that_cannot_be_written_registers_nothing(client, relay_push, caplog):  # noqa: F811
+    caplog.set_level(logging.DEBUG)
+    relay_push["dir"].write_text("not a directory")
+    cookies = await _login(client, "alice")
+    response = await client.post(URL, cookies=cookies, headers=ORIGIN, json=_relay_body(relay_push["kid"]))
+    assert response.status_code == 503
+    assert _device_count() == 0
+    assert CAPABILITY not in caplog.text
+
+
+async def test_encrypted_without_a_route_is_400_under_relay(client, relay_push):  # noqa: F811
+    cookies = await _login(client, "alice")
+    response = await client.post(URL, cookies=cookies, headers=ORIGIN, json=_encrypted(relay_push["kid"]))
+    assert response.status_code == 400
+    assert response.json()["detail"] == "invalid private enrollment"
+    assert _device_count() == 0
+
+
+async def test_a_route_under_direct_delivery_is_400(client, private_push):  # noqa: F811
+    cookies = await _login(client, "alice")
+    response = await client.post(URL, cookies=cookies, headers=ORIGIN, json=_relay_body(private_push["kid"]))
+    assert response.status_code == 400
+    assert _device_count() == 0
+    assert not (private_push["path"].parent / "relay").exists()
+
+
+async def test_generic_is_not_offered_under_relay(client, relay_push):  # noqa: F811
+    cookies = await _login(client, "alice")
+    body = {**BOUND, "private": {"version": 1, "content": "generic", "generation": GENERATION}}
+    response = await client.post(URL, cookies=cookies, headers=ORIGIN, json=body)
+    assert response.status_code == 409
+    assert response.json()["detail"] == "private push not offered"
+    assert _device_count() == 0
+
+
+@pytest.mark.parametrize("body", [BOUND, {k: v for k, v in BOUND.items() if not k.startswith("connection_")}])
+async def test_a_plain_registration_is_refused_under_relay(client, relay_push, body):  # noqa: F811
+    # The relay forwards only sealed envelopes to a route; a plain row would
+    # never receive anything, so an older shell is told rather than enrolled.
+    cookies = await _login(client, "alice")
+    response = await client.post(URL, cookies=cookies, headers=ORIGIN, json=body)
+    assert response.status_code == 409
+    assert response.json()["detail"] == "private push not offered"
+    assert _device_count() == 0
+
+
+@pytest.mark.parametrize("patch", [
+    {"route_id": _b64(b"\x11" * 15)}, {"route_id": _b64(b"\x11" * 17)}, {"route_id": ROUTE_ID + "="},
+    {"route_id": "A" * 21 + "B"}, {"route_id": 5}, {"route_id": None},
+    {"send_capability": _b64(b"\x5a" * 31)}, {"send_capability": _b64(b"\x5a" * 33)},
+    {"send_capability": CAPABILITY[:-1] + "/"}, {"send_capability": ["x"]},
+    {"lease_expires_at": True}, {"lease_expires_at": "1900000000"}, {"lease_expires_at": 1.9e9},
+    {"lease_expires_at": 0}, {"lease_expires_at": -1}, {"lease_expires_at": 2**53},
+    {"extra": 1},
+])
+async def test_invalid_relay_fields_are_400(client, relay_push, patch):  # noqa: F811
+    cookies = await _login(client, "alice")
+    response = await client.post(URL, cookies=cookies, headers=ORIGIN, json=_relay_body(relay_push["kid"], **patch))
+    assert response.status_code == 400
+    assert response.json()["detail"] == "invalid private enrollment"
+    assert _device_count() == 0
+    assert not relay_push["dir"].exists()
+
+
+@pytest.mark.parametrize("relay", [None, [], "route", {}, {"route_id": ROUTE_ID, "send_capability": CAPABILITY}])
+async def test_invalid_relay_shapes_are_400(client, relay_push, relay):  # noqa: F811
+    cookies = await _login(client, "alice")
+    body = _encrypted(relay_push["kid"])
+    body["private"]["relay"] = relay
+    response = await client.post(URL, cookies=cookies, headers=ORIGIN, json=body)
+    assert response.status_code == 400
+    assert _device_count() == 0
+
+
+async def test_largest_relay_registration_fits_the_body_bound(client, relay_push):  # noqa: F811
+    import json
+
+    cookies = await _login(client, "alice")
+    body = {**_relay_body(relay_push["kid"], lease_expires_at=2**53 - 1), "token": "ab" * 100,
+            "app_version": "x" * 100, "connection_generation": 2**53 - 1}
+    assert len(json.dumps(body).encode()) < 4096
+    assert (await client.post(URL, cookies=cookies, headers=ORIGIN, json=body)).status_code == 200
+
+
+# --- The credentials directory ---------------------------------------------------
+
+
+def test_credentials_dir_defaults_beside_the_signing_key():
+    from istota.push import devices
+
+    push = PushConfig(signing_key_path="/data/config/push/signing.key")
+    assert devices.relay_credentials_dir(push) == Path("/data/config/push/relay")
+    push.push_credentials_dir = "/srv/caps"
+    assert devices.relay_credentials_dir(push) == Path("/srv/caps")
+
+
+def test_push_credentials_dir_loads_from_toml(tmp_path):
+    from istota.config import load_config
+
+    path = tmp_path / "config.toml"
+    path.write_text('[push]\npush_credentials_dir = "/srv/caps"\n')
+    assert load_config(path, apply_db_overlays=False).push.push_credentials_dir == "/srv/caps"
+
+
+# --- Nothing else carries the capability -----------------------------------------
+
+
+def test_snapshot_and_config_view_never_carry_the_capability(install, tmp_path, monkeypatch, capsys):  # noqa: F811
+    from istota.push import devices, envelope
+    from istota.webui import admin_config_view
+
+    path, config = install
+    key = tmp_path / "push" / "signing.key"
+    envelope.write_signing_key(key)
+    config.push = PushConfig(enabled=True, content="private", delivery="relay", relay_url=RELAY_URL,
+                             signing_key_path=str(key))
+    with db.get_db(config.db_path) as conn:
+        device_id = devices.register_device(
+            conn, "alice", "ab" * 32, "sandbox", private_version=1, private_content="encrypted",
+            encryption_public_key=_b64(DEVICE_KEY), encryption_key_id=_kid(DEVICE_KEY),
+            sender_key_id=_kid(DEVICE_KEY), push_generation=GENERATION,
+            relay=RELAY, credentials_dir=devices.relay_credentials_dir(config.push),
+        )
+    assert device_id is not None
+    assert (tmp_path / "push" / "relay" / f"{device_id}.cap").read_text("ascii") == CAPABILITY
+    code, stdout, stderr = invoke(monkeypatch, capsys, path, "snapshot")
+    assert code == 0, stderr
+    assert CAPABILITY not in stdout and CAPABILITY not in stderr
+    assert CAPABILITY not in str(admin_config_view.build_config_view(config, secrets_dir=tmp_path / "none"))
