@@ -26,6 +26,7 @@ NOT_FORWARDED = {
     "SCREEN_HEIGHT": "as SCREEN_WIDTH",
     "CHROME_EXECUTABLE": "the path the image installs Chrome at",
     "CHROME_LOG_STDERR": "a debugging switch, set with `docker compose run -e` when wanted",
+    "BROWSER_REFUSAL_MARK": "entrypoint.sh mints it from /dev/urandom at each start; an operator value would be fixed and guessable",
 }
 
 
