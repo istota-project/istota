@@ -48,15 +48,20 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 from urllib.parse import unquote, urlsplit, urlunsplit
 
+import httpx
+import requests
+
 from istota.feeds import db as feeds_db
 from istota.feeds.models import (
     DEFAULT_BACKOFF_MAX_MINUTES,
     DEFAULT_HOST_GAP_SECONDS,
     DEFAULT_JITTER_FRACTION,
     DEFAULT_MAX_PACING_SECONDS,
+    DEFAULT_MAX_RUN_SECONDS,
     DEFAULT_POLL_INTERVAL_MINUTES,
     DEFAULT_RATE_LIMIT_BACKOFF_MINUTES,
     MAX_RATE_LIMIT_BACKOFF_MINUTES,
+    UNREACHABLE_HOSTS_BEFORE_STOP,
     EntryRecord,
     FeedRateLimited,
     FeedRecord,
@@ -100,6 +105,20 @@ _REFUSAL_MESSAGES = {
     "connection_failed": "Could not connect to the feed's host.",
     "timeout": "The feed took too long to answer.",
 }
+
+#: What counts as no answer at all, for `FetchResult.unreachable`: the guard's
+#: two codes for the RSS fetch, and the same two failures out of the Are.na
+#: (httpx) and Tumblr (requests) clients.
+_UNREACHABLE_CODES = frozenset({"connection_failed", "timeout"})
+_UNREACHABLE_ERRORS = (
+    httpx.ConnectError,
+    httpx.TimeoutException,
+    requests.ConnectionError,
+    requests.Timeout,
+)
+#: And what counts as the host answering, for `FetchResult.host_answered`.
+_ANSWERED_CODES = frozenset({"too_large", "redirect_refused"})
+_ANSWERED_ERRORS = (httpx.HTTPStatusError, requests.HTTPError)
 
 
 def _guarded_get(url: str, *, headers: dict, private_hosts) -> object:
@@ -161,7 +180,11 @@ def poll_feed(
         return _poll_rss(feed, http_get=http_get, private_hosts=private_hosts)
     except guarded_http.GuardRefused as exc:
         logger.info("poll_feed refused feed_id=%s code=%s", feed.id, exc.code)
-        return FetchResult(feed_url=feed.url, error=_REFUSAL_MESSAGES[exc.code])
+        return FetchResult(
+            feed_url=feed.url, error=_REFUSAL_MESSAGES[exc.code],
+            unreachable=exc.code in _UNREACHABLE_CODES,
+            host_answered=exc.code in _ANSWERED_CODES,
+        )
     except FeedRateLimited as exc:
         # Ahead of the generic handler below, and deliberately not folded into
         # it: a throttle is not a failure of the feed, so it carries no
@@ -177,7 +200,11 @@ def poll_feed(
         )
     except Exception as exc:  # noqa: BLE001 — captured into FetchResult
         logger.warning("poll_feed failed url=%s err=%s", feed.url, exc)
-        return FetchResult(feed_url=feed.url, error=str(exc))
+        return FetchResult(
+            feed_url=feed.url, error=str(exc),
+            unreachable=isinstance(exc, _UNREACHABLE_ERRORS),
+            host_answered=isinstance(exc, _ANSWERED_ERRORS),
+        )
 
 
 def _poll_rss(feed: FeedRecord, *, http_get: Callable | None, private_hosts=()) -> FetchResult:
@@ -210,6 +237,7 @@ def _poll_rss(feed: FeedRecord, *, http_get: Callable | None, private_hosts=()) 
         return FetchResult(
             feed_url=feed.url,
             error=f"HTTP {status} fetching feed",
+            host_answered=True,
         )
 
     raw = getattr(resp, "content", None) or getattr(resp, "text", "")
@@ -459,6 +487,7 @@ def poll_due_feeds(
     rng: random.Random | None = None,
     sleep: Callable[[float], None] | None = None,
     private_hosts=(),
+    max_run_seconds: float = DEFAULT_MAX_RUN_SECONDS,
 ) -> list[tuple[FeedRecord, FetchResult, int]]:
     """Poll every feed whose ``next_poll_at`` is in the past.
 
@@ -472,6 +501,13 @@ def poll_due_feeds(
     carrying on unpaced. ``sleep`` and ``rng`` are injection points for the
     tests — a pacing test that really slept would be the slowest thing in the
     suite and would prove less than asserting on the gaps requested.
+
+    Three more things end a run early, each leaving the feeds it did not try
+    due and their error state untouched (#971). A feed whose host was
+    unreachable earlier in the run is skipped. A run in which
+    ``UNREACHABLE_HOSTS_BEFORE_STOP`` hosts were unreachable and none answered
+    stops, since that is a run with no network. And no fetch starts once the
+    run is ``max_run_seconds`` old; ``0`` disables that bound.
     """
     now = now or datetime.now(timezone.utc)
     # Every timestamp this run writes is compared lexically against another ISO
@@ -496,10 +532,21 @@ def poll_due_feeds(
     started = time.monotonic()
     last_request_at: dict[str, float] = {}
     paced_seconds = 0.0
+    unreachable_hosts: set[str] = set()
+    answered = False
 
     out: list[tuple[FeedRecord, FetchResult, int]] = []
     for feed in feeds:
+        if max_run_seconds > 0 and time.monotonic() - started >= max_run_seconds:
+            logger.info(
+                "poll_due_feeds run budget spent after %d feed(s); "
+                "%d left due for the next run",
+                len(out), len(feeds) - len(out),
+            )
+            break
         host = poll_host(feed.url, feed.source_type or "")
+        if host in unreachable_hosts:
+            continue
         if host_gap_seconds > 0:
             previous = last_request_at.get(host)
             if previous is not None:
@@ -547,6 +594,18 @@ def poll_due_feeds(
                                   backoff_max_minutes=backoff_max_minutes,
                                   jitter_fraction=jitter_fraction, rng=rng)
         out.append((feed, result, new_count))
+        if result.error is None or result.host_answered:
+            answered = True
+        if not result.unreachable:
+            continue
+        unreachable_hosts.add(host)
+        if not answered and len(unreachable_hosts) >= UNREACHABLE_HOSTS_BEFORE_STOP:
+            logger.warning(
+                "poll_due_feeds stopped: %d host(s) unreachable and none answered; "
+                "%d feed(s) left due for the next run",
+                len(unreachable_hosts), len(feeds) - len(out),
+            )
+            break
     return out
 
 

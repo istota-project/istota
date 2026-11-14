@@ -463,6 +463,52 @@ class TestPoll:
             feed = feeds_db.get_feed_by_url(conn, "https://bad.test/feed")
         assert feed.last_error
 
+    def test_a_new_installs_first_poll_with_no_network_ends_after_two_hosts(
+        self, ctx, monkeypatch,
+    ):
+        """#971: a user with no feeds of their own still has the bundled
+        defaults, seeded by this same run, and with nothing answering the run
+        used to wait out every one of their timeouts in turn."""
+        import httpx
+        import requests
+
+        from istota.feeds.providers import arena as arena_provider
+        from istota.feeds.providers import tumblr as tumblr_provider
+        from istota.sandbox import guarded_http
+
+        monkeypatch.delenv("ISTOTA_FEEDS_SKIP_DEFAULT_SEED", raising=False)
+        attempts: list[str] = []
+
+        def rss(url, **kw):
+            attempts.append(url)
+            raise guarded_http.GuardRefused("timeout")
+
+        def arena(ident, **kw):
+            attempts.append(ident)
+            raise httpx.ConnectTimeout("timed out")
+
+        def tumblr(ident, **kw):
+            attempts.append(ident)
+            raise requests.ConnectionError("unreachable")
+
+        monkeypatch.setattr(poller, "_guarded_get", rss)
+        monkeypatch.setattr(arena_provider, "fetch", arena)
+        monkeypatch.setattr(tumblr_provider, "fetch", tumblr)
+
+        r = _invoke(ctx, ["run-scheduled"])
+
+        assert r.exit_code == 0
+        out = json.loads(r.output)
+        assert out["status"] == "partial_error"
+        assert len(attempts) == 2
+        assert out["polled"] == 2
+        with feeds_db.connect(ctx.db_path) as conn:
+            seeded = feeds_db.list_feeds(conn)
+            due = feeds_db.feeds_due_for_poll(conn, now=datetime.now(timezone.utc))
+        assert len(seeded) == 5
+        assert len(due) == 3
+        assert all(f.error_count == 0 for f in due)
+
 
 class TestStar:
     def _seed_one(self, ctx):

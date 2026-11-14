@@ -9806,6 +9806,13 @@ def _sync_feeds_module_jobs(conn, app_config: Config) -> None:
         # without waiting up to 5 minutes for the first cron tick.
         if j["name"] != run_scheduled_name:
             return
+        # Linked to the job as the Garmin backfill is, so the overlap guard in
+        # `check_scheduled_jobs` sees it and the job's first tick does not
+        # queue a second poll behind it (#971).
+        row = conn.execute(
+            "SELECT id FROM scheduled_jobs WHERE user_id = ? AND name = ?",
+            (user_id, j["name"]),
+        ).fetchone()
         task_id = db.create_task(
             conn,
             prompt="",
@@ -9816,6 +9823,7 @@ def _sync_feeds_module_jobs(conn, app_config: Config) -> None:
             skill=j["skill"],
             skill_args=j["skill_args"],
             queue="background",
+            scheduled_job_id=row[0] if row else None,
         )
         logger.info(
             "Queued initial feeds poll for user %s as task %d",
