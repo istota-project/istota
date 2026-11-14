@@ -179,6 +179,25 @@ describe('installKeyboardDismiss', () => {
     expect(document.activeElement).toBe(field);
   });
 
+  it('leaves the keyboard up for a tap in the focused field’s own suggestion list', () => {
+    // A combobox's listbox is part of the field. Blurring here closed the list
+    // before the option's own pointerup, so a tap picked nothing.
+    document.body.innerHTML = `
+      <input role="combobox" aria-controls="places-menu" data-testid="field" />
+      <ul id="places-menu" role="listbox"><li><button role="option">Home</button></li></ul>
+      <main data-testid="pane"></main>`;
+    const field = document.querySelector<HTMLInputElement>('[data-testid="field"]')!;
+    const option = document.querySelector('[role="option"]')!;
+    stop = installKeyboardDismiss();
+    field.focus();
+
+    tap(option);
+    expect(document.activeElement).toBe(field);
+
+    tap(document.querySelector('[data-testid="pane"]')!);
+    expect(document.activeElement).not.toBe(field);
+  });
+
   it('stops listening on teardown', () => {
     const { field, pane } = layout();
     const release = installKeyboardDismiss();

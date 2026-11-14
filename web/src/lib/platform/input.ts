@@ -64,6 +64,16 @@ function isTextEntry(el: Element | null): boolean {
   return tag === 'INPUT' || tag === 'TEXTAREA' || (el as HTMLElement).isContentEditable === true;
 }
 
+/** Whether `target` is inside an element `field` names in `aria-controls`. */
+function insideControlledBy(field: HTMLElement, target: Element): boolean {
+  const ids = field.getAttribute('aria-controls')?.split(/\s+/) ?? [];
+  for (const id of ids) {
+    const controlled = id ? document.getElementById(id) : null;
+    if (controlled && controlled.contains(target)) return true;
+  }
+  return false;
+}
+
 /** Movement beyond this is a drag, not a tap that wandered a few pixels. */
 const TAP_SLOP_PX = 10;
 
@@ -140,10 +150,13 @@ function eventY(e: Event): number | null {
  * `touchmove` is a backstop for a drag that begins somewhere pointerdown was
  * not delivered; with no origin recorded, its first move becomes the origin.
  *
- * Three things are deliberately exempt: the composer and anything marked
+ * Four things are deliberately exempt: the composer and anything marked
  * `data-keeps-keyboard` (a control that acts on the text it is next to), the
- * focused field itself, and any other text entry — moving between two fields is
- * one keyboard, and blurring in between bounces it down and straight back up.
+ * focused field itself, the element the field names in `aria-controls` (a
+ * combobox's suggestion list, whose option picks on the same pointerup this
+ * listener sees first, so a blur here closed the list under the tap), and any
+ * other text entry — moving between two fields is one keyboard, and blurring in
+ * between bounces it down and straight back up.
  */
 export function installKeyboardDismiss(): () => void {
   if (typeof window === 'undefined') return () => {};
@@ -160,6 +173,7 @@ export function installKeyboardDismiss(): () => void {
     if (!target || typeof target.closest !== 'function') return null;
     if (target === field || isTextEntry(target)) return null;
     if (target.closest(KEEPS_KEYBOARD)) return null;
+    if (insideControlledBy(field, target)) return null;
 
     return field;
   }
