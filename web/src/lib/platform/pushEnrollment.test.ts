@@ -373,3 +373,185 @@ it('refreshes a stale row through the private path on a 0.15.0 shell', async () 
   expect(postedBodies()[0].private.content).toBe('encrypted');
   expect(privatePush.commitPrivateRegistration).toHaveBeenCalledOnce();
 });
+
+// Relay enrollment (0.16.0): the app enrolls with the relay inside prepare and returns the
+// route; the page hands it to the registration unchanged and keeps no copy of it.
+const relayDiscovery = {
+  push: {
+    delivery: 'unavailable',
+    private: { versions: [1] },
+    relay: { versions: [1], url: 'https://relay.example.com/istota' },
+  },
+};
+const sendCapability = 'Kc' + 'q'.repeat(39) + 'Zw';
+const route = {
+  route_id: 'R'.repeat(21) + 'A',
+  send_capability: sendCapability,
+  lease_expires_at: 1_800_000_000,
+};
+function relayPrepared(overrides: Record<string, unknown> = {}) {
+  return prepared({ relay: { ...route }, ...overrides });
+}
+function onRelayShell(returned = relayPrepared()) {
+  onPrivateShell('0.16.0');
+  discovery = { status: 200, body: relayDiscovery };
+  privatePush.preparePrivateRegistration.mockResolvedValueOnce(returned);
+}
+
+it('passes the route the app returns into the registration on a relay installation', async () => {
+  onRelayShell();
+  await saveEnrollment(registration, context);
+  expect(urls()).toEqual([
+    'GET /istota/api/mobile/config',
+    'GET /istota/api/push/sender-key',
+    'POST /istota/api/push/devices',
+  ]);
+  expect(postedBodies()[0].private).toEqual({
+    version: 1,
+    content: 'encrypted',
+    encryption_public_key: 'E'.repeat(43),
+    encryption_key_id: 'F'.repeat(43),
+    sender_key_id: senderKey.key_id,
+    generation: 'G'.repeat(22),
+    relay: route,
+  });
+  expect(privatePush.commitPrivateRegistration).toHaveBeenCalledWith({
+    binding,
+    generation: 'G'.repeat(22),
+    deviceId: 41,
+  });
+  expect(connection.recordPushRegistration).toHaveBeenCalledOnce();
+});
+
+it('enrolls through the direct path on a 0.16.0 shell when the server delivers directly', async () => {
+  onPrivateShell('0.16.0');
+  privatePush.preparePrivateRegistration.mockResolvedValueOnce(relayPrepared());
+  await saveEnrollment(registration, context);
+  expect(postedBodies()[0].private.content).toBe('encrypted');
+  expect(postedBodies()[0].private).not.toHaveProperty('relay');
+});
+
+it.each([
+  ['a 0.15.0 shell', '0.15.0', relayDiscovery],
+  [
+    'a relay of another version',
+    '0.16.0',
+    {
+      push: { ...relayDiscovery.push, relay: { versions: [2], url: 'https://relay.example.com' } },
+    },
+  ],
+  [
+    'a relay with no private envelope',
+    '0.16.0',
+    { push: { delivery: 'unavailable', relay: relayDiscovery.push.relay } },
+  ],
+])('keeps the plain path on %s', async (_label, version, body) => {
+  onPrivateShell(version);
+  discovery = { status: 200, body };
+  await saveEnrollment(registration, context);
+  expect(postedBodies()).toEqual([legacyBody(version)]);
+  expect(privatePush.preparePrivateRegistration).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['no route', { relay: undefined }],
+  ['a route with no capability', { relay: { ...route, send_capability: undefined } }],
+  ['a lease that is not a whole number', { relay: { ...route, lease_expires_at: '1800000000' } }],
+])('cancels without posting when the app returns %s on a relay installation', async (_l, o) => {
+  onRelayShell(relayPrepared(o));
+  await expect(saveEnrollment(registration, context)).rejects.toThrow(
+    'The app returned an unusable private enrollment.',
+  );
+  expect(posts()).toHaveLength(0);
+  expect(privatePush.cancelPrivateRegistration).toHaveBeenCalledOnce();
+});
+
+it('says a relay installation needs iOS 17 when the app can only enroll generically', async () => {
+  onRelayShell(
+    prepared({ content: 'generic', encryptionPublicKey: undefined, encryptionKeyId: undefined }),
+  );
+  postReplies = [{ status: 409, body: { detail: 'private push not offered' } }];
+  await expect(saveEnrollment(registration, context)).rejects.toThrow(
+    'Private notifications on this server need iOS 17 or later.',
+  );
+  // The server is the rule: the generic enrollment goes to it and it refuses.
+  expect(postedBodies()[0].private).toEqual({
+    version: 1,
+    content: 'generic',
+    generation: 'G'.repeat(22),
+  });
+  expect(privatePush.cancelPrivateRegistration).toHaveBeenCalledOnce();
+});
+
+it('tells an older app on a relay installation to update', async () => {
+  onPrivateShell('0.15.0');
+  discovery = { status: 200, body: relayDiscovery };
+  postReplies = [{ status: 409, body: { detail: 'private push not offered' } }];
+  await expect(saveEnrollment(registration, context)).rejects.toThrow(
+    'Update the Istota app to get notifications from this server.',
+  );
+});
+
+it('leaves a relay row for repair rather than re-registering it plainly after a failed commit', async () => {
+  onRelayShell();
+  privatePush.commitPrivateRegistration.mockRejectedValueOnce(new Error('CONNECTION_CHANGED'));
+  await expect(saveEnrollment(registration, context)).rejects.toThrow('CONNECTION_CHANGED');
+  expect(privatePush.cancelPrivateRegistration).toHaveBeenCalledOnce();
+  // A plain registration is refused under relay delivery, and the app's cancel revokes the
+  // route, so the row goes to repair at its next send.
+  expect(posts()).toHaveLength(1);
+  expect(urls().some((u) => u.startsWith('DELETE'))).toBe(false);
+  expect(connection.recordPushRegistration).not.toHaveBeenCalled();
+});
+
+function storedText(): string {
+  const all: string[] = [];
+  for (const storage of [localStorage, sessionStorage]) {
+    for (let i = 0; i < storage.length; i++) {
+      const key = storage.key(i)!;
+      all.push(key, storage.getItem(key) ?? '');
+    }
+  }
+  return all.join('\n') + document.cookie;
+}
+
+it.each([
+  ['a saved enrollment', () => {}],
+  [
+    'a refused registration',
+    () => {
+      postReplies = [{ status: 400, body: { detail: 'invalid private enrollment' } }];
+    },
+  ],
+  [
+    'a failed commit',
+    () => {
+      privatePush.commitPrivateRegistration.mockRejectedValueOnce(new Error('CONNECTION_CHANGED'));
+    },
+  ],
+])('keeps no copy of the send capability after %s', async (_label, arrange) => {
+  localStorage.clear();
+  sessionStorage.clear();
+  const spies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((level) =>
+    vi.spyOn(console, level).mockImplementation(() => {}),
+  );
+  onRelayShell();
+  arrange();
+  const outcome = await saveEnrollment(registration, context).then(
+    () => null,
+    (e: Error) => e,
+  );
+  expect(postedBodies()[0].private.relay.send_capability).toBe(sendCapability);
+  expect(storedText()).not.toContain(sendCapability);
+  expect(JSON.stringify(spies.map((spy) => spy.mock.calls))).not.toContain(sendCapability);
+  expect(JSON.stringify(outcome ?? null)).not.toContain(sendCapability);
+  expect(String(outcome?.message ?? '')).not.toContain(sendCapability);
+  // The app keeps the management capability; nothing the page hands back to it carries this one.
+  const nativeArgs = [
+    ...privatePush.commitPrivateRegistration.mock.calls,
+    ...privatePush.cancelPrivateRegistration.mock.calls,
+    ...connection.recordPushRegistration.mock.calls,
+  ];
+  expect(JSON.stringify(nativeArgs)).not.toContain(sendCapability);
+  for (const spy of spies) spy.mockRestore();
+});

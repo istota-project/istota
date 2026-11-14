@@ -22,6 +22,8 @@ export interface PreparedPrivateRegistration {
   token: string;
   environment: 'production' | 'sandbox';
   versions: number[];
+  /** From 0.16.0, on a relay installation: the route the app enrolled, for the server only. */
+  relay?: { route_id?: unknown; send_capability?: unknown; lease_expires_at?: unknown };
 }
 interface PrivatePushMethods {
   preparePrivateRegistration(input: {
@@ -68,6 +70,10 @@ function privatePushPlugin(): PrivatePushMethods | null {
 /** Whether this app can enroll for private push; the server's offer is a separate check. */
 export function privatePushAvailable(): boolean {
   return privatePushPlugin() !== null;
+}
+/** Whether this app's prepare enrolls with a relay when the server delivers through one. */
+export function relayPushAvailable(): boolean {
+  return shellAtLeast('0.16.0') && privatePushPlugin() !== null;
 }
 export async function preparePrivateRegistration(input: {
   binding: string;
