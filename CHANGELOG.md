@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Tapping a suggestion in a search field on an iPhone picks it. In the wifi zone place search, and in the other fields that suggest values as you type, a tap closed the list and left the field empty. Picking with a mouse is unchanged.
 - The management role's `istota_push` task now handles relay delivery. With `delivery: relay` in `istota_push_config` it needs no APNs key or IDs, removes the APNs settings from `[push]` and deletes the APNs key it staged, so `istota doctor --only push.relay` no longer warns about them. Before, it required and wrote them on every run. See ansible/README.md, "iOS push deployment". (#967)
 - A personal question asked in a shared or group room, such as about your health, your money or what the bot knows about you, is now answered in your private chat without the bot asking first, and the room is told only that it answered you privately. Before, the bot sometimes did this and sometimes only told you to ask again in your private chat. Where the bot has no way to move the question, it tells you to ask in your private chat. (#966)
 - A group's Notebook card and the web file viewer no longer show HTML comments such as `<!-- … -->` as text in a markdown file. The note a new group's GROUP.md and a new USER.md start with showed on every preview; it is now hidden, as on other markdown viewers. Chat still shows a comment as it was typed. (#964)
