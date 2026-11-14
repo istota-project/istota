@@ -3849,9 +3849,39 @@ class TestCardFill:
         if supported:
             assert "4242" not in str(result)
             assert "817" not in str(result)
-            assert "07/29" not in str(result)
+            assert "07/29" in str(result)
         else:
             assert result["status"] == "error"
+
+    @staticmethod
+    def interact(fill, text, *, card=None, session_id="s1"):
+        args = build_parser().parse_args([
+            "interact", session_id, "--purchase", "17", "--fill-card", fill,
+        ])
+        args.purchase = card or TestCardFill.card()
+        body = {"status": "ok", "session_id": session_id, "user_scope": "alice",
+                "actions": [{"ok": True}], "text": text}
+        with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json={
+            "per_user_profiles": True, "credential_origin_check": True, "card_fill": True,
+        })), patch("istota.skills.browse.httpx.post", return_value=httpx.Response(200, json=body)):
+            return cmd_interact(args)
+
+    def test_an_expiry_month_is_not_scrubbed_from_page_text(self):
+        # ISSUE-956: a December card turned "case of 12" into "case of [credential]".
+        from istota.skills._credref import CardSecret, SecretValue
+        card = self.card()
+        december = CardSecret(17, {**card.fields, "exp_month": SecretValue("exp_month", "12")},
+                              card.bound_hosts)
+        result = self.interact("exp_month=#month", "case of 12, expires 12/29", card=december)
+        assert result["text"] == "case of 12, expires 12/29"
+
+    def test_name_and_expiry_are_metadata_not_secrets(self):
+        result = self.interact("name=#name", "Ship to Alice Example, 2029 catalogue")
+        assert result["text"] == "Ship to Alice Example, 2029 catalogue"
+
+    def test_the_cvc_is_scrubbed_only_as_a_whole_number(self):
+        result = self.interact("cvc=#cvc", "Order 48170 for $817.00, code 817")
+        assert result["text"] == "Order 48170 for $[credential].00, code [credential]"
 
 
 @pytest.mark.parametrize("error", [None, httpx.ReadError, httpx.ConnectTimeout])
@@ -3879,24 +3909,23 @@ def test_card_resolves_once_and_scrubs_cli_failures(monkeypatch, capsys, error):
     out = capsys.readouterr()
     assert fields["number"] not in out.out + out.err
     assert fields["cvc"] not in out.out + out.err
-    assert "07/29" not in out.out + out.err
 
 
 def test_card_scrub_preserves_confirmed_protocol_identifiers(monkeypatch):
-    monkeypatch.setenv("ISTOTA_USER_ID", "user7")
+    monkeypatch.setenv("ISTOTA_USER_ID", "user817")
     args = build_parser().parse_args([
-        "interact", "abc7d07e", "--purchase", "17", "--fill-card", "exp_month=#month",
+        "interact", "abc817de", "--purchase", "17", "--fill-card", "cvc=#cvc",
     ])
     args.purchase = TestCardFill.card()
-    body = {"status": "ok", "session_id": args.session_id, "user_scope": "user7",
-            "actions": [{"ok": True}], "text": "7 07"}
+    body = {"status": "ok", "session_id": args.session_id, "user_scope": "user817",
+            "actions": [{"ok": True}], "text": "cvc 817"}
     with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json={
         "per_user_profiles": True, "credential_origin_check": True, "card_fill": True,
     })), patch("istota.skills.browse.httpx.post", return_value=httpx.Response(200, json=body)):
         result = cmd_interact(args)
-    assert result["session_id"] == "abc7d07e"
-    assert result["user_scope"] == "user7"
-    assert "7" not in result["text"]
+    assert result["session_id"] == "abc817de"
+    assert result["user_scope"] == "user817"
+    assert "817" not in result["text"]
 
 
 class TestFillOtp:
