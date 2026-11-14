@@ -166,6 +166,49 @@ class TestPollFeedRss:
         assert result.items[0].content_html is not None
 
 
+    def test_entities_decoded_in_title_and_text(self):
+        # ISSUE-957: the description is once-escaped HTML holding character
+        # references, and the stored plain text showed them literally.
+        rss = b"""<?xml version="1.0"?>
+<rss version="2.0">
+<channel>
+<title>News &amp;amp; Notes</title>
+<link>https://example.com</link>
+<item>
+  <title>The patient&amp;#x27;s &amp;quot;choice&amp;quot;</title>
+  <link>https://example.com/a</link>
+  <guid>a-1</guid>
+  <description>&lt;p&gt;The patient&amp;#x27;s &amp;quot;supply disruption&amp;quot; &amp;amp;lt;b&amp;amp;gt;&lt;/p&gt;</description>
+</item>
+</channel>
+</rss>
+"""
+        resp = _StubResponse(status_code=200, content=rss)
+        result = poll_feed(_rss_feed(), http_get=_stub_get_factory(resp))
+        item = result.items[0]
+        assert item.title == 'The patient\'s "choice"'
+        assert item.content_text == 'The patient\'s "supply disruption" &lt;b&gt;'
+        assert result.discovered_title == "News & Notes"
+
+    def test_plain_text_title_is_not_decoded(self):
+        # An Atom ``type="text"`` title is literal text already; decoding it
+        # again would turn a written ``&amp;`` into ``&``.
+        atom = b"""<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Example</title>
+  <entry>
+    <id>atom-2</id>
+    <title type="text">Escaping &amp;amp; and &lt;b&gt; in HTML</title>
+    <link href="https://example.com/y"/>
+    <summary type="html">&lt;p&gt;Body&lt;/p&gt;</summary>
+  </entry>
+</feed>
+"""
+        resp = _StubResponse(status_code=200, content=atom)
+        result = poll_feed(_rss_feed(), http_get=_stub_get_factory(resp))
+        assert result.items[0].title == "Escaping &amp; and <b> in HTML"
+
+
 # ---------------------------------------------------------------------------
 # poll_due_feeds — persists state, applies backoff, dedupes entries
 # ---------------------------------------------------------------------------

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -32,14 +33,14 @@ from istota.feeds.models import (
     parse_image_urls,
     safe_http_url,
 )
-from istota.feeds.sanitize import image_identity
+from istota.feeds.sanitize import html_to_text, image_identity
 from istota.lib.timestamps import iso_now
 
 
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 _FTS_STATEMENTS = (
@@ -508,6 +509,81 @@ def _migrate_v8_to_v9(conn: sqlite3.Connection) -> None:
         raise
 
 
+def _html_to_text_before_v10(value: str) -> str:
+    """``sanitize.html_to_text`` as it was before ISSUE-957: no decoding."""
+    text = re.sub(r"<[^>]+>", " ", value)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+_CHARACTER_REFERENCE_RE = re.compile(r"&(?:#[0-9]+|#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);")
+
+
+def _decoded_title(title: str | None) -> str | None:
+    if not title or not _CHARACTER_REFERENCE_RE.search(title):
+        return title
+    return html_to_text(title)
+
+
+def _migrate_v9_to_v10(conn: sqlite3.Connection) -> None:
+    """Decode character references in stored plain text (ISSUE-957).
+
+    ``html_to_text`` never decoded them, so ``content_text`` and RSS titles
+    hold ``&#x27;`` and ``&quot;`` literally, and search, the model's feed
+    tools and briefings all read them that way. A re-poll only reaches
+    entries the feed still serves, so the rest are rewritten here.
+
+    ``content_text`` is recomputed only where it equals the old derivation
+    from the stored HTML; an Are.na body joined with a note or URL is not
+    that, and is left alone. Entry and feed titles are decoded on RSS feeds
+    only, and only where they hold a well-formed reference: Tumblr and Are.na
+    titles were never HTML. The cost is an Atom ``type="text"`` title that
+    literally reads ``&amp;``, which loses it here; a re-poll restores it
+    while the feed still serves the entry. The FTS trigger reindexes rows.
+
+    Decoding a title is not idempotent (``&amp;amp;`` → ``&amp;`` → ``&``), so
+    the writer lock is taken before the version is re-read, and the version
+    is written in the same transaction as the rows. ``init_db``'s
+    ``executescript`` commits before it writes the version itself, so a
+    second opener would otherwise find decoded rows at version 9.
+    """
+    conn.execute("UPDATE schema_meta SET value=value WHERE key='version'")
+    current = conn.execute(
+        "SELECT value FROM schema_meta WHERE key='version'"
+    ).fetchone()
+    if current is not None and current["value"].isdigit() and int(current["value"]) >= 10:
+        return
+    rows = conn.execute(
+        "SELECT e.id, e.title, e.content_html, e.content_text, f.source_type "
+        "FROM feed_entries e JOIN feeds f ON f.id = e.feed_id"
+    ).fetchall()
+    updated = 0
+    for row in rows:
+        title = row["title"]
+        if row["source_type"] == "rss":
+            title = _decoded_title(title)
+        text = row["content_text"]
+        source = row["content_html"]
+        if text and source and text == _html_to_text_before_v10(source):
+            text = html_to_text(source)
+        if title == row["title"] and text == row["content_text"]:
+            continue
+        conn.execute(
+            "UPDATE feed_entries SET title = ?, content_text = ? WHERE id = ?",
+            (title, text, row["id"]),
+        )
+        updated += 1
+    for feed in conn.execute(
+        "SELECT id, title FROM feeds WHERE source_type = 'rss'"
+    ).fetchall():
+        title = _decoded_title(feed["title"])
+        if title != feed["title"]:
+            conn.execute("UPDATE feeds SET title = ? WHERE id = ?", (title, feed["id"]))
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version', '10')"
+    )
+    logger.info("feeds_db_entities_decoded entries_updated=%s", updated)
+
+
 _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (2, _migrate_v1_to_v2),
     (3, _migrate_v2_to_v3),
@@ -517,6 +593,7 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (7, _migrate_v6_to_v7),
     (8, _migrate_v7_to_v8),
     (9, _migrate_v8_to_v9),
+    (10, _migrate_v9_to_v10),
 ]
 
 

@@ -221,3 +221,44 @@ def test_interrupted_rebuild_preserves_the_interrupt_and_can_retry(tmp_path):
         assert conn.execute("SELECT name FROM sqlite_master WHERE name LIKE 'feed_entries_fts%'").fetchall() == []
         db._migrate_v8_to_v9(conn)
         assert len(matches(conn, "falcon")) == 100
+
+
+ENTITY_RSS = b"""<?xml version="1.0"?>
+<rss version="2.0"><channel><title>Health</title><link>https://example.com</link>
+<item>
+  <title>A patient&amp;#x27;s choice</title>
+  <link>https://example.com/a</link>
+  <guid>a-1</guid>
+  <description>&lt;p&gt;The patient&amp;#x27;s &amp;quot;supply disruption&amp;quot; &amp;amp;lt;b&amp;amp;gt;&lt;/p&gt;</description>
+</item>
+</channel></rss>
+"""
+
+
+def test_polled_entities_reach_search_as_plain_text(config):
+    """ISSUE-957: a polled entry's snippet showed `&#x27;` and `&quot;`."""
+    pytest.importorskip("feedparser")
+    from istota.feeds.poller import poll_due_feeds
+    from istota.feeds.search import PROVIDER
+
+    class Response:
+        status_code = 200
+        content = ENTITY_RSS
+        text = ENTITY_RSS.decode()
+        headers = {}
+
+    _, resolve, connect, _ = module_loader("feeds")
+    ctx = resolve("alice", config)
+    db.init_db(ctx.db_path)
+    with connect(ctx.db_path) as conn:
+        db.upsert_feed(conn, url="https://example.com/feed", title=None, source_type="rss",
+                       site_url=None, category_id=None, poll_interval_minutes=30)
+        conn.commit()
+        poll_due_feeds(conn, http_get=lambda url, **kwargs: Response())
+    result = PROVIDER.run(SearchContext(config, "alice", time.monotonic()+2), parse_query("supply"), "strict", 5, 0)
+    hit = result.hits[0]
+    assert hit.title == "A patient's choice"
+    assert hit.snippet == 'The patient\'s "supply disruption" &lt;b&gt;'
+    assert [hit.snippet[a:b] for a, b in hit.highlights] == ["supply"]
+    phrase = PROVIDER.run(SearchContext(config, "alice", time.monotonic()+2), parse_query('"patient\'s choice"'), "strict", 5, 0)
+    assert [h.id for h in phrase.hits] == [hit.id]

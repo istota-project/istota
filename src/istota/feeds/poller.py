@@ -252,7 +252,7 @@ def _poll_rss(feed: FeedRecord, *, http_get: Callable | None, private_hosts=()) 
         items=items,
         etag=new_etag,
         last_modified=new_last_modified,
-        discovered_title=feed_meta.get("title"),
+        discovered_title=_plain_title(feed_meta, "title"),
         discovered_site_url=feed_meta.get("link"),
     )
 
@@ -339,6 +339,22 @@ def _classify_attachment(
         images.append(url)
 
 
+def _plain_title(parsed, key: str) -> str | None:
+    """A feedparser title as plain text.
+
+    Atom feeds (e.g. The Atlantic) ship ``<title type="html">`` with inline
+    markup, and feedparser types any RSS title holding a character reference
+    as HTML too. The reader renders titles with escaping interpolation, so
+    tags and references would show literally (ISSUE-957). A title typed
+    ``text/plain`` is literal already and is only whitespace-collapsed.
+    """
+    value = parsed.get(key)
+    detail = parsed.get(f"{key}_detail") or {}
+    if detail.get("type") == "text/plain":
+        return " ".join((value or "").split()) or None
+    return html_to_text(value)
+
+
 def _rss_entry_to_item(entry) -> FetchedItem:
     """Convert a ``feedparser`` entry dict to :class:`FetchedItem`."""
     guid = (
@@ -347,11 +363,7 @@ def _rss_entry_to_item(entry) -> FetchedItem:
         or entry.get("link")
         or entry.get("title", "")
     )
-    # Store titles as plain text. Atom feeds (e.g. The Atlantic) ship
-    # ``<title type="html">`` with inline markup like ``<em>``; feedparser
-    # decodes it to real tags, but the reader renders titles with escaping
-    # interpolation, so any tags would show literally. Strip them here.
-    title = html_to_text(entry.get("title"))
+    title = _plain_title(entry, "title")
     url = entry.get("link")
     author = entry.get("author")
 
