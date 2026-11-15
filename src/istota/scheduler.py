@@ -4840,7 +4840,6 @@ def _process_one_task(
             elif decision.will_retry:
                 delay = decision.delay_minutes
                 db.set_task_pending_retry(conn, task_id, result, delay)
-                db.log_task(conn, task_id, "warn", f"Task failed, will retry in {delay} minutes: {result[:200]}")
                 # ISSUE-074: clear any deferred-op files this attempt accumulated
                 # so the next attempt starts with a clean slate. Producers append
                 # to these files, so without this, eventual success would replay

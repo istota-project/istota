@@ -28,7 +28,8 @@ def open_or_create_dir_below(root: Path, path: Path) -> int:
 _NO_HARD_LINKS = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS})
 
 
-def _write_chunks(fd: int, chunks: Iterable[bytes], max_bytes: int, *, sync: bool) -> None:
+def _write_chunks(fd: int, chunks: Iterable[bytes], max_bytes: int, *, sync: bool) -> os.stat_result:
+    """Write and close ``fd``, returning its ``fstat`` once every byte is in."""
     with os.fdopen(fd, "wb") as file:
         size = 0
         for chunk in chunks:
@@ -36,9 +37,10 @@ def _write_chunks(fd: int, chunks: Iterable[bytes], max_bytes: int, *, sync: boo
             if size > max_bytes:
                 raise ListingError(413, f"file exceeds {max_bytes / (1024 * 1024):g} MB")
             file.write(chunk)
+        file.flush()
         if sync:
-            file.flush()
             os.fsync(file.fileno())
+        return os.fstat(file.fileno())
 
 
 def publish_new(dir_fd: int, staging: str, name: str, written: os.stat_result) -> None:
@@ -47,23 +49,54 @@ def publish_new(dir_fd: int, staging: str, name: str, written: os.stat_result) -
     Every task in the room can write this directory, so the staging name may
     have been swapped since it was created: nothing here follows a link, and
     the published name must be the inode that was written, or it is refused.
+    ``written`` is the staging file's ``fstat`` taken after the last byte, so
+    it carries the final size. A refusal leaves nothing at ``name``.
     """
     try:
         os.link(staging, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd, follow_symlinks=False)
     except OSError as exc:
         if exc.errno not in _NO_HARD_LINKS:
             raise
-        # Without hard links there is no atomic no-replace, so check, then rename.
-        # Losing that race replaces one complete copy with another, never a part.
-        try:
-            os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            os.rename(staging, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-        else:
-            raise FileExistsError(errno.EEXIST, "File exists", name) from None
+        _rename_new(dir_fd, staging, name, written)
+        return
     published = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-    if (published.st_dev, published.st_ino) != (written.st_dev, written.st_ino):
+    if not _same_file(published, written):
+        # The link this call made: a name holding somebody else's bytes would
+        # block every later publish of it (ISSUE-972).
+        os.unlink(name, dir_fd=dir_fd)
         raise OSError(errno.EEXIST, "staging file was replaced before publishing", name)
+
+
+def _same_file(a: os.stat_result, b: os.stat_result) -> bool:
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
+def _rename_new(dir_fd: int, staging: str, name: str, written: os.stat_result) -> None:
+    """``publish_new`` where there are no hard links: check, then rename.
+
+    There is no atomic no-replace here, and losing either race replaces one
+    complete copy with another, never a part. The checks are on the staging
+    name before the rename, because rclone's FUSE mount, which has no hard
+    links, numbers a file by its path: the renamed file has a new inode, and a
+    check after the rename refused every publish (ISSUE-972). Numbering by
+    path also means a file planted at the staging name keeps the number, so
+    the type and size are compared too; a planted regular file of the same
+    size still passes, as losing the check-then-rename race would.
+    """
+    try:
+        os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        raise FileExistsError(errno.EEXIST, "File exists", name)
+    staged = os.stat(staging, dir_fd=dir_fd, follow_symlinks=False)
+    if not (
+        _same_file(staged, written)
+        and stat.S_ISREG(staged.st_mode)
+        and staged.st_size == written.st_size
+    ):
+        raise OSError(errno.EEXIST, "staging file was replaced before publishing", name)
+    os.rename(staging, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
 
 
 def write_new_file(
@@ -97,12 +130,7 @@ def write_new_file(
                 0o644, dir_fd=dir_fd,
             )
             try:
-                try:
-                    written = os.fstat(fd)
-                except BaseException:
-                    os.close(fd)
-                    raise
-                _write_chunks(fd, chunks, max_bytes, sync=True)
+                written = _write_chunks(fd, chunks, max_bytes, sync=True)
                 publish_new(dir_fd, staging, name, written)
             finally:
                 try:

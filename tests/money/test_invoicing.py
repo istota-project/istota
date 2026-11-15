@@ -1776,6 +1776,46 @@ class TestConcurrentIssuers:
         assert pdf.read_text() == "first"
         assert [p.name for p in pdf.parent.iterdir()] == [pdf.name]
 
+    def test_generation_issues_on_a_mount_that_renumbers_on_rename(self, tmp_path, monkeypatch):
+        # ISSUE-972: on rclone every publish was refused after the PDF was in
+        # place, so the run failed and left a PDF holding the next number.
+        from istota.money.work import add_work_entry, get_invoice
+        from tests.support import rclone_like
+
+        config_file, config = self._setup(tmp_path, monkeypatch)
+        add_work_entry(tmp_path, "2026-03-10", "acme", "dev", qty=1)
+        rclone_like.install(monkeypatch)
+
+        (result,) = self._generate(tmp_path, config_file, config, "acme")
+
+        pdf = Path(result["file"])
+        assert pdf.read_text() == "PDF for Acme"
+        assert get_invoice(tmp_path, "INV-000001").pdf_path == str(pdf)
+        assert [p.name for p in pdf.parent.iterdir()] == [pdf.name]
+
+    def test_an_unrecorded_pdf_at_the_name_is_named_as_an_orphan(self, tmp_path, monkeypatch):
+        from istota.money.core import invoicing as invoicing_mod
+        from istota.money.work import add_work_entry, list_invoices
+
+        config_file, config = self._setup(tmp_path, monkeypatch)
+        add_work_entry(tmp_path, "2026-03-10", "acme", "dev", qty=1)
+        today = date.today()
+        orphan = (
+            tmp_path / "invoices" / str(today.year)
+            / f"Invoice-000001-{today.strftime('%m_%d_%Y')}.pdf"
+        )
+        orphan.parent.mkdir(parents=True)
+        orphan.write_text("left by an interrupted run")
+
+        with pytest.raises(invoicing_mod.InvoiceRecordError) as exc:
+            self._generate(tmp_path, config_file, config, "acme")
+
+        message = str(exc.value)
+        assert str(orphan) in message
+        assert "no invoice record" in message
+        assert orphan.read_text() == "left by an interrupted run"
+        assert list_invoices(tmp_path) == []
+
     def test_a_stale_manual_number_does_not_touch_the_winners_pdf(self, tmp_path, monkeypatch):
         from istota.money.core import invoicing as invoicing_mod
         from istota.money.core.invoicing import create_manual_invoice

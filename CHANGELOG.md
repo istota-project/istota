@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Invoices issue again on a Nextcloud workspace.** Since 0.47.0 every invoice published to the rclone mount failed after the PDF was already in place, and that PDF then blocked every retry. A PDF left at the next invoice's name is now named in the error as one with no invoice record. A retried task also keeps each failed attempt's error in its task log.
+
 ## [0.50.0] - 2026-11-14
 
 Your iPhone can now get private push notifications through a push relay, so an installation needs no APNs key of its own; each device has its own send capability at the relay, and removing the device revokes it. Admins can download the configuration from Admin → Configuration, alone or as a KeePass file with the installation's credentials, and restore it through the usual review. `istota-stack restore --no-start` rebuilds a lost Mac VM and keeps the stack off the network until you have checked it.
