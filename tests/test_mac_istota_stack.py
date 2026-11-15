@@ -196,6 +196,8 @@ if verb == "create":
     save()
     sys.exit(state.get("create_rc", 0))
 if verb in ("start", "stop"):
+    if verb == "stop" and state.get("stop_rc"):
+        sys.exit(state["stop_rc"])
     instance["status"] = "Running" if verb == "start" else "Stopped"
     # An enabled istota-stack.service brings the containers up at boot.
     state.setdefault("vm", {})["stack_up"] = verb == "start" and state.get("unit_enabled", True)
@@ -379,6 +381,12 @@ if verb == "shell":
         if vm.get("stack_up", True):
             out("c0ffee\n")
         sys.exit(0)
+    if stack[:1] == ["up"] and state.get("up_rcs"):
+        rc = state["up_rcs"].pop(0)
+        save()
+        if rc:
+            print(f"forwarded {stack}", file=sys.stderr)
+            sys.exit(rc)
     if stack[:1] in (["down"], ["up"]) and not state.get("forward_rc"):
         vm["stack_up"] = stack == ["up"]
         save()
@@ -1248,6 +1256,43 @@ class TestSetSize:
         made.set(edit_rc=0)
         assert made.run("set-size", "--cpus", "8").returncode == 0
         assert "CPUS=8\n" in _state_file(made)
+
+    def test_a_failed_stop_puts_the_stack_back_up(self, made):
+        # `down` ran before the stop failed; a re-run must not read the stack
+        # it left down as one that was down before.
+        made.set(stop_rc=1)
+        result = made.run("set-size", "--cpus", "8")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert made.state()["vm"]["stack_up"] is True
+        assert "CPUS=5\n" in _state_file(made)
+        assert "set-size --cpus 8` again goes on" in result.stderr
+        made.set(stop_rc=0)
+        result = made.run("set-size", "--cpus", "8")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert made.state()["instance"]["status"] == "Running"
+        assert made.state()["vm"]["stack_up"] is True
+        assert "CPUS=8\n" in _state_file(made)
+
+    def test_a_failed_up_after_the_start_is_tried_again(self, made):
+        made.set(unit_enabled=False, up_rcs=[1])
+        result = made.run("set-size", "--cpus", "8")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert made.state()["vm"]["stack_up"] is True
+        assert "CPUS=8\n" in _state_file(made)
+        result = made.run("set-size", "--cpus", "8")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert made.state()["vm"]["stack_up"] is True
+
+    def test_an_up_that_keeps_failing_names_the_way_on(self, made):
+        # The size is recorded, so set-size again would change nothing.
+        made.set(unit_enabled=False, up_rcs=[1, 1])
+        result = made.run("set-size", "--cpus", "8")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert made.state()["vm"]["stack_up"] is False
+        assert "`istota-stack up` starts it" in result.stdout + result.stderr
+        assert "again goes on" not in result.stderr
+        assert made.run("up").returncode == 0
+        assert made.state()["vm"]["stack_up"] is True
 
     def test_an_unchanged_size_asks_lima_nothing(self, made):
         result = made.run("set-size", "--cpus", "5", "--disk", "100")

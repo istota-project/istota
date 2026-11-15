@@ -1599,18 +1599,38 @@ cmd_size() {
     printf 'DISK_GIB=%s\n' "$disk"
 }
 
-SET_SIZE_ARGS="" SET_SIZE_STOPPED=""
+SET_SIZE_ARGS="" SET_SIZE_STOPPED="" SET_SIZE_WAS_UP="" SET_SIZE_RECORDED=""
 
-# A failure after the VM was stopped for the edit: it is started again. The
-# state records only what Lima took, so the way on is the same command.
+# A failure once the VM began to stop for the edit: it is started again and
+# the stack put back as it was, in a subshell since run_step exits. Until the
+# state records the new size the way on is the same command; after that a
+# re-run changes nothing, so only what did not come back is named.
 set_size_exit() {
-    local rc="$1"
+    local rc="$1" back=1
     trap - EXIT
     if [ -n "$SET_SIZE_STOPPED" ]; then
-        limactl start --tty=false "$INSTANCE" || log "WARNING: the VM did not start again; \`istota-stack start\` starts it."
+        if [ "$(instance_status)" != Running ] && ! limactl start --tty=false "$INSTANCE"; then
+            back=""
+            log "WARNING: the VM did not start again; \`istota-stack start\` starts it."
+        elif ! ( stack_as_before "$SET_SIZE_WAS_UP" ); then
+            back=""
+            if [ -n "$SET_SIZE_WAS_UP" ]; then
+                log "WARNING: the stack did not start again; \`istota-stack up\` starts it."
+            else
+                log "WARNING: the stack did not stop again; \`istota-stack down\` stops it."
+            fi
+        fi
     fi
-    if [ "$rc" -ne 0 ]; then
-        echo "[istota-stack] the VM was not resized all the way; \`istota-stack set-size ${SET_SIZE_ARGS}\` again goes on from where this stopped." >&2
+    if [ "$rc" -ne 0 ] && [ -z "$SET_SIZE_RECORDED" ]; then
+        if [ -n "$back" ]; then
+            echo "[istota-stack] the VM was not resized all the way; \`istota-stack set-size ${SET_SIZE_ARGS}\` again goes on from where this stopped." >&2
+        else
+            echo "[istota-stack] the VM was not resized all the way; once that is done, \`istota-stack set-size ${SET_SIZE_ARGS}\` again goes on from where this stopped." >&2
+        fi
+    elif [ "$rc" -ne 0 ] && [ -n "$back" ]; then
+        echo "[istota-stack] ${INSTANCE} was resized, and the VM and the stack are back as they were." >&2
+    elif [ "$rc" -ne 0 ]; then
+        echo "[istota-stack] ${INSTANCE} was resized; \`istota-stack set-size\` again changes nothing." >&2
     fi
     exit "$rc"
 }
@@ -1659,24 +1679,27 @@ cmd_set_size() {
         return 0
     fi
 
-    local status was_up=""
+    local status
     status="$(instance_status)"
     [ -n "$status" ] || fail 1 "there is no Lima instance ${INSTANCE}: \`istota-stack create\` makes one."
     trap 'set_size_exit $?' EXIT
     if [ "$status" = Running ]; then
-        if stack_running; then was_up=1; fi
-        stop_vm Running
+        if stack_running; then SET_SIZE_WAS_UP=1; fi
+        # Before the stop: it takes the stack down first, and a stop that
+        # fails after that leaves a running VM with the stack down.
         SET_SIZE_STOPPED=1
+        stop_vm Running
     fi
     # Lima edits only a stopped instance; it grows a raw disk at the next
     # start, and the guest's cloud-init grows / into it.
     run_step "resize the VM" "limactl edit ${flags[*]} ${INSTANCE}" \
         limactl edit --tty=false "${flags[@]}" "$INSTANCE"
     state_set "${changed[@]}"
+    SET_SIZE_RECORDED=1
     if [ "$status" = Running ]; then
         run_step "start the VM" "limactl start ${INSTANCE}" limactl start --tty=false "$INSTANCE"
+        stack_as_before "$SET_SIZE_WAS_UP"
         SET_SIZE_STOPPED=""
-        stack_as_before "$was_up"
         trap - EXIT
         log "${INSTANCE} now has $(size_words "$cpus" "$memory" "$disk")."
     else
