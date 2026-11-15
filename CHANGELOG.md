@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.50.0] - 2026-11-14
+
 Your iPhone can now get private push notifications through a push relay, so an installation needs no APNs key of its own; each device has its own send capability at the relay, and removing the device revokes it. Admins can download the configuration from Admin → Configuration, alone or as a KeePass file with the installation's credentials, and restore it through the usual review. `istota-stack restore --no-start` rebuilds a lost Mac VM and keeps the stack off the network until you have checked it.
 
 On a Mac, `istota-stack set-port` moves an install to another web port, and `start` refuses a port something else holds. `istota-stack logs` prints the stack's logs with secrets redacted, ready to hand to someone. A personal question asked in a shared room is now answered in your private chat. This release has 67 commits, against 51 in 0.49.0 and 474 in 0.48.0; the rest are fixes to the first feeds poll on an install with no network, calendars on a plain Radicale, browser sign-ins and scheduled jobs.
@@ -3543,7 +3545,8 @@ Breaking changes this release:
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://github.com/istota-project/istota/compare/v0.49.0...main
+[Unreleased]: https://github.com/istota-project/istota/compare/v0.50.0...main
+[0.50.0]: https://github.com/istota-project/istota/releases/tag/v0.50.0
 [0.49.0]: https://github.com/istota-project/istota/releases/tag/v0.49.0
 [0.48.0]: https://github.com/istota-project/istota/releases/tag/v0.48.0
 [0.47.0]: https://github.com/istota-project/istota/releases/tag/v0.47.0
