@@ -8,6 +8,7 @@ import pytest
 from istota.workspace.writes import write_new_file
 from istota.workspace import writes
 from istota.workspace.listing import ListingError
+from tests.support import rclone_like
 
 
 @pytest.mark.parametrize("existing", ["file", "symlink"])
@@ -138,6 +139,33 @@ def test_unnumbered_publish_without_hard_links_still_lands(tmp_path, monkeypatch
     assert [p.name for p in tmp_path.iterdir()] == ["note.txt"]
 
 
+def test_unnumbered_publish_lands_where_a_rename_changes_the_inode(tmp_path, monkeypatch):
+    # ISSUE-972: rclone renumbers a file it renames, so a check of the
+    # published name against the written inode refused every publish there,
+    # after the file was already in place.
+    rclone_like.install(monkeypatch)
+    assert write_new_file(tmp_path, [], "note.txt", [b"whole"], max_bytes=100, numbered=False) == "note.txt"
+    assert (tmp_path / "note.txt").read_bytes() == b"whole"
+    assert [p.name for p in tmp_path.iterdir()] == ["note.txt"]
+
+
+def test_without_hard_links_a_swapped_staging_name_is_not_renamed_in(tmp_path, monkeypatch):
+    rclone_like.install(monkeypatch)
+    root = tmp_path / "room"
+    root.mkdir()
+
+    def chunks():
+        yield b"half"
+        [staging] = [p for p in root.iterdir() if p.name.endswith(".staging")]
+        staging.unlink()
+        staging.write_bytes(b"planted")
+        yield b" rest"
+
+    with pytest.raises(OSError):
+        write_new_file(root, [], "photo.jpg", chunks(), max_bytes=100, numbered=False)
+    assert list(root.iterdir()) == []
+
+
 @pytest.mark.parametrize("swap", ["symlink", "other file"])
 def test_unnumbered_staging_name_swapped_mid_write_is_not_published(tmp_path, swap):
     # The room folder is task-writable: a staging name swapped for a link to
@@ -159,9 +187,8 @@ def test_unnumbered_staging_name_swapped_mid_write_is_not_published(tmp_path, sw
 
     with pytest.raises(OSError):
         write_new_file(root, [], "photo.jpg", chunks(), max_bytes=100, numbered=False)
-    leaf = root / "photo.jpg"
-    if os.path.lexists(leaf):
-        assert leaf.lstat().st_ino != secret.stat().st_ino
+    # A refused publish leaves nothing at the name for a later run to trip on.
+    assert list(root.iterdir()) == []
     assert secret.read_bytes() == b"someone else's"
 
 

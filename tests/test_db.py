@@ -1810,6 +1810,20 @@ class TestReclaimedTaskNotDoubleClaimed:
                 "retry-path task re-stolen by a second worker (duplicate run)"
             )
 
+    def test_a_retry_keeps_the_failed_attempts_error(self, db_path):
+        # ISSUE-972: the final failure overwrote attempt 1's error, which was
+        # the root cause, and the scheduler's log line cut it at 200 chars.
+        first = "InvoiceRecordError: could not record INV-000042:" + "x" * 300 + " END"
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="hi", user_id="alice", queue="background")
+            db.set_task_pending_retry(conn, task_id, first, 5)
+            db.update_task_status(conn, task_id, "failed", error="attempt 2's error")
+
+            assert db.get_task(conn, task_id).error == "attempt 2's error"
+            messages = [row["message"] for row in db.get_task_logs(conn, task_id)]
+            assert any(first in m for m in messages), messages
+            assert any("attempt 1" in m and "retry in 5 minutes" in m for m in messages), messages
+
     def test_fail_stuck_release_clears_heartbeat(self, db_path):
         """The maintenance pass's stuck-running release must clear last_heartbeat
         so the released row can't immediately re-qualify as stuck on re-claim."""

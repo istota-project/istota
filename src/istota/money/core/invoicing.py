@@ -626,7 +626,7 @@ def _generate_invoices(
                 # line index rather than being billed twice.
                 published = False
                 try:
-                    _refuse_taken_pdf_name(pdf_path, user_root)
+                    _refuse_taken_pdf_name(pdf_path, user_root, number=number_str)
                     generate_invoice_pdf(html, pdf_path, root=accounting_path, user_root=user_root)
                     published = True
                     with write_transaction(data_dir) as conn:
@@ -718,12 +718,15 @@ def _issue_lock_path(data_dir: Path) -> Path:
     return db_path_for(data_dir).parent / ".invoice-issue.lock"
 
 
-def _refuse_taken_pdf_name(pdf_path: Path, user_root: Path | None = None) -> None:
+def _refuse_taken_pdf_name(pdf_path: Path, user_root: Path | None, *, number: str) -> None:
     """Refuse before rendering when something already holds the PDF's name.
 
     ``generate_invoice_pdf`` refuses the same at publish time; checking first
     skips a render that could not be kept. With ``user_root`` the question is
     asked through the no-follow walk, so it cannot probe another user's folder.
+    Both callers pick ``number`` above every recorded invoice under the issuing
+    lock, so a file there has no record: one an interrupted run left, which
+    stops every retry until somebody moves it (ISSUE-972).
     """
     if user_root is not None:
         from istota.money.invoice_files import name_taken  # noqa: PLC0415
@@ -732,7 +735,12 @@ def _refuse_taken_pdf_name(pdf_path: Path, user_root: Path | None = None) -> Non
     else:
         taken = os.path.lexists(pdf_path)
     if taken:
-        raise FileExistsError(errno.EEXIST, "an invoice PDF already has this name", pdf_path.name)
+        raise FileExistsError(
+            errno.EEXIST,
+            f"an invoice PDF already has this name and no invoice record holds {number}; "
+            "it was left by an interrupted run, so move it aside and issue again",
+            str(pdf_path),
+        )
 
 
 def _remove_published_pdf(pdf_path: Path, user_root: Path | None) -> None:
@@ -1083,10 +1091,10 @@ def generate_invoice_pdf(
             0o644, dir_fd=dir_fd,
         )
         with os.fdopen(fd, "wb") as file:
-            written = os.fstat(file.fileno())
             file.write(pdf)
             file.flush()
             os.fsync(file.fileno())
+            written = os.fstat(file.fileno())
         publish_new(dir_fd, staging, output_path.name, written)
     finally:
         try:
@@ -1503,7 +1511,7 @@ def _issue_manual_invoice(
     )
     published = False
     try:
-        _refuse_taken_pdf_name(pdf_path, user_root)
+        _refuse_taken_pdf_name(pdf_path, user_root, number=number_str)
         generate_invoice_pdf(html_text, pdf_path, root=accounting_path, user_root=user_root)
         published = True
         with write_transaction(data_dir) as conn:

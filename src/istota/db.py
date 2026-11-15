@@ -2477,6 +2477,19 @@ def set_task_pending_retry(
         """,
         (error, retry_delay_minutes, task_id),
     )
+    # The row's `error` is overwritten by the next attempt's outcome, so this
+    # line is the only record of why this attempt failed (ISSUE-972).
+    row = conn.execute("SELECT attempt_count FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    attempt = row[0] if row else "?"
+    log_task(
+        conn, task_id, "warn",
+        f"Task failed (attempt {attempt}), will retry in {retry_delay_minutes} minutes: "
+        f"{(error or '')[:RETRY_ERROR_LOG_CHARS]}",
+    )
+
+
+# How much of a failed attempt's error its retry line keeps.
+RETRY_ERROR_LOG_CHARS = 2000
 
 
 def release_task_for_restart(
