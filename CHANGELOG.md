@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.51.0] - 2026-11-15
+
 On a Mac you can now resize the Istota VM after it is made: `istota-stack set-size` changes its CPUs, memory and disk, and `istota-stack size` shows what the VM has and what the Mac can give it.
 
 Invoices publish again on a Nextcloud workspace, which had been broken since 0.47.0. This is a small release, six commits after 0.50.0.
@@ -3557,7 +3559,8 @@ Breaking changes this release:
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://github.com/istota-project/istota/compare/v0.50.0...main
+[Unreleased]: https://github.com/istota-project/istota/compare/v0.51.0...main
+[0.51.0]: https://github.com/istota-project/istota/releases/tag/v0.51.0
 [0.50.0]: https://github.com/istota-project/istota/releases/tag/v0.50.0
 [0.49.0]: https://github.com/istota-project/istota/releases/tag/v0.49.0
 [0.48.0]: https://github.com/istota-project/istota/releases/tag/v0.48.0
