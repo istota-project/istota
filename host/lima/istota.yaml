@@ -280,7 +280,8 @@ probes:
     hint: See /var/log/cloud-init-output.log in the guest
 
 # One forward, both sides the same port: `istota setup --hostname
-# localhost:8080` publishes nginx there. Another port is set at create (above).
+# localhost:8080` publishes nginx there. Another port is set at create (above),
+# or later with the Mac's `istota-stack set-port N`.
 portForwards:
   - guestIP: 127.0.0.1
     # `istota-stack setup --web --local` publishes the setup page here, and

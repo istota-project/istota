@@ -1008,6 +1008,35 @@ class TestRunScheduledOnlyWhenAFeedIsDue:
         # Looking must not create the file the poll's own init would own.
         assert not app_config.module_db_path("alice", "feeds").exists()
 
+    def test_the_first_seed_poll_holds_the_jobs_slot(self, tmp_path):
+        """#971: the first-seed poll carried no `scheduled_job_id`, so the
+        overlap guard could not see it and the job's first tick queued a
+        second poll behind it."""
+        from istota.config import SchedulerConfig
+
+        app_config = _make_app_config(tmp_path, ["alice"])
+        app_config.scheduler = SchedulerConfig(cron_max_staleness_minutes=0)
+        conn = _conn(tmp_path)
+        _sync_feeds_module_jobs(conn, app_config)
+        conn.execute(
+            "UPDATE scheduled_jobs SET last_run_at = ? WHERE user_id = 'alice'",
+            (self.SEEDED_LAST_RUN,),
+        )
+        conn.commit()
+        job_id = conn.execute(
+            "SELECT id FROM scheduled_jobs WHERE user_id = 'alice' AND name = ?",
+            (f"{MODULE_PREFIX}run_scheduled",),
+        ).fetchone()[0]
+        first = self._poll_tasks(conn)
+        assert len(first) == 1
+        assert conn.execute(
+            "SELECT scheduled_job_id FROM tasks WHERE id = ?", (first[0][0],),
+        ).fetchone()[0] == job_id
+
+        self._run(conn, app_config)
+
+        assert self._poll_tasks(conn) == first
+
     def test_a_due_feed_queues_the_task(self, tmp_path):
         app_config, conn = self._setup(tmp_path)
         self._feeds_db(app_config, next_poll_at=None)

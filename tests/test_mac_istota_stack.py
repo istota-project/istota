@@ -97,11 +97,21 @@ if name == "lsof":
             out(f"{state['lock_holder']}\n")
             sys.exit(0)
         sys.exit(1)
-    holder = state.get("port_holder")
+    port = next((a.split(":", 1)[1] for a in argv if a.startswith("-iTCP:")), "")
+    holder = state.get("port_holders", {}).get(port) or state.get("port_holder")
     if holder:
-        out(f"COMMAND   PID USER   FD   TYPE\n{holder} 4242 me 5u IPv4 TCP 127.0.0.1:8080 (LISTEN)\n")
+        out(f"COMMAND   PID USER   FD   TYPE\n{holder} 4242 me 5u IPv4 TCP 127.0.0.1:{port} (LISTEN)\n")
         sys.exit(0)
     sys.exit(1)
+
+if name == "netstat":
+    # A listener the user's lsof cannot see: root's, or another user's.
+    out("Active Internet connections (including servers)\n"
+        "Proto Recv-Q Send-Q  Local Address  Foreign Address  (state)  rxbytes txbytes rhiwat shiwat process:pid\n")
+    for port, holder in state.get("root_holders", {}).items():
+        out(f"tcp4 0 0 127.0.0.1.{port} *.* LISTEN 0 0 131072 131072 {holder}:88\n"
+            f"tcp4 0 0 127.0.0.1.1{port} *.* LISTEN 0 0 131072 131072 other:89\n")
+    sys.exit(0)
 
 if name == "open":
     state["opened"] = True
@@ -185,6 +195,8 @@ if verb == "create":
     sys.exit(state.get("create_rc", 0))
 if verb in ("start", "stop"):
     instance["status"] = "Running" if verb == "start" else "Stopped"
+    # An enabled istota-stack.service brings the containers up at boot.
+    state.setdefault("vm", {})["stack_up"] = verb == "start" and state.get("unit_enabled", True)
     save()
     sys.exit(0)
 if verb == "delete":
@@ -193,6 +205,16 @@ if verb == "delete":
     save()
     sys.exit(0)
 if verb == "autostart":
+    sys.exit(0)
+if verb == "edit":
+    # Lima refuses to edit a running instance.
+    if instance["status"] == "Running":
+        print("cannot edit a running instance", file=sys.stderr)
+        sys.exit(1)
+    if state.get("edit_rc"):
+        sys.exit(state["edit_rc"])
+    instance["edited"] = argv[argv.index("--set") + 1]
+    save()
     sys.exit(0)
 if verb == "copy":
     source, target = argv[-2], argv[-1]
@@ -231,6 +253,10 @@ if verb == "shell":
         sys.exit(0)
     if command[:2] == ["systemctl", "is-active"]:
         sys.exit(state.get("stack_active_rc", 0))
+    if command[:3] in (["systemctl", "start", "istota-stack"], ["systemctl", "enable", "--now"]):
+        vm["stack_up"] = True
+        save()
+        sys.exit(0)
     if command[:1] != ["istota-stack"]:
         sys.exit(0)
     stack = command[1:]
@@ -292,10 +318,15 @@ if verb == "shell":
             save()
         sys.exit(rc)
     if stack[:1] == ["setup"]:
-        vm["config"] = True
-        vm["admin"] = state.get("admin", "alice")
+        rc = state.get("setup_rc", 0)
+        if rc == 0:
+            vm["config"] = True
+            vm["admin"] = state.get("admin", "alice")
+            if "--hostname" in stack:
+                port = stack[stack.index("--hostname") + 1].rpartition(":")[2]
+                vm["publish"] = f"127.0.0.1:{port}:80"
         save()
-        sys.exit(state.get("setup_rc", 0))
+        sys.exit(rc)
     if stack[:1] == ["hold"]:
         sys.exit(state.get("hold_rc", 0))
     if stack[:1] == ["check-image"]:
@@ -338,6 +369,13 @@ if verb == "shell":
             sys.exit(1)
         out(f"/srv/app/istota/staging/AbCd1234/{os.path.basename(stack[-1])}\n")
         sys.exit(0)
+    if stack == ["compose", "ps", "-q", "daemon"]:
+        if vm.get("stack_up", True):
+            out("c0ffee\n")
+        sys.exit(0)
+    if stack[:1] in (["down"], ["up"]) and not state.get("forward_rc"):
+        vm["stack_up"] = stack == ["up"]
+        save()
     if stack[:1] == ["down"] and state.get("down_sleep"):
         time.sleep(state["down_sleep"])
     print(f"forwarded {stack}", file=sys.stderr)
@@ -414,7 +452,7 @@ def mac(tmp_path) -> Mac:
     stub = stubs / "stub"
     stub.write_text(STUB.replace("{python}", sys.executable))
     stub.chmod(0o755)
-    for name in ("limactl", "security", "lsof", "open", "uname", "git", "curl", "sysctl", "df", "zstd"):
+    for name in ("limactl", "security", "lsof", "netstat", "open", "uname", "git", "curl", "sysctl", "df", "zstd"):
         (stubs / name).symlink_to(stub)
     state = tmp_path / "state.json"
     state.write_text(json.dumps({"key": KEY}))
@@ -848,6 +886,22 @@ class TestCreate:
         limactl = [c[0] for c in mac.calls("limactl") if c[0] != "shell"]
         assert "create" not in limactl and "start" in limactl
 
+    def test_a_stopped_instance_whose_port_was_taken_is_not_started(self, mac):
+        """#969, create's half: a re-run starts a stopped VM the same way."""
+        assert _create(mac).returncode == 0
+        mac.set(instance={"name": "istota", "status": "Stopped"}, port_holders={"8080": "ollama"})
+        mac.calls_path.unlink()
+        result = mac.run("create")
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "ollama" in result.stderr
+        assert not any(c[:1] == ["start"] for c in mac.calls("limactl"))
+
+    def test_a_browser_port_is_refused_before_limactl(self, mac):
+        """nginx would publish it on the guest's loopback beside the browser."""
+        result = _create(mac, "--port", "9223")
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert not any(c[:1] == ["create"] for c in mac.calls("limactl"))
+
     def test_a_taken_port_is_refused_with_its_holder(self, mac):
         mac.set(port_holder="ollama")
         result = _create(mac)
@@ -1251,6 +1305,42 @@ class TestTheVmsLife:
         assert running.calls("limactl") == [["list", "--format", "{{.Status}}", "istota"],
                                             ["start", "--tty=false", "istota"]]
 
+    def test_start_refuses_a_web_port_taken_since_create(self, running):
+        """#969: Lima's host agent logs the bind failure and starts anyway, and
+        whatever holds the port answers the web UI's address."""
+        running.set(instance={"name": "istota", "status": "Stopped"},
+                    port_holders={"8181": "limactl-vm1"})
+        result = running.run("start")
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "port 8181" in result.stderr and "limactl-vm1" in result.stderr
+        assert "--port" not in result.stderr
+        assert not any(c[:1] == ["start"] for c in running.calls("limactl"))
+
+    def test_start_sees_a_root_listener_lsof_cannot(self, running):
+        """The user's lsof sees only their own sockets; netstat sees them all."""
+        running.set(instance={"name": "istota", "status": "Stopped"}, root_holders={"8181": "nginx"})
+        result = running.run("start")
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "nginx 127.0.0.1.8181" in result.stderr
+        assert "other" not in result.stderr
+        assert not any(c[:1] == ["start"] for c in running.calls("limactl"))
+
+    def test_start_warns_about_the_other_forwarded_ports(self, running):
+        running.set(instance={"name": "istota", "status": "Stopped"},
+                    port_holders={"6080": "com.docker", "9223": "com.docker"})
+        result = running.run("start")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "WARNING: port 6080" in result.stdout and "WARNING: port 9223" in result.stdout
+        assert "32768" not in result.stdout
+        assert ["start", "--tty=false", "istota"] in running.calls("limactl")
+
+    def test_a_running_vm_holds_its_own_port(self, running):
+        running.set(port_holders={"8181": "limactl"})
+        result = running.run("start")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "already running" in result.stdout
+        assert running.calls("lsof") == []
+
     def test_stop_takes_the_stack_down_first(self, running):
         assert running.run("stop").returncode == 0
         calls = running.calls("limactl")
@@ -1321,6 +1411,166 @@ class TestTheVmsLife:
     def test_shell(self, running):
         assert running.run("shell").returncode == 0
         assert running.calls("limactl")[-1] == ["shell", "istota"]
+
+
+def _state_file(mac: Mac) -> str:
+    return (mac.home / ".config" / "istota-stack" / "istota.env").read_text()
+
+
+class TestSetPort:
+    """#970: `set-port N` moves an install to another web port, in each place
+    the port lives: Lima's forward, host.env, the setup's hostname and nginx's
+    publish, and the Mac's state."""
+
+    SETUP = ["setup", "--yes", "--force", "--ingress", "local", "--hostname", "localhost:8282"]
+
+    @pytest.fixture
+    def running(self, mac):
+        assert _create(mac, "--port", "8181").returncode == 0
+        mac.set(vm={**mac.state()["vm"], "publish": "127.0.0.1:8181:80"})
+        mac.calls_path.unlink()
+        return mac
+
+    def test_a_running_vm_is_moved_and_running_again(self, running):
+        result = running.run("set-port", "8282")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = running.calls("limactl")
+        stack = [["shell", "--workdir", "/", "istota", "sudo", "istota-stack", *c] for c in
+                 (["host-env", "LOCAL_FORWARD_PORT=8282"], self.SETUP, ["down"])]
+        edit = next(c for c in calls if c[:1] == ["edit"])
+        assert calls.index(stack[0]) < calls.index(stack[1]) < calls.index(stack[2])
+        assert calls.index(stack[2]) < calls.index(["stop", "istota"]) < calls.index(edit)
+        assert calls.index(edit) < calls.index(["start", "--tty=false", "istota"])
+        assert "--tty=false" in edit and edit[-1] == "istota"
+        expression = edit[edit.index("--set") + 1]
+        assert expression == ".portForwards[0].guestPort = 8282 | .portForwards[0].hostPort = 8282"
+        assert "PORT=8282\n" in _state_file(running)
+        assert running.state()["instance"]["status"] == "Running"
+        assert "http://localhost:8282/istota" in result.stdout
+
+    def test_a_stopped_vm_is_moved_and_stopped_again(self, running):
+        running.set(instance={"name": "istota", "status": "Stopped"})
+        result = running.run("set-port", "8282")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = running.calls("limactl")
+        edit = next(i for i, c in enumerate(calls) if c[:1] == ["edit"])
+        start = calls.index(["start", "--tty=false", "istota"])
+        setup = calls.index(["shell", "--workdir", "/", "istota", "sudo", "istota-stack", *self.SETUP])
+        down = calls.index(["shell", "--workdir", "/", "istota", "sudo", "istota-stack", "down"])
+        # The unit starts the stack at boot; it is taken down before the setup.
+        assert edit < start < down < setup < calls.index(["stop", "istota"])
+        assert "PORT=8282\n" in _state_file(running)
+        assert running.state()["instance"]["status"] == "Stopped"
+
+    def test_a_stopped_vm_is_stopped_again_when_a_step_fails(self, running):
+        running.set(instance={"name": "istota", "status": "Stopped"}, setup_rc=3)
+        result = running.run("set-port", "8282")
+        assert result.returncode == 3, result.stdout + result.stderr
+        assert running.state()["instance"]["status"] == "Stopped"
+        assert "set-port 8282" in result.stderr
+
+    def test_a_taken_port_is_refused_and_nothing_changes(self, running):
+        running.set(port_holders={"8282": "ollama"})
+        result = running.run("set-port", "8282")
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "ollama" in result.stderr
+        assert running.stack_calls() == []
+        assert not any(c[:1] in (["edit"], ["stop"]) for c in running.calls("limactl"))
+        assert "PORT=8181\n" in _state_file(running)
+
+    def test_a_running_vm_stopped_for_the_edit_is_started_again_when_it_fails(self, running):
+        running.set(edit_rc=1)
+        result = running.run("set-port", "8282")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert running.state()["instance"]["status"] == "Running"
+        assert "PORT=8181\n" in _state_file(running)
+        running.set(edit_rc=0)
+        assert running.run("set-port", "8282").returncode == 0
+        assert running.state()["instance"]["status"] == "Running"
+        assert "PORT=8282\n" in _state_file(running)
+
+    @pytest.mark.parametrize("port", ["6080", "9223"])
+    def test_a_browser_port_inside_the_vm_is_refused(self, running, port):
+        result = running.run("set-port", port)
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "browser" in result.stderr
+        assert running.calls("limactl") == []
+
+    @pytest.mark.parametrize("args", [["80"], ["65536"], ["8o80"], ["08080"], [""], [], ["8282", "8383"]])
+    def test_a_port_that_is_not_one_is_a_usage_error(self, running, args):
+        result = running.run("set-port", *args)
+        assert result.returncode == 64, result.stdout + result.stderr
+        assert running.calls("limactl") == []
+
+    def test_without_a_vm_it_says_to_create_one(self, mac):
+        result = mac.run("set-port", "8282")
+        assert result.returncode == 1
+        assert "istota-stack create" in result.stderr
+
+    def test_a_failed_setup_leaves_the_forward_and_the_state_alone(self, running):
+        """The state's PORT is written once Lima's forward is, so a run that
+        stops earlier is redone by running it again."""
+        running.set(setup_rc=2)
+        result = running.run("set-port", "8282")
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert not any(c[:1] == ["edit"] for c in running.calls("limactl"))
+        assert "PORT=8181\n" in _state_file(running)
+        running.set(setup_rc=0)
+        result = running.run("set-port", "8282")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "PORT=8282\n" in _state_file(running)
+        assert running.state()["instance"]["status"] == "Running"
+
+    def test_a_vm_already_on_the_port_is_not_restarted(self, running):
+        result = running.run("set-port", "8181")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not any(c[:1] in (["edit"], ["stop"], ["start"]) for c in running.calls("limactl"))
+        assert not any(c[:1] == ["setup"] for c in running.stack_calls())
+        assert "already" in result.stdout
+
+    def test_a_run_that_stopped_after_the_forward_finishes_the_setup(self, running):
+        """Lima forwards 8282 and the state says so, but nginx still publishes
+        on 8181: only the setup is redone, and the containers restarted on it,
+        since daemon and web read the hostname at start."""
+        state = _state_file(running).replace("PORT=8181\n", "PORT=8282\n")
+        (running.home / ".config" / "istota-stack" / "istota.env").write_text(state)
+        result = running.run("set-port", "8282")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = running.stack_calls()
+        assert calls.index(self.SETUP) < calls.index(["down"]) < calls.index(["up"])
+        assert running.state()["vm"]["stack_up"] is True
+        assert not any(c[:1] in (["edit"], ["stop"]) for c in running.calls("limactl"))
+
+    def test_a_vm_not_set_up_has_no_setup_to_redo(self, running):
+        running.set(vm={**running.state()["vm"], "config": False, "publish": ""})
+        result = running.run("set-port", "8282")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not any(c[:1] == ["setup"] for c in running.stack_calls())
+        assert ["host-env", "LOCAL_FORWARD_PORT=8282"] in running.stack_calls()
+        assert "PORT=8282\n" in _state_file(running)
+
+    def test_a_stack_started_by_hand_is_started_again_after_the_restart(self, running):
+        """A disabled unit (restore --no-start, then `up`) does not start the
+        stack at boot."""
+        running.set(unit_enabled=False)
+        result = running.run("set-port", "8282")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = running.stack_calls()
+        assert ["up"] in calls[calls.index(["down"]) + 1:]
+        assert running.state()["vm"]["stack_up"] is True
+
+    def test_a_stack_that_was_down_is_down_again(self, running):
+        """A forwarded `down` leaves the oneshot unit active and enabled, and
+        the boot starts the stack; it is taken down again."""
+        running.set(vm={**running.state()["vm"], "stack_up": False})
+        result = running.run("set-port", "8282")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert running.state()["vm"]["stack_up"] is False
+        assert running.state()["instance"]["status"] == "Running"
+        assert ["up"] not in running.stack_calls()
+
+    def test_the_usage_names_it(self, mac):
+        assert "istota-stack set-port N" in mac.run("--help").stdout
 
 
 def _vm_probe_text() -> str:

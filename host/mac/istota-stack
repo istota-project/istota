@@ -20,6 +20,12 @@
 #                               CPUs, memory and free disk, and is asked on a terminal
 #   istota-stack start          start the VM
 #   istota-stack stop           stop the stack, then the VM
+#   istota-stack set-port N     move the web UI to port N (1024 to 65535) on this Mac:
+#                               Lima's forward, host.env, the setup's localhost:N and
+#                               nginx's publish, and the saved settings. A running VM
+#                               is restarted on it; a stopped one is started for the
+#                               change and stopped again. Safe to run again after a
+#                               failure; addresses for the old port stop working
 #   istota-stack status         the VM, the deployed tag, the containers, the folder
 #   istota-stack open [--files] the web UI in the browser; --files the folder in Finder
 #   istota-stack shell          a shell in the VM
@@ -321,18 +327,63 @@ prepare_folder() {
     log "workspace: ${folder}"
 }
 
+# What listens on TCP port $1 on this Mac: a header line, then one line per
+# listener with the process name first, or nothing. The user's lsof does not
+# see another user's or root's sockets, which netstat does, so netstat's
+# LISTEN lines for the port stand in when lsof prints nothing.
+port_holders() {
+    local holders
+    holders="$(lsof -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null || true)"
+    if [ -z "$holders" ] && command -v netstat >/dev/null 2>&1; then
+        holders="$(netstat -anv -p tcp 2>/dev/null | awk -v suffix=".$1" '
+            $6 == "LISTEN" && length($4) > length(suffix) && substr($4, length($4) - length(suffix) + 1) == suffix {
+                name = $11
+                sub(/:[0-9]+$/, "", name)
+                if (name == "") name = "unknown"
+                lines = lines name " " $4 "\n"
+            }
+            END { if (lines != "") printf "COMMAND ADDRESS\n%s", lines }' || true)"
+    fi
+    [ -z "$holders" ] || printf '%s\n' "$holders"
+}
+
+# $2 is what to do about a taken port, for the refusal's last line.
 require_port_free() {
-    local port="$1" holders
+    local port="$1" advice="${2:-Stop that, or choose another port with --port.}" holders
     if ! command -v lsof >/dev/null 2>&1; then
         log "WARNING: no lsof to check that port ${port} is free"
         return 0
     fi
-    holders="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+    holders="$(port_holders "$port")"
     if [ -n "$holders" ]; then
         fail "$EX_CONFIG" "port ${port} on this Mac is taken:
 ${holders}
-Stop that, or choose another port with --port."
+${advice}"
     fi
+}
+
+# Lima also forwards every port the VM listens on at its loopback: the
+# browser's VNC and API ports, and the ephemeral one nginx's unused TLS slot
+# usually takes. Lima skips one that is taken and starts anyway; only the web
+# port breaks the window, so these are warned about.
+BROWSER_PORTS="6080 9223"
+OTHER_FORWARDED_PORTS="${BROWSER_PORTS} 32768"
+
+# nginx publishes the web port on the guest's loopback, where the browser
+# container already publishes its two.
+refuse_browser_port() {
+    case " ${BROWSER_PORTS} " in
+        *" $1 "*) fail "$EX_CONFIG" "port $1 is the browser's inside the VM, so the web UI cannot use it. Choose another port." ;;
+    esac
+}
+
+warn_other_ports_held() {
+    command -v lsof >/dev/null 2>&1 || return 0
+    local port holders
+    for port in $OTHER_FORWARDED_PORTS; do
+        holders="$(port_holders "$port" | awk 'NR > 1 { print $1 }' | sort -u | tr '\n' ' ')"
+        [ -z "$holders" ] || log "WARNING: port ${port} on this Mac is held by ${holders}so Lima will not forward the VM's ${port} to it."
+    done
 }
 
 # A plain file of create's keys and no other: the test that keeps the
@@ -526,8 +577,10 @@ size_new_vm() {
     log "the VM: ${CREATE_CPUS} CPUs, ${CREATE_MEMORY} GiB of memory, a disk of up to ${CREATE_DISK} GiB."
 }
 
+# A leading zero is refused: test reads 08080 as 8080, and setup reads
+# host.env's LOCAL_FORWARD_PORT=08080 as no port at all.
 valid_port() {
-    case "$1" in ""|*[!0-9]*) return 1 ;; esac
+    case "$1" in ""|0*|*[!0-9]*) return 1 ;; esac
     [ "${#1}" -le 5 ] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
 }
 
@@ -918,6 +971,7 @@ create_settings() {
     if ! valid_port "$CREATE_PORT" || [ "$CREATE_PORT" -lt 1024 ]; then
         usage_error "--port takes a port from 1024 to 65535, not '${CREATE_PORT}'"
     fi
+    refuse_browser_port "$CREATE_PORT"
     case "$CREATE_CPUS" in ""|[1-9]|[1-9][0-9]) ;; *) usage_error "--cpus takes a number of CPUs, not '${CREATE_CPUS}'" ;; esac
     CREATE_MEMORY="${CREATE_MEMORY%GiB}"
     case "$CREATE_MEMORY" in ""|[1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;; *) usage_error "--memory takes whole GiB, not '${CREATE_MEMORY}'" ;; esac
@@ -947,6 +1001,12 @@ create_settings() {
         check_tag_name "$CREATE_TAG"
         [ -n "$CREATE_KEY" ] || CREATE_KEY="$DEFAULT_SIGNING_KEY"
     fi
+}
+
+# The template's one forward, both sides on the web port, as a `--set`
+# expression: Lima reads port numbers before it expands a param.
+forward_expression() {
+    printf '.portForwards[0].guestPort = %s | .portForwards[0].hostPort = %s' "$1" "$1"
 }
 
 create_template() {
@@ -999,6 +1059,9 @@ cmd_create() {
         require_new_vm_inputs
         require_port_free "$port"
         size_new_vm
+    elif [ "$status" != Running ]; then
+        # The forward the VM was made with, which a --port now does not move.
+        require_port_free "$(port_or_default)" "Stop that, then run this again."
     fi
     prepare_folder "$folder" "$adopt"
     # The signing key is public; kept so a re-run or a restore can make the VM again.
@@ -1008,7 +1071,7 @@ cmd_create() {
     if [ -z "$status" ]; then
         local template expression args raw="" rc=0
         template="$(create_template)"
-        expression=".portForwards[0].guestPort = ${port} | .portForwards[0].hostPort = ${port}"
+        expression="$(forward_expression "$port")"
         args=(create --tty=false "--name=${INSTANCE}")
         args+=("--param=WORKSPACE=${folder}")
         # The template names every mount, and Lima refuses one with no location:
@@ -1170,12 +1233,13 @@ become_the_apps() {
     fi
 }
 
-# host.env's LOCAL_FORWARD_PORT, the port Lima forwards, which setup publishes
-# nginx and its page on. Written only when the VM's differs: the read takes no
-# lock, and a write waits up to 600 s behind a running `setup --web`.
+# host.env's LOCAL_FORWARD_PORT, the port Lima forwards (the state's, unless
+# $1 names one), which setup publishes nginx and its page on. Written only
+# when the VM's differs: the read takes no lock, and a write waits up to 600 s
+# behind a running `setup --web`.
 write_forward_port() {
-    local port current
-    port="$(port_or_default)"
+    local port="${1:-}" current
+    [ -n "$port" ] || port="$(port_or_default)"
     current="$(vm_stack host-env LOCAL_FORWARD_PORT </dev/null)" || fail 1 "could not read the VM's host.env."
     if [ "$current" != "$port" ]; then
         run_step "write the forwarded port" "istota-stack host-env LOCAL_FORWARD_PORT=${port}" \
@@ -1286,17 +1350,30 @@ cmd_start() {
     if [ ! -f "${folder}/${MARKER}" ]; then
         log "WARNING: ${folder} has no ${MARKER}; the stack refuses to start without it."
     fi
-    [ "$status" = Running ] || exec limactl start --tty=false "$INSTANCE"
-    log "${INSTANCE} is already running"
+    if [ "$status" = Running ]; then
+        log "${INSTANCE} is already running"
+        return 0
+    fi
+    # A running VM holds its own port; a stopped one's may have been taken
+    # since, and Lima would start with whatever holds it answering the web UI.
+    require_port_free "$(port_or_default)" "Stop that, then run \`istota-stack start\` again."
+    warn_other_ports_held
+    exec limactl start --tty=false "$INSTANCE"
 }
 
 # The stack first, so SQLite closes cleanly, bounded so a hung stack cannot
 # keep the VM up; then the VM.
 cmd_stop() {
     [ "$#" -eq 0 ] || usage_error
-    local status pid watchdog rc=0
+    local status
     status="$(instance_status)"
     [ -n "$status" ] || fail 1 "there is no Lima instance ${INSTANCE}."
+    stop_vm "$status"
+}
+
+# $1 is the instance's status.
+stop_vm() {
+    local status="$1" pid watchdog rc=0
     if [ "$status" = Running ]; then
         log "stopping the stack (at most ${STOP_TIMEOUT}s)"
         # A plain command, so $! is limactl itself and the watchdog's kill reaches it.
@@ -1311,7 +1388,130 @@ cmd_stop() {
             log "WARNING: \`istota-stack down\` did not finish (exit ${rc}); stopping the VM regardless"
         fi
     fi
-    exec limactl stop "$INSTANCE"
+    limactl stop "$INSTANCE"
+}
+
+# --- set-port ------------------------------------------------------------------
+
+SET_PORT_TARGET="" SET_PORT_STARTED="" SET_PORT_STOPPED="" SETUP_REDONE=""
+
+# Whether the stack's containers run, which the unit cannot say: it is a
+# oneshot that stays active across a forwarded `down`.
+stack_running() {
+    [ -n "$(vm_stack compose ps -q daemon </dev/null 2>/dev/null || true)" ]
+}
+
+# After a boot, the stack as it was: an enabled unit starts it at boot, so
+# wait for the boot to finish, then take it down or bring it up to match $1.
+stack_as_before() {
+    local was_up="$1"
+    vm systemctl is-system-running --wait </dev/null >/dev/null 2>&1 || true
+    if [ -n "$was_up" ] && ! stack_running; then
+        run_step "start the stack" "istota-stack up" vm_stack up </dev/null
+    elif [ -z "$was_up" ] && stack_running; then
+        run_step "stop the stack again" "istota-stack down" vm_stack down </dev/null
+    fi
+}
+
+# Lima's forward, in the instance's lima.yaml; Lima edits only a stopped
+# instance. The state's PORT follows at once: a re-run reads it to know the
+# forward has moved, so it is written after the edit and never before.
+move_forward() {
+    local port="$1"
+    run_step "move Lima's forward to ${port}" "limactl edit --set '$(forward_expression "$port")' ${INSTANCE}" \
+        limactl edit --tty=false --set "$(forward_expression "$port")" "$INSTANCE"
+    state_set "PORT=${port}"
+}
+
+# In a running VM: host.env's port, then the setup again for localhost:$1,
+# which writes `[site] hostname` and nginx's publish. Skipped when nginx
+# already publishes there, or when there is no setup yet (its own run reads
+# the port from host.env). SETUP_REDONE says whether it ran.
+record_port_in_vm() {
+    local port="$1" probe
+    SETUP_REDONE=""
+    write_forward_port "$port"
+    probe="$(vm sh -c "$VM_PROBE" </dev/null)" || fail 1 "could not read the VM's state."
+    if [ "$(probe_value "$probe" config)" != 1 ]; then
+        log "the stack is not set up yet; its setup will take localhost:${port}."
+        return 0
+    fi
+    [ "$(probe_value "$probe" publish)" != "127.0.0.1:${port}:80" ] || return 0
+    local setup=(setup --yes --force --ingress local --hostname "localhost:${port}")
+    run_step "set the stack up for localhost:${port}" "istota-stack ${setup[*]}" vm_stack "${setup[@]}" </dev/null
+    SETUP_REDONE=1
+}
+
+# A failure after something changed: the VM goes back to running or stopped
+# as it was, and every step is safe to repeat, so the way on is the same
+# command.
+set_port_exit() {
+    local rc="$1"
+    trap - EXIT
+    if [ -n "$SET_PORT_STARTED" ]; then
+        stop_vm Running || log "WARNING: the VM did not stop; \`istota-stack stop\` stops it."
+    elif [ -n "$SET_PORT_STOPPED" ]; then
+        limactl start --tty=false "$INSTANCE" || log "WARNING: the VM did not start again; \`istota-stack start\` starts it."
+    fi
+    if [ "$rc" -ne 0 ]; then
+        echo "[istota-stack] the port did not move all the way; \`istota-stack set-port ${SET_PORT_TARGET}\` again goes on from where this stopped." >&2
+    fi
+    exit "$rc"
+}
+
+cmd_set_port() {
+    [ "$#" -eq 1 ] || usage_error "set-port takes one port, from 1024 to 65535"
+    local port="$1" status old was_up=""
+    if ! valid_port "$port" || [ "$port" -lt 1024 ]; then
+        usage_error "set-port takes a port from 1024 to 65535, not '${port}'"
+    fi
+    refuse_browser_port "$port"
+    status="$(instance_status)"
+    [ -n "$status" ] || fail 1 "there is no Lima instance ${INSTANCE}: \`istota-stack create\` makes one."
+    old="$(port_or_default)"
+    # A running VM holds the port it forwards.
+    if [ "$status" != Running ] || [ "$port" != "$old" ]; then
+        require_port_free "$port" "Stop that, or choose another port."
+    fi
+    SET_PORT_TARGET="$port"
+    trap 'set_port_exit $?' EXIT
+
+    if [ "$status" = Running ]; then
+        if stack_running; then was_up=1; fi
+        # The setup first, while the VM runs; the VM restarts onto the forward,
+        # and the containers with it, onto the new config.
+        record_port_in_vm "$port"
+        if [ "$port" != "$old" ]; then
+            stop_vm Running
+            SET_PORT_STOPPED=1
+            move_forward "$port"
+            warn_other_ports_held
+            run_step "start the VM" "limactl start ${INSTANCE}" limactl start --tty=false "$INSTANCE"
+            SET_PORT_STOPPED=""
+            stack_as_before "$was_up"
+        elif [ -n "$SETUP_REDONE" ] && [ -n "$was_up" ]; then
+            # daemon and web read config.toml at start, and `up` recreates only
+            # what compose sees change, nginx's publish.
+            run_step "stop the stack" "istota-stack down" vm_stack down </dev/null
+            run_step "start the stack on localhost:${port}" "istota-stack up" vm_stack up </dev/null
+        elif [ -z "$SETUP_REDONE" ]; then
+            log "${INSTANCE} already forwards and publishes ${port}."
+        fi
+    else
+        # The forward first, so the VM comes up on it; the stack an enabled unit
+        # starts at boot is taken down at once, since nothing should run on the
+        # old config; then the VM is stopped again.
+        [ "$port" = "$old" ] || move_forward "$port"
+        warn_other_ports_held
+        SET_PORT_STARTED=1
+        run_step "start the VM" "limactl start ${INSTANCE}" limactl start --tty=false "$INSTANCE"
+        stack_as_before ""
+        record_port_in_vm "$port"
+        SET_PORT_STARTED=""
+        stop_vm Running
+    fi
+    trap - EXIT
+    log "the web UI is http://localhost:${port}/istota; addresses and links for another port no longer reach it."
 }
 
 cmd_status() {
@@ -1334,7 +1534,7 @@ cmd_status() {
     probe="$(vm sh -c "$VM_PROBE" </dev/null || true)"
     echo "Deployed:   $(probe_value "$probe" tag)"
     if command -v lsof >/dev/null 2>&1; then
-        holders="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 { print $1 }' | sort -u || true)"
+        holders="$(port_holders "$port" | awk 'NR > 1 { print $1 }' | sort -u || true)"
         # NGINX_PUBLISH is ADDR:HOSTPORT:80; the host port is what Lima forwards to.
         published="$(probe_value "$probe" publish)"
         published="${published%:*}"
@@ -2020,6 +2220,7 @@ main() {
         create) cmd_create "$@" ;;
         start) cmd_start "$@" ;;
         stop) cmd_stop "$@" ;;
+        set-port) cmd_set_port "$@" ;;
         status) cmd_status "$@" ;;
         open) cmd_open "$@" ;;
         shell) [ "$#" -eq 0 ] || usage_error; exec limactl shell "$INSTANCE" ;;

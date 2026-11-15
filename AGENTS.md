@@ -217,6 +217,7 @@ src/istota/
 │   ├── worktree_reaper.py   # Removes a developer worktree once its work has landed → maintenance.md
 │   ├── talk_media.py     # Retention for Talk attachments fetched into `Channels/<token>/media/` on a local workspace → maintenance.md
 │   ├── sandbox_cache_sweeper.py  # Bounds the on-disk package caches the sandbox keeps per user → maintenance.md
+│   ├── log_redact.py     # The filter `istota-stack logs` puts every line through: secret-file values, then web addresses; fails closed, runs with the VM host's python3 → maintenance.md
 │   └── host_pressure.py  # Host memory instrumentation: PSI/meminfo/tmpfs, shmem attribution → maintenance.md
 ├── nextcloud/            # OCS + WebDAV client: _http (ocs_request/dav_request/OcsError/path scoping), capabilities, shares, users, dav, notifications, talk_files (a local file copied into a Talk conversation's folder for a share), tree_watch (whether anything the pollers read changed, by ETag, and the mount told; #939 → scheduler.md), rclone_rc (the mount's rc, three calls only → deployment.md)
 │   ├── talk.py, ocs.py   # The Talk client and the OCS envelope leaf

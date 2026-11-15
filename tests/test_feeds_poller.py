@@ -1617,3 +1617,195 @@ class TestTheRssFetchIsGuarded:
                 private_hosts=["localhost"],
             )
         assert [new for _, _, new in outcomes] == [1]
+
+
+# ---------------------------------------------------------------------------
+# A run that cannot reach the network ends rather than trying every feed
+# (#971)
+# ---------------------------------------------------------------------------
+
+
+class TestUnreachableHosts:
+    """On a new install the first poll fetches the bundled default feeds; with
+    no network each fetch waited out its own timeout, one after another, and
+    the run held the user's only background slot for minutes."""
+
+    NOW = datetime(2026, 11, 14, 12, 0, tzinfo=timezone.utc)
+
+    def _db(self, tmp_path, urls):
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            for url in urls:
+                source_type = "arena" if url.startswith("arena:") else "rss"
+                feeds_db.upsert_feed(
+                    conn, url=url, title=None, site_url=None,
+                    source_type=source_type, category_id=None,
+                    poll_interval_minutes=30,
+                )
+            conn.commit()
+        return path
+
+    def _poll(self, path, *, dead, monkeypatch, **kwargs):
+        """Poll with every URL in ``dead`` unreachable; return the URLs fetched."""
+        import httpx
+
+        from istota.feeds.providers import arena as arena_provider
+        from istota.sandbox import guarded_http
+
+        fetched: list[str] = []
+
+        def http_get(url, *, headers):
+            fetched.append(url)
+            if url in dead:
+                raise guarded_http.GuardRefused("timeout")
+            return _StubResponse(content=SAMPLE_RSS)
+
+        def arena_fetch(ident, **kw):
+            fetched.append(f"arena:{ident}")
+            if f"arena:{ident}" in dead:
+                raise httpx.ConnectTimeout("timed out")
+            return []
+
+        monkeypatch.setattr(arena_provider, "fetch", arena_fetch)
+        with feeds_db.connect(path) as conn:
+            outcomes = poll_due_feeds(
+                conn, http_get=http_get, now=self.NOW, sleep=lambda s: None,
+                **kwargs,
+            )
+        return fetched, outcomes
+
+    def _untouched_and_due(self, path, url):
+        with feeds_db.connect(path) as conn:
+            feed = feeds_db.get_feed_by_url(conn, url)
+            due = {f.url for f in feeds_db.feeds_due_for_poll(conn, now=self.NOW)}
+        return feed.error_count == 0 and feed.last_error is None and url in due
+
+    def test_a_run_that_reaches_nothing_stops_after_two_hosts(self, tmp_path, monkeypatch):
+        urls = [f"https://h{i}.example.org/feed.xml" for i in range(5)]
+        path = self._db(tmp_path, urls)
+
+        fetched, outcomes = self._poll(path, dead=set(urls), monkeypatch=monkeypatch)
+
+        assert fetched == urls[:2]
+        assert [r.error for _, r, _ in outcomes] == [
+            "The feed took too long to answer.",
+        ] * 2
+        for url in urls[2:]:
+            assert self._untouched_and_due(path, url)
+
+    def test_once_a_host_answers_dead_hosts_do_not_stop_the_run(
+        self, tmp_path, monkeypatch,
+    ):
+        urls = [f"https://h{i}.example.org/feed.xml" for i in range(4)]
+        path = self._db(tmp_path, urls)
+
+        fetched, _ = self._poll(path, dead=set(urls[1:]), monkeypatch=monkeypatch)
+
+        assert fetched == urls
+
+    def test_the_other_feeds_on_an_unreachable_host_wait_for_the_next_run(
+        self, tmp_path, monkeypatch,
+    ):
+        # Three Are.na channels are one host. Down, it costs the run one fetch,
+        # not three, and counts as one host towards the stop.
+        urls = ["arena:a", "arena:b", "arena:c", "https://up.example.org/feed.xml"]
+        path = self._db(tmp_path, urls)
+
+        fetched, _ = self._poll(
+            path, dead={"arena:a", "arena:b", "arena:c"}, monkeypatch=monkeypatch,
+        )
+
+        assert fetched == ["arena:a", "https://up.example.org/feed.xml"]
+        assert self._untouched_and_due(path, "arena:b")
+        assert self._untouched_and_due(path, "arena:c")
+
+    def test_an_answer_that_is_an_error_still_counts_as_reached(self, tmp_path):
+        from istota.sandbox import guarded_http
+
+        urls = [f"https://h{i}.example.org/feed.xml" for i in range(4)]
+        path = self._db(tmp_path, urls)
+        fetched: list[str] = []
+
+        def http_get(url, *, headers):
+            fetched.append(url)
+            if url == urls[0]:
+                return _StubResponse(status_code=503)
+            raise guarded_http.GuardRefused("connection_failed")
+
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(conn, http_get=http_get, now=self.NOW)
+
+        assert fetched == urls
+
+    def test_an_error_raised_before_any_request_is_not_an_answer(
+        self, tmp_path, monkeypatch,
+    ):
+        # A Tumblr feed with no API key fails before it sends anything, so it
+        # says nothing about the network and must not switch the stop off.
+        monkeypatch.delenv("TUMBLR_API_KEY", raising=False)
+        urls = [f"https://h{i}.example.org/feed.xml" for i in range(3)]
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            for url, source_type in [("tumblr:foo", "tumblr")] + [(u, "rss") for u in urls]:
+                feeds_db.upsert_feed(
+                    conn, url=url, title=None, site_url=None,
+                    source_type=source_type, category_id=None,
+                    poll_interval_minutes=30,
+                )
+            conn.commit()
+
+        fetched, outcomes = self._poll(path, dead=set(urls), monkeypatch=monkeypatch)
+
+        assert outcomes[0][1].error == "TUMBLR_API_KEY not set"
+        assert fetched == urls[:2]
+        assert self._untouched_and_due(path, urls[2])
+
+    def test_a_run_starts_no_fetch_past_its_time_budget(self, tmp_path, monkeypatch):
+        from istota.feeds import poller
+
+        urls = [f"https://h{i}.example.org/feed.xml" for i in range(4)]
+        path = self._db(tmp_path, urls)
+        clock = [1000.0]
+        monkeypatch.setattr(poller.time, "monotonic", lambda: clock[0])
+        fetched: list[str] = []
+
+        def slow_get(url, *, headers):
+            fetched.append(url)
+            clock[0] += 100
+            return _StubResponse(content=SAMPLE_RSS)
+
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(conn, http_get=slow_get, now=self.NOW, max_run_seconds=150)
+
+        assert fetched == urls[:2]
+        for url in urls[2:]:
+            assert self._untouched_and_due(path, url)
+
+    def test_refused_connections_through_the_real_fetch_stop_the_run(self, tmp_path):
+        # The guarded fetch itself, against a port nothing listens on: two
+        # hosts refuse, and the feed on a third host is not tried. A socket
+        # held bound without `listen()` is not used instead: on macOS the
+        # connects to it were not refused, and the test took 15 s.
+        import socket
+
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        urls = [
+            f"http://localhost:{port}/a.xml",
+            f"http://127.0.0.1:{port}/b.xml",
+            "http://feeds.invalid/c.xml",
+        ]
+        path = self._db(tmp_path, urls)
+
+        with feeds_db.connect(path) as conn:
+            outcomes = poll_due_feeds(
+                conn, now=self.NOW, private_hosts=["localhost", "127.0.0.1"],
+            )
+
+        assert [feed.url for feed, _, _ in outcomes] == urls[:2]
+        assert all(r.error for _, r, _ in outcomes)
+        assert self._untouched_and_due(path, urls[2])

@@ -182,6 +182,10 @@ case "$args" in
     if [ -n "$vm" ] && [ -n "${STUB_IMPORTED_ENV:-}" ]; then printf '%s' "$STUB_IMPORTED_ENV" > "$vm/.env"; fi
     if [ -n "$vm" ] && [ -n "${STUB_IMPORTED_HOST_ENV:-}" ]; then printf '%s' "$STUB_IMPORTED_HOST_ENV" > "$vm/host.env"; fi
     exit "${STUB_IMPORT_RC:-0}" ;;
+  *" logs --no-color "*)
+    [ -z "${STUB_COMPOSE_LOGS:-}" ] || cat "$STUB_COMPOSE_LOGS"
+    [ -z "${STUB_COMPOSE_STDERR:-}" ] || echo "$STUB_COMPOSE_STDERR" >&2
+    exit "${STUB_COMPOSE_LOGS_RC:-0}" ;;
   *" config --services "*)
     if [ -n "${STUB_SERVICES:-}" ]; then printf '%b' "$STUB_SERVICES"; else printf 'daemon\nweb\nnginx\n'; fi
     case "$args" in *compose.devbox.yml*) echo devbox-alice ;; esac ;;
@@ -2712,6 +2716,197 @@ class TestExec:
         )
         assert result.returncode == 0, result.stderr
         assert fx.docker_calls()[-1].endswith("exec -T daemon istota-drop istota user list")
+
+
+JOURNALCTL_STUB = r"""#!/bin/bash
+printf '%s\n' "$*" >> "$STUB_CALLS.journalctl"
+[ -z "${STUB_JOURNAL:-}" ] || cat "$STUB_JOURNAL"
+[ -z "${STUB_JOURNAL_STDERR:-}" ] || echo "$STUB_JOURNAL_STDERR" >&2
+exit "${STUB_JOURNAL_RC:-0}"
+"""
+
+NC_PASSWORD = "nc-app-password-for-the-test"
+MASTER_KEY = "master-key-for-the-test-0123456789"
+WEB_TOKEN_KEY = "web-token-key-for-the-test-0123456789"
+SIGNALING_SECRET = "signaling-secret-for-the-test"
+RC_PASS = "rclone-rc-pass-for-the-test"
+SETUP_CODE = "ABCDE-FGHJK-MNPQR-STVWX"
+
+
+@pytest.fixture
+def logs(fx) -> Fixture:
+    """A stack with secrets, and two sources whose lines carry them."""
+    journalctl = fx.root / "bin" / "journalctl"
+    journalctl.write_text(JOURNALCTL_STUB)
+    journalctl.chmod(0o755)
+    # The filter is the checkout's own module, imported from its src/.
+    (fx.src / "src").symlink_to(REPO / "src")
+    secrets = fx.stack / "secrets"
+    secrets.mkdir()
+    (secrets / "istota_nextcloud_app_password").write_text(NC_PASSWORD)
+    (secrets / "istota_email_smtp_password").write_text("")
+    (fx.stack / "data").mkdir()
+    (fx.stack / "data" / ".secret_key").write_text(MASTER_KEY)
+    (fx.stack / "data" / ".web_token_key").write_text(WEB_TOKEN_KEY)
+    (fx.stack / ".setup").mkdir()
+    (fx.stack / ".setup" / "code").write_text(SETUP_CODE + "\n")
+    with (fx.stack / ".env").open("a") as env:
+        env.write(f'ISTOTA_TALK_SIGNALING_SECRET="{SIGNALING_SECRET}"\nISTOTA_SECRETS_DIR=/srv/app/istota/secrets\n')
+    (fx.stack / "rclone-rc.env").write_text(f"RCLONE_RC_USER=istota\nRCLONE_RC_PASS={RC_PASS}\n")
+    compose_logs = fx.root / "compose.log"
+    compose_logs.write_text(
+        f"daemon-1  | 2026-11-14T08:00:00Z nextcloud: login as bot with {NC_PASSWORD} refused\n"
+        f"web-1  | 2026-11-14T08:00:01Z GET https://bot:{NC_PASSWORD}@cloud.example.com/remote.php?user=bot\n"
+        "web-1  | 2026-11-14T08:00:02Z \"GET /istota/set-password?token=set-password-token HTTP/1.1\" 200\n"
+        f"signaling-1  | backend secret {SIGNALING_SECRET}, web key {WEB_TOKEN_KEY}\n"
+        "daemon-1  | wrote /srv/app/istota/secrets/istota_caldav_password\n"
+    )
+    journal = fx.root / "journal.log"
+    journal.write_text(
+        "2026-11-14T07:00:00+0000 vm istota-stack[1]: open https://192.0.2.10/istota/setup#SETUP-CODE-ABCDE\n"
+        f"2026-11-14T07:00:01+0000 vm istota-stack[1]: ISTOTA_SECRET_KEY={MASTER_KEY}\n"
+        f"2026-11-14T07:00:02+0000 vm istota-stack[1]: Setup code (if you open the page some other way): {SETUP_CODE}\n"
+        f"2026-11-14T07:00:03+0000 vm rclone[2]: rc auth istota:{RC_PASS}\n"
+    )
+    fx.env.update(STUB_COMPOSE_LOGS=str(compose_logs), STUB_JOURNAL=str(journal))
+    return fx
+
+
+class TestLogs:
+    """`logs [--since DURATION]` prints the containers' logs and the journal of
+    istota's units, every line redacted (#968). The Mac app hands the output to
+    whoever it is reporting to, so nothing a secret file holds, no userinfo and
+    no query or fragment may reach stdout, on any path."""
+
+    def _journal_args(self, fx) -> list[str]:
+        path = Path(f"{fx.calls}.journalctl")
+        return path.read_text().split() if path.exists() else []
+
+    def test_every_line_is_redacted(self, logs):
+        result = logs.run("logs")
+        assert result.returncode == 0, result.stdout + result.stderr
+        for leaked in (NC_PASSWORD, MASTER_KEY, WEB_TOKEN_KEY, SIGNALING_SECRET, RC_PASS, SETUP_CODE,
+                       "user=bot", "set-password-token", "SETUP-CODE-ABCDE"):
+            assert leaked not in result.stdout, leaked
+            assert leaked not in result.stderr, leaked
+        lines = result.stdout.splitlines()
+        assert "daemon-1  | 2026-11-14T08:00:00Z nextcloud: login as bot with [redacted] refused" in lines
+        assert "web-1  | 2026-11-14T08:00:01Z GET https://[redacted]@cloud.example.com/remote.php?[redacted]" in lines
+        assert 'web-1  | 2026-11-14T08:00:02Z "GET /istota/set-password?[redacted] HTTP/1.1" 200' in lines
+        assert "2026-11-14T07:00:00+0000 vm istota-stack[1]: open https://192.0.2.10/istota/setup#[redacted]" in lines
+        assert "2026-11-14T07:00:01+0000 vm istota-stack[1]: ISTOTA_SECRET_KEY=[redacted]" in lines
+        assert "2026-11-14T07:00:02+0000 vm istota-stack[1]: Setup code (if you open the page some other way): [redacted]" in lines
+        # A .env line naming a path is not a credential.
+        assert "daemon-1  | wrote /srv/app/istota/secrets/istota_caldav_password" in lines
+
+    def test_what_a_source_writes_to_stderr_is_redacted_on_stdout(self, logs):
+        result = logs.run(
+            "logs",
+            STUB_COMPOSE_STDERR=f"compose: auth {NC_PASSWORD} refused",
+            STUB_JOURNAL_STDERR=f"journalctl: key {MASTER_KEY}",
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "compose: auth [redacted] refused" in result.stdout.splitlines()
+        assert "journalctl: key [redacted]" in result.stdout.splitlines()
+        assert NC_PASSWORD not in result.stdout + result.stderr
+        assert MASTER_KEY not in result.stdout + result.stderr
+
+    def test_the_containers_come_first_then_the_journal(self, logs):
+        lines = logs.run("logs").stdout.splitlines()
+        heads = [i for i, line in enumerate(lines) if line.startswith("--- ")]
+        assert len(heads) == 2
+        assert "docker compose logs" in lines[heads[0]] and "journal" in lines[heads[1]]
+        assert any("nextcloud: login" in line for line in lines[heads[0]:heads[1]])
+        assert any("istota/setup" in line for line in lines[heads[1]:])
+
+    def test_the_default_window_is_a_day_in_both_sources(self, logs):
+        before = int(time.time())
+        result = logs.run("logs")
+        after = int(time.time())
+        assert result.returncode == 0, result.stderr
+        call = next(c for c in logs.docker_calls() if " logs " in f" {c} ")
+        assert call.endswith("logs --no-color --timestamps --since 86400s")
+        args = self._journal_args(logs)
+        since = int(args[args.index("--since") + 1].lstrip("@"))
+        assert before - 86400 <= since <= after - 86400
+
+    def test_since_sets_both_windows(self, logs):
+        before = int(time.time())
+        result = logs.run("logs", "--since", "2h")
+        after = int(time.time())
+        assert result.returncode == 0, result.stderr
+        assert any(c.endswith("--since 7200s") for c in logs.docker_calls())
+        args = self._journal_args(logs)
+        since = int(args[args.index("--since") + 1].lstrip("@"))
+        assert before - 7200 <= since <= after - 7200
+        assert ["-u", "istota-*"] == args[args.index("-u"):args.index("-u") + 2]
+        assert "mount-nextcloud.service" in args
+
+    @pytest.mark.parametrize("window", ["", "24", "1w", "-1h", "0h", "1.5h", "1234567h", "24H", "1h "])
+    def test_a_malformed_window_is_a_usage_error(self, logs, window):
+        result = logs.run("logs", "--since", window)
+        assert result.returncode == 64, result.stdout + result.stderr
+        assert result.stdout == ""
+        assert not [c for c in logs.docker_calls() if " logs " in f" {c} "]
+
+    @pytest.mark.parametrize("args", [("--since",), ("--follow",), ("extra",)])
+    def test_other_arguments_are_a_usage_error(self, logs, args):
+        assert logs.run("logs", *args).returncode == 64
+
+    def test_a_secret_file_it_cannot_read_prints_nothing(self, logs):
+        (logs.stack / "secrets" / "istota_caldav_password").symlink_to(logs.stack / "data" / ".secret_key")
+        result = logs.run("logs")
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert result.stdout == ""
+        assert NC_PASSWORD not in result.stderr and MASTER_KEY not in result.stderr
+        assert "istota_caldav_password" in result.stderr
+        # The sources died on the pipe; that is not their failure to report.
+        assert "failed" not in result.stderr
+
+    def test_a_filter_that_cannot_start_prints_nothing(self, logs):
+        # A checkout whose filter fails to import; it is first on the path, so
+        # the istota this test runs under cannot stand in for it.
+        broken = logs.root / "broken-src"
+        (broken / "istota" / "maintenance").mkdir(parents=True)
+        (broken / "istota" / "__init__.py").write_text("")
+        (broken / "istota" / "maintenance" / "__init__.py").write_text("")
+        (broken / "istota" / "maintenance" / "log_redact.py").write_text("raise ImportError('broken')\n")
+        (logs.src / "src").unlink()
+        (logs.src / "src").symlink_to(broken)
+        result = logs.run("logs")
+        assert result.returncode != 0
+        assert result.stdout == ""
+        assert NC_PASSWORD not in result.stderr
+
+    def test_a_source_that_fails_still_leaves_the_other_and_fails_the_verb(self, logs):
+        result = logs.run("logs", STUB_JOURNAL_RC="1")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "nextcloud: login as bot with [redacted] refused" in result.stdout
+        assert "journalctl" in result.stderr
+        assert NC_PASSWORD not in result.stdout + result.stderr
+
+    def test_it_takes_no_lock(self, logs):
+        held = HeldLock(logs.stack / ".stack.lock", "update")
+        try:
+            result = logs.run("logs", ISTOTA_STACK_LOCK_WAIT="0")
+        finally:
+            held.release()
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_every_unit_provision_installs_is_in_the_journal_it_reads(self):
+        units = sorted(
+            p.name for p in (REPO / "host").iterdir()
+            if p.suffix in (".service", ".timer", ".path")
+        )
+        assert units
+        assert [u for u in units if not u.startswith("istota-") and u != "mount-nextcloud.service"] == []
+
+    def test_the_usage_block_documents_the_verb_and_its_exit_codes(self):
+        usage = SCRIPT.read_text().split("# --- end usage ---")[0]
+        assert "istota-stack logs [--since DURATION]" in usage
+        entry = usage[usage.index("istota-stack logs"):]
+        entry = entry[:entry.index("#   istota-stack", 1)]
+        assert "64" in entry and "78" in entry
 
 
 def _source(fx: Fixture, script: str, **extra_env: str) -> subprocess.CompletedProcess:

@@ -136,6 +136,17 @@ POLL_CLAIM_SECONDS = 300
 # feed cap relies on.
 DEFAULT_MAX_PACING_SECONDS = 60.0
 
+# Past this many seconds a run starts no further fetch and leaves the rest due,
+# so a slow network costs the user's one background slot about one fetch past
+# this rather than the whole due list (#971). A fetch already started still
+# runs to its own deadline.
+DEFAULT_MAX_RUN_SECONDS = 180.0
+
+# A run in which this many distinct hosts were unreachable and none answered
+# is taken to have no network, and stops. Leaving the rest due costs a tick;
+# trying each one costs a timeout apiece (#971).
+UNREACHABLE_HOSTS_BEFORE_STOP = 2
+
 
 # The single host each native provider talks to. Kept beside the schemes above
 # rather than imported from the provider modules, which would make the poller's
@@ -360,6 +371,13 @@ class FetchResult:
     # is what the server named, or None when it named nothing.
     rate_limited: bool = False
     retry_after_seconds: int | None = None
+    # Set beside ``error``, never instead of it; the poll run reads both to
+    # stop trying a host, or a network, that is not there. ``unreachable``: no
+    # connection, or a timeout. ``host_answered``: the error came back from
+    # the host (an HTTP status, a body over the cap, too many redirects), so
+    # the network is up. An error raised before any request is neither.
+    unreachable: bool = False
+    host_answered: bool = False
 
 
 def _as_text(value: object) -> str:

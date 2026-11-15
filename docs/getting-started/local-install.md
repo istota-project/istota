@@ -35,7 +35,7 @@ The installer refuses to run as root, on anything but an Apple silicon Mac, or w
 | Flag | Default | What it sets |
 |---|---|---|
 | `--workspace DIR` | `~/Istota` | the workspace folder ([rules below](#where-the-folder-may-be)) |
-| `--port N` | `8080` | the Mac port the web UI is on, 1024 or higher |
+| `--port N` | `8080` | the Mac port the web UI is on, 1024 or higher; `istota-stack set-port N` [changes it later](#changing-the-web-port) |
 | `--cpus N` | half the Mac's, 2 to 8 | the VM's CPUs, at most the Mac's |
 | `--memory N` | a quarter of the Mac's, 4 to 16 | the VM's memory in whole GiB, leaving macOS at least 2 |
 | `--disk N` | a quarter of the free disk, 40 to 100 | the most the VM's disk grows to, in whole GiB from 10 |
@@ -116,7 +116,7 @@ istota-stack update            # the newest signed release, then refresh the Mac
 istota task "..." -u alice -x  # the istota CLI, in the daemon container as uid 10001
 ```
 
-`stop` stops the stack before the VM so SQLite closes its files cleanly. `autostart on` runs `limactl autostart enable`, which writes a LaunchAgent that starts the VM at your next login; it does not start or stop a running VM.
+`stop` stops the stack before the VM so SQLite closes its files cleanly. `start` refuses (exit 78) when another program has taken the web port since the VM was made, and names it: Lima would otherwise start without its forward, and that program would answer `http://localhost:<port>/istota`. It warns about 6080, 9223 and 32768, which Lima also forwards for the browser and nginx, and starts. `autostart on` runs `limactl autostart enable`, which writes a LaunchAgent that starts the VM at your next login; it does not start or stop a running VM.
 
 Every other verb is the VM's own `istota-stack`, run as root in the VM with its arguments unchanged and its exit status passed back: `rollback`, `setup-cancel`, `exec`, `compose`, `up`, `down`, `check-image` and the rest. `apply <plan>` and `import-bare-metal <dir>` take a path on the Mac: it is copied into a directory of its own in the VM for the call and removed afterwards.
 
@@ -137,6 +137,16 @@ istota-stack rollback          # back to the release before
 These run in the VM, without `sudo` on the Mac. `update` picks the newest `vX.Y.Z` tag; when the stack already runs it, the command says so and changes nothing. Otherwise the VM checks the tag's signature against the key it was created with, and refuses a tag that fails the check without trying an older one. Then it builds the images in the VM from that tag and restarts the stack on them, which takes a few minutes. The config, the credentials, the databases and the folder are kept. After a successful update the Mac scripts are replaced with the copies from the verified checkout.
 
 `update vX.Y.Z` names the release, and rebuilds even when the stack already runs it. `rollback` goes back one release, the one `update` replaced, as long as that release's image can read the database.
+
+### Changing the web port
+
+```bash
+istota-stack set-port 8081     # the web UI moves to http://localhost:8081/istota
+```
+
+`set-port N` moves an existing install to port `N`, from 1024 to 65535. Before it changes anything, it refuses a port another program listens on and 6080 and 9223, which the browser uses inside the VM (exit 78), and anything that is not a port (exit 64). Then it writes the port into the VM's `host.env`, runs the setup again with `--yes --force` and `localhost:N` as the address (which keeps every other answer and rewrites the address in `config.toml` and the port nginx publishes on), moves Lima's forward, which Lima allows only on a stopped VM, and records the port for `open` and `status`. A running VM is stopped and started again for it, and the stack is left running or stopped as it was. A stopped VM is started for the change, the stack taken down as soon as the VM has booted, and the VM stopped again, which takes a minute or two. If a step fails, the VM is put back running or stopped as it was; run the same command again, since each step checks what is already done.
+
+Bookmarks, enrolment and setup links for the old port stop working. Passkeys are tied to `localhost`, not the port, so they keep working. An install that signs in with Nextcloud has its OAuth redirect address in Nextcloud's OAuth client, which `set-port` does not change; update it in Nextcloud's admin settings.
 
 ### Reaching a service on your Mac
 
