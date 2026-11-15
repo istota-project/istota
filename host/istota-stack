@@ -56,6 +56,15 @@
 #                               remove what the old Ansible role installed, once the stack runs
 #   istota-stack reclaim [--apply NAME...]
 #                               list what the stack left behind on this disk, or remove the named items
+#   istota-stack logs [--since DURATION]
+#                               print the containers' logs and the journal of istota's units
+#                               over the last DURATION (N and s, m, h or d; default 24h),
+#                               every line redacted: no value from the stack's secret files
+#                               (secrets/, data/'s two keys, a setup code, the credential
+#                               lines of .env and rclone-rc.env), and no web address's
+#                               userinfo, query or fragment;
+#                               exits 64 on a malformed DURATION, and 78 with nothing
+#                               printed when a secret file cannot be read
 #   istota-stack localize-workspace [--copy-only] [--resume] [--dry-run] [--no-note] [--accept-skipped]
 #                               move a mounted workspace into the state directory, offline
 #   istota-stack put-files [--dry-run]
@@ -193,7 +202,8 @@ images_loaded=""
 # The SSH signature namespace of an images manifest, beside git's for tags.
 IMAGES_NAMESPACE=istota-images
 # Exit codes: 1 a failure, 2 `apply` changed something, 3 the older image
-# refused the database (rollback), 64 usage, 65 a tag refused.
+# refused the database (rollback), 64 usage, 65 a tag refused, 78 a secret
+# file `logs` cannot read.
 EXIT_REFUSED_TAG=65
 LATEST_BRANCH=main
 
@@ -3970,6 +3980,86 @@ cmd_reclaim() {
     return "$rc"
 }
 
+# --- logs ----------------------------------------------------------------------
+
+# The redaction every line `logs` prints goes through (#968): the checkout's
+# own maintenance/log_redact.py, run with the host's python3, since no istota
+# is installed on the host. It reads every secret file (secrets/, the two keys
+# in data/, a setup's code, the credential lines of .env and rclone-rc.env)
+# before the first line and refuses with 78, printing nothing, when one cannot be read.
+LOGS_REDACT_PY='import sys; sys.path.insert(0, sys.argv[1]); from istota.maintenance.log_redact import main; sys.exit(main(sys.argv[2:]))'
+
+# `logs`' window in seconds: a whole number and s, m, h or d. Docker's
+# durations have no d, and journalctl reads "24h" as a time of day, so neither
+# is handed the operator's spelling.
+logs_window_seconds() {
+    local n unit
+    [[ "$1" =~ ^([1-9][0-9]{0,5})([smhd])$ ]] || return 1
+    n="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[2]}"
+    case "$unit" in
+        s) echo "$n" ;;
+        m) echo $(( n * 60 )) ;;
+        h) echo $(( n * 3600 )) ;;
+        d) echo $(( n * 86400 )) ;;
+    esac
+}
+
+# What `logs` reads, before the redaction: the containers' logs, then the
+# journal of the units provision.sh installs from host/. A source that fails
+# leaves the other to run; the status says which failed, 1 compose, 2 the journal.
+logs_sources() {
+    local seconds="$1" since="$2" window="$3" failed=0
+    echo "--- the stack's containers (docker compose logs), the last ${window} ---"
+    compose logs --no-color --timestamps --since "${seconds}s" || failed=$(( failed | 1 ))
+    echo "--- the journal of istota's units (journalctl), the last ${window} ---"
+    journalctl --no-pager --quiet --output short-iso --since "@${since}" \
+            -u 'istota-*' -u mount-nextcloud.service || failed=$(( failed | 2 ))
+    return "$failed"
+}
+
+cmd_logs() {
+    local window=24h seconds now since
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --since)
+                [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+                window="$2"
+                shift 2 ;;
+            *) usage >&2; exit 64 ;;
+        esac
+    done
+    if ! seconds="$(logs_window_seconds "$window")"; then
+        echo "[istota-stack] --since takes a whole number and s, m, h or d, such as 30m, 24h or 7d." >&2
+        exit 64
+    fi
+    now="$(date +%s)"
+    since=$(( now - seconds ))
+    [ "$since" -ge 0 ] || since=0
+    # stdout comes from the filter alone: both sources' output and errors go
+    # into the pipe, and only the script's own notes reach the terminal.
+    local statuses sources
+    set +e
+    logs_sources "$seconds" "$since" "$window" 2>&1 \
+        | python3 -I -B -c "$LOGS_REDACT_PY" "${SRC}/src" "$SECRETS_DIR" \
+            --file "${DATA_DIR}/.secret_key" --file "${DATA_DIR}/.web_token_key" \
+            --file "${SETUP_DIR}/code" --env "$ENV_FILE" --env "${STACK}/rclone-rc.env"
+    statuses=("${PIPESTATUS[@]}")
+    set -e
+    # The filter's refusal first: the sources it never read died on the pipe.
+    [ "${statuses[1]}" -eq 0 ] || exit "${statuses[1]}"
+    sources="${statuses[0]}"
+    # 141 is SIGPIPE: the reader went away (`logs | head`).
+    case "$sources" in 0|141) return 0 ;; esac
+    if [ $(( sources & 1 )) -ne 0 ]; then
+        echo "[istota-stack] docker compose logs failed; what it printed is above, redacted." >&2
+    fi
+    if [ $(( sources & 2 )) -ne 0 ]; then
+        echo "[istota-stack] journalctl failed; what it printed is above, redacted." >&2
+    fi
+    exit 1
+}
+
 main() {
     local command="${1:-}"
     [ "$#" -gt 0 ] && shift
@@ -4023,6 +4113,7 @@ main() {
         import-standalone) cmd_import_standalone "$@" ;;
         retire-bare-metal) cmd_retire_bare_metal "$@" ;;
         reclaim) cmd_reclaim "$@" ;;
+        logs) cmd_logs "$@" ;;
         localize-workspace) cmd_localize_workspace "$@" ;;
         put-files) cmd_put_files "$@" ;;
         config-apply) cmd_config_apply "$@" ;;

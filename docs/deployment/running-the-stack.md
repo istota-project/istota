@@ -512,6 +512,8 @@ On the VM every service logs to the systemd journal, under the container's name:
 
 The compose file's own default is Docker's `json-file` driver, which is what the test tiers get when they run it outside `istota-stack`, on hosts with no journald.
 
+To hand logs to someone, use `istota-stack logs [--since DURATION]` (`30m`, `24h`, `7d`; the default is `24h`). It prints the containers' logs, then the journal of istota's own units (`istota-*` and `mount-nextcloud.service`), with every line redacted: each value the stack holds in a secret file (`secrets/`, the master key and the web token key in `data/`, the code of a setup in progress, and the secret and password lines of `.env` and `rclone-rc.env`) is replaced with `[redacted]` wherever it appears, and so are the user name and password, the query and the fragment of every web address, which is where a setup code, a set-password link or an enrolment token travels. It takes no lock. When a secret file cannot be read, or is a link or anything but a plain file, it prints nothing and exits 78, because a value it cannot read is a value it cannot redact. A credential still written inline in `config.toml` is not covered: move it into its file first (doctor's `security.inline_credentials` names them). On the Mac, `istota-stack logs` runs the VM's verb.
+
 ## Browser profiles
 
 Each user has a separate profile under `/data/browser-profile/users/`. Logins and site storage survive task completion, session closure, process reaping and container restarts. They are never shared between users. Later tasks for the same user inherit that user's authenticated access without another vault fetch. Cloudflare clearance warms up separately for each user. Profiles are not automatically deleted.

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`istota-stack logs [--since DURATION]`** prints the containers' logs and the journal of istota's units over the last day, or the window given, ready to hand to someone: each value held in the stack's secret files and keys is replaced with `[redacted]`, and so are the user name, password, query and fragment of every web address. When a secret file cannot be read it prints nothing and exits 78. See docs/deployment/running-the-stack.md, "Container logs". (#968)
 - **`istota-stack set-port N` on a Mac** moves an existing install to another web port: Lima's forward, the VM's setup and the address the Mac opens. It works on a stopped or running VM and can be run again after a failure. See docs/getting-started/local-install.md, "Changing the web port". (#970)
 - **Back up and restore the configuration from Admin → Configuration.** Download the saved `config.toml`, or a KeePass file that also holds the installation's credentials, confirmed with your password or an emailed code, and restore either through the usual review, choosing which credentials come back. See docs/configuration/web-editor.md.
 - **`istota-stack restore --no-start` on a Mac** rebuilds a lost VM, leaves the stack stopped and keeps its containers off the network, across reboots, until `istota-stack hold off`, so you can check it before it sends anything. A server's restore takes `--hold` for the same. See docs/deployment/running-the-stack.md, "Recovering a lost installation".
