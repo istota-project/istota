@@ -35,7 +35,7 @@
 #                               running VM is restarted for it, a stopped one takes it
 #                               at its next start. A disk can grow but never shrink.
 #                               Safe to run again after a failure
-#   istota-stack status        the VM, the deployed tag, the containers, the folder
+#   istota-stack status         the VM, the deployed tag, the containers, the folder
 #   istota-stack open [--files] the web UI in the browser; --files the folder in Finder
 #   istota-stack shell          a shell in the VM
 #   istota-stack autostart on|off
