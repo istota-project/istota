@@ -86,6 +86,8 @@ if name == "sysctl":
     sys.exit(0)
 
 if name == "df":
+    if state.get("df_rc"):
+        sys.exit(state["df_rc"])
     free_kb = state.get("free_gib", 400) * 1024 ** 2
     out("Filesystem 1024-blocks Used Available Capacity Mounted on\n"
         f"/dev/disk3s5 970000000 1000 {free_kb} 10% /System/Volumes/Data\n")
@@ -213,7 +215,11 @@ if verb == "edit":
         sys.exit(1)
     if state.get("edit_rc"):
         sys.exit(state["edit_rc"])
-    instance["edited"] = argv[argv.index("--set") + 1]
+    if "--set" in argv:
+        instance["edited"] = argv[argv.index("--set") + 1]
+    for flag in ("--cpus", "--memory", "--disk"):
+        if flag in argv:
+            instance[flag[2:]] = argv[argv.index(flag) + 1]
     save()
     sys.exit(0)
 if verb == "copy":
@@ -1121,6 +1127,210 @@ class TestTheVmsSize:
         assert not any(c[:1] == ["create"] for c in mac.calls("limactl"))
         state = (mac.home / ".config" / "istota-stack" / "istota.env").read_text()
         assert "CPUS=5\n" in state
+
+
+SIZE_KEYS = [
+    "HOST_CPUS", "HOST_MEMORY_GIB", "HOST_FREE_DISK_GIB",
+    "DEFAULT_CPUS", "DEFAULT_MEMORY_GIB", "DEFAULT_DISK_GIB",
+    "MIN_CPUS", "MAX_CPUS", "MIN_MEMORY_GIB", "MAX_MEMORY_GIB", "MIN_DISK_GIB", "MAX_DISK_GIB",
+    "CPUS", "MEMORY_GIB", "DISK_GIB",
+]
+
+
+def _size_report(mac: Mac) -> dict:
+    result = mac.run("size")
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = result.stdout.splitlines()
+    assert [line.partition("=")[0] for line in lines] == SIZE_KEYS
+    return dict(line.partition("=")[::2] for line in lines)
+
+
+class TestTheSizeVerb:
+    """`size` says what a VM may take and what it has, for the Mac app: the
+    host facts, create's defaults, the bounds create and set-size check, and
+    the recorded size. Read-only, and it asks Lima nothing."""
+
+    def test_it_prints_every_key_in_order(self, mac):
+        mac.set(ncpu=12, memory_gib=32, free_gib=410)
+        assert _size_report(mac) == {
+            "HOST_CPUS": "12", "HOST_MEMORY_GIB": "32", "HOST_FREE_DISK_GIB": "410",
+            "DEFAULT_CPUS": "6", "DEFAULT_MEMORY_GIB": "8", "DEFAULT_DISK_GIB": "100",
+            "MIN_CPUS": "1", "MAX_CPUS": "12", "MIN_MEMORY_GIB": "1", "MAX_MEMORY_GIB": "30",
+            "MIN_DISK_GIB": "10", "MAX_DISK_GIB": "999",
+            "CPUS": "", "MEMORY_GIB": "", "DISK_GIB": "",
+        }
+
+    def test_it_asks_lima_nothing(self, mac):
+        _size_report(mac)
+        assert mac.calls("limactl") == []
+
+    def test_a_recorded_disk_is_the_smallest_it_offers(self, mac):
+        assert _create(mac, "--cpus", "3", "--memory", "6", "--disk", "120").returncode == 0
+        mac.calls_path.unlink()
+        report = _size_report(mac)
+        assert report["MIN_DISK_GIB"] == "120"
+        assert (report["CPUS"], report["MEMORY_GIB"], report["DISK_GIB"]) == ("3", "6", "120")
+        assert mac.calls("limactl") == []
+
+    def test_a_mac_it_cannot_read_gets_the_widest_bounds_and_the_templates_size(self, mac):
+        mac.set(sysctl_rc=1, df_rc=1)
+        report = _size_report(mac)
+        assert (report["HOST_CPUS"], report["HOST_MEMORY_GIB"], report["HOST_FREE_DISK_GIB"]) == ("", "", "")
+        assert (report["MAX_CPUS"], report["MAX_MEMORY_GIB"]) == ("99", "999")
+        assert (report["DEFAULT_CPUS"], report["DEFAULT_MEMORY_GIB"], report["DEFAULT_DISK_GIB"]) == ("4", "4", "40")
+
+    @pytest.mark.parametrize("args", [["--cpus", "4"], ["now"], [""]])
+    def test_it_takes_no_arguments(self, mac, args):
+        result = mac.run("size", *args)
+        assert result.returncode == 64, result.stdout + result.stderr
+        assert result.stdout == ""
+
+    def test_the_usage_names_size_and_set_size(self, mac):
+        usage = mac.run("--help").stdout
+        assert "istota-stack size " in usage
+        assert "istota-stack set-size [--cpus N] [--memory GIB] [--disk GIB]" in usage
+
+
+class TestSetSize:
+    """`set-size` changes a made VM's CPUs, memory and disk with `limactl
+    edit`, which Lima allows only on a stopped instance: a running VM is
+    stopped for it and started again, a stopped one is left stopped. A disk
+    grows but never shrinks."""
+
+    @pytest.fixture
+    def made(self, mac):
+        mac.set(ncpu=10, memory_gib=32, free_gib=400)
+        assert _create(mac).returncode == 0
+        assert "CPUS=5\n" in _state_file(mac) and "DISK=100\n" in _state_file(mac)
+        mac.calls_path.unlink()
+        return mac
+
+    def test_a_running_vm_is_stopped_resized_and_started(self, made):
+        # A unit that does not start the stack at boot, so the `up` is seen.
+        made.set(unit_enabled=False)
+        result = made.run("set-size", "--cpus", "8")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = made.calls("limactl")
+        down = calls.index(["shell", "--workdir", "/", "istota", "sudo", "istota-stack", "down"])
+        stop = calls.index(["stop", "istota"])
+        edit = calls.index(["edit", "--tty=false", "--cpus", "8", "istota"])
+        start = calls.index(["start", "--tty=false", "istota"])
+        up = calls.index(["shell", "--workdir", "/", "istota", "sudo", "istota-stack", "up"])
+        assert down < stop < edit < start < up
+        assert "CPUS=8\n" in _state_file(made) and "MEMORY=8\n" in _state_file(made)
+        assert made.state()["instance"]["status"] == "Running"
+        assert made.state()["vm"]["stack_up"] is True
+        assert "8 CPUs" in result.stdout.splitlines()[-1]
+
+    def test_only_what_changed_is_edited(self, made):
+        result = made.run("set-size", "--cpus", "5", "--memory", "12GiB", "--disk", "200")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert ["edit", "--tty=false", "--memory", "12", "--disk", "200", "istota"] in made.calls("limactl")
+        state = _state_file(made)
+        assert "CPUS=5\n" in state and "MEMORY=12\n" in state and "DISK=200\n" in state
+
+    def test_a_stopped_vm_is_edited_and_left_stopped(self, made):
+        made.set(instance={"name": "istota", "status": "Stopped"})
+        result = made.run("set-size", "--disk", "150")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert [c for c in made.calls("limactl") if c[:1] != ["list"]] == [
+            ["edit", "--tty=false", "--disk", "150", "istota"]]
+        assert "DISK=150\n" in _state_file(made)
+        assert made.state()["instance"]["status"] == "Stopped"
+
+    def test_a_failed_edit_starts_the_vm_again_and_records_nothing(self, made):
+        made.set(edit_rc=3)
+        result = made.run("set-size", "--cpus", "8")
+        assert result.returncode == 3, result.stdout + result.stderr
+        assert made.state()["instance"]["status"] == "Running"
+        assert "CPUS=5\n" in _state_file(made)
+        assert "set-size --cpus 8" in result.stderr
+        made.set(edit_rc=0)
+        assert made.run("set-size", "--cpus", "8").returncode == 0
+        assert "CPUS=8\n" in _state_file(made)
+
+    def test_an_unchanged_size_asks_lima_nothing(self, made):
+        result = made.run("set-size", "--cpus", "5", "--disk", "100")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert made.calls("limactl") == []
+        assert "already has 5 CPUs, 8 GiB of memory and a disk of 100 GiB" in result.stdout
+
+    def test_without_an_option_it_is_a_usage_error(self, made):
+        result = made.run("set-size")
+        assert result.returncode == 64, result.stdout + result.stderr
+        assert made.calls("limactl") == []
+
+    @pytest.mark.parametrize("args", [
+        ["--cpus"], ["--cpus", ""], ["--cpus", "08"], ["--memory", "lots"], ["--disk", "5"], ["--swap", "4"],
+    ])
+    def test_a_size_that_is_not_one_is_a_usage_error(self, made, args):
+        result = made.run("set-size", *args)
+        assert result.returncode == 64, result.stdout + result.stderr
+        assert made.calls("limactl") == []
+
+    @pytest.mark.parametrize("args", [["--cpus", "12"], ["--memory", "31"]])
+    def test_more_than_the_mac_has_is_refused_and_nothing_changes(self, made, args):
+        result = made.run("set-size", *args)
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "Nothing was changed" in result.stderr
+        assert made.calls("limactl") == []
+        assert "CPUS=5\n" in _state_file(made) and "MEMORY=8\n" in _state_file(made)
+
+    def test_a_smaller_disk_is_refused(self, made):
+        result = made.run("set-size", "--disk", "60")
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "Lima cannot shrink a disk: this VM's is 100 GiB. Nothing was changed." in result.stderr
+        assert made.calls("limactl") == []
+        assert "DISK=100\n" in _state_file(made)
+
+    def test_without_a_vm_it_says_to_create_one(self, mac):
+        result = mac.run("set-size", "--cpus", "4")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "istota-stack create" in result.stderr
+
+
+def _past(bound: str, end: str) -> str:
+    return str(int(bound) - 1 if end == "MIN" else int(bound) + 1)
+
+
+@pytest.mark.parametrize("axis", ["CPUS", "MEMORY_GIB", "DISK_GIB"])
+@pytest.mark.parametrize("end", ["MIN", "MAX"])
+def test_create_and_set_size_check_the_bounds_size_prints(mac, axis, end):
+    """One set of bounds: whatever `size` prints, `create` and `set-size`
+    each take the bound and refuse one past it, so neither path can carry a
+    bound of its own."""
+    mac.set(ncpu=10, memory_gib=32, free_gib=400)
+    flag = {"CPUS": "--cpus", "MEMORY_GIB": "--memory", "DISK_GIB": "--disk"}[axis]
+    bound = _size_report(mac)[f"{end}_{axis}"]
+    refused = _create(mac, "--no-setup", flag, _past(bound, end))
+    assert refused.returncode != 0, refused.stdout + refused.stderr
+    assert not any(c[:1] == ["create"] for c in mac.calls("limactl"))
+    taken = _create(mac, "--no-setup", flag, bound)
+    assert taken.returncode == 0, taken.stdout + taken.stderr
+    create = _limactl_create(mac)
+    assert create[create.index(flag) + 1] == bound
+
+    bound = _size_report(mac)[f"{end}_{axis}"]
+    before = _state_file(mac)
+    mac.calls_path.unlink()
+    refused = mac.run("set-size", flag, _past(bound, end))
+    assert refused.returncode != 0, refused.stdout + refused.stderr
+    assert not any(c[:1] == ["edit"] for c in mac.calls("limactl"))
+    assert _state_file(mac) == before
+    taken = mac.run("set-size", flag, bound)
+    assert taken.returncode == 0, taken.stdout + taken.stderr
+    assert f"{axis.removesuffix('_GIB')}={bound}\n" in _state_file(mac)
+
+
+def test_create_of_a_new_vm_may_take_a_smaller_disk_than_the_last(mac):
+    """Only a made VM's disk cannot shrink: `restore`, or a `create` after
+    `destroy`, makes a new one and takes any disk create takes."""
+    assert _create(mac, "--disk", "120").returncode == 0
+    mac.set(instance=None)
+    mac.calls_path.unlink()
+    result = _create(mac, "--disk", "60")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _size(_limactl_create(mac))[2] == "60"
 
 
 class TestTheDeployedTagIsKept:
