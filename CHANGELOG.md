@@ -16,10 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`istota-stack push-key create|import`** writes the private push signing key on any stack, including the Mac's local VM, without the management role: a new key, or a saved one read from stdin through the new `istota push import-key`. Both print the key ID, never the key. See docs/reference/cli.md, "Push notifications". (#948)
 - **Private iPhone push through a relay.** With `[push] delivery = "relay"` and a `relay_url`, an installation sends encrypted pushes through a push relay with a per-device send capability and needs no APNs key; removed devices are revoked at the relay through a durable queue, and `istota doctor` checks the relay. It needs `content = "private"` and the iPhone app 0.16.0 on iOS 17 or later. See docs/features/notifications.md.
 
+### Changed
+
+- In the iPhone app, Location settings now opens with the This device card, which shows whether this phone is tracking, ahead of the Overland and Carto settings.
+
 ### Fixed
 
 - `istota-stack start` on a Mac now refuses to start a stopped VM when something else holds its web port (exit 78, naming what holds it), as `create` already did for a new VM. Before, Lima started anyway and whatever held the port answered the web UI's address. A held 6080, 9223 or 32768, which Lima also forwards for the browser and nginx, gets a warning. (#969)
 - **A new user's first feeds poll no longer stays running on an install with no network.** A poll now stops when nothing answers, skips feeds on a host that did not answer and starts no fetch after three minutes, leaving the rest for the next poll, and a second poll no longer queues behind the first. See docs/features/feeds.md, "Polling and rate limits". (#971)
+- Tapping a suggestion in a search field on an iPhone picks it. In the wifi zone place search, and in the other fields that suggest values as you type, a tap closed the list and left the field empty. Picking with a mouse is unchanged.
 - The management role's `istota_push` task now handles relay delivery. With `delivery: relay` in `istota_push_config` it needs no APNs key or IDs, removes the APNs settings from `[push]` and deletes the APNs key it staged, so `istota doctor --only push.relay` no longer warns about them. Before, it required and wrote them on every run. See ansible/README.md, "iOS push deployment". (#967)
 - A personal question asked in a shared or group room, such as about your health, your money or what the bot knows about you, is now answered in your private chat without the bot asking first, and the room is told only that it answered you privately. Before, the bot sometimes did this and sometimes only told you to ask again in your private chat. Where the bot has no way to move the question, it tells you to ask in your private chat. (#966)
 - A group's Notebook card and the web file viewer no longer show HTML comments such as `<!-- … -->` as text in a markdown file. The note a new group's GROUP.md and a new USER.md start with showed on every preview; it is now hidden, as on other markdown viewers. Chat still shows a comment as it was typed. (#964)
