@@ -26,6 +26,15 @@
 #                               is restarted on it; a stopped one is started for the
 #                               change and stopped again. Safe to run again after a
 #                               failure; addresses for the old port stop working
+#   istota-stack size           what the VM may take and what it has, as KEY=VALUE
+#                               lines: this Mac's CPUs, memory and free disk, create's
+#                               defaults, the bounds create and set-size take, and the
+#                               recorded size, each empty when unknown
+#   istota-stack set-size [--cpus N] [--memory GIB] [--disk GIB]
+#                               change a made VM's size; what is not given stays. A
+#                               running VM is restarted for it, a stopped one takes it
+#                               at its next start. A disk can grow but never shrink.
+#                               Safe to run again after a failure
 #   istota-stack status         the VM, the deployed tag, the containers, the folder
 #   istota-stack open [--files] the web UI in the browser; --files the folder in Finder
 #   istota-stack shell          a shell in the VM
@@ -88,7 +97,7 @@
 #
 # Exit codes: a forwarded verb's own; 64 usage, 65 a release directory whose
 # signed manifest does not vouch for its disk, 69 no usable limactl (or zstd),
-# 78 a refusal of the folder, the port, the machine or the Keychain.
+# 78 a refusal of the folder, the port, the size, the machine or the Keychain.
 #
 # macOS ships bash 3.2: no associative arrays, and an empty array is expanded
 # with ${a[@]+"${a[@]}"}.
@@ -529,6 +538,65 @@ default_cpus() { if [ -n "$1" ]; then clamp "$(( $1 / 2 ))" 2 8; else echo 4; fi
 default_memory() { if [ -n "$1" ]; then clamp "$(( $1 / 4 ))" 4 16; else echo 4; fi; }
 default_disk() { if [ -n "$1" ]; then clamp "$(( $1 / 4 ))" 40 100; else echo 40; fi; }
 
+# The bounds on a VM's size, in CPUs and whole GiB, held once: create,
+# set-size and `size` all take them through size_limits and check_size.
+SIZE_MIN_CPUS=1 SIZE_MAX_CPUS=99 SIZE_MIN_MEMORY=1 SIZE_MAX_MEMORY=999 SIZE_MIN_DISK=10 SIZE_MAX_DISK=999
+SIZE_MAC_MEMORY_RESERVE=2
+
+# A whole number from $2 to $3, with no leading zero.
+size_in_range() {
+    case "$1" in ""|0*|*[!0-9]*) return 1 ;; esac
+    [ "${#1}" -le "${#3}" ] && [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]
+}
+
+# This Mac's facts and the bounds on the VM's size, into HOST_* and LIMIT_*.
+# $1 is a made VM's recorded disk, the floor since Lima cannot shrink one;
+# create passes none, since what it makes is a new disk.
+HOST_CPUS="" HOST_MEMORY_GIB="" HOST_FREE_DISK_GIB="" LIMIT_MAX_CPUS="" LIMIT_MAX_MEMORY="" LIMIT_MIN_DISK=""
+size_limits() {
+    HOST_CPUS="$(host_cpus)"
+    HOST_MEMORY_GIB="$(host_memory_gib)"
+    HOST_FREE_DISK_GIB="$(host_free_disk_gib)"
+    LIMIT_MAX_CPUS="$SIZE_MAX_CPUS"
+    if [ -n "$HOST_CPUS" ] && [ "$HOST_CPUS" -lt "$SIZE_MAX_CPUS" ]; then
+        LIMIT_MAX_CPUS="$HOST_CPUS"
+    fi
+    LIMIT_MAX_MEMORY="$SIZE_MAX_MEMORY"
+    if [ -n "$HOST_MEMORY_GIB" ] && [ "$(( HOST_MEMORY_GIB - SIZE_MAC_MEMORY_RESERVE ))" -lt "$SIZE_MAX_MEMORY" ]; then
+        LIMIT_MAX_MEMORY="$(( HOST_MEMORY_GIB - SIZE_MAC_MEMORY_RESERVE ))"
+    fi
+    LIMIT_MIN_DISK="$SIZE_MIN_DISK"
+    if size_in_range "${1:-}" "$SIZE_MIN_DISK" "$SIZE_MAX_DISK"; then
+        LIMIT_MIN_DISK="$1"
+    fi
+}
+
+# CPUs, memory and disk against size_limits' bounds, into CHECKED_* with a
+# GiB suffix stripped. An empty value is not checked: create takes a default
+# for it and set-size leaves it alone.
+CHECKED_CPUS="" CHECKED_MEMORY="" CHECKED_DISK=""
+check_size() {
+    CHECKED_CPUS="$1" CHECKED_MEMORY="${2%GiB}" CHECKED_DISK="${3%GiB}"
+    if [ -n "$CHECKED_CPUS" ] && ! size_in_range "$CHECKED_CPUS" "$SIZE_MIN_CPUS" "$SIZE_MAX_CPUS"; then
+        usage_error "--cpus takes a number of CPUs, not '${CHECKED_CPUS}'"
+    fi
+    if [ -n "$CHECKED_MEMORY" ] && ! size_in_range "$CHECKED_MEMORY" "$SIZE_MIN_MEMORY" "$SIZE_MAX_MEMORY"; then
+        usage_error "--memory takes whole GiB, not '${CHECKED_MEMORY}'"
+    fi
+    if [ -n "$CHECKED_DISK" ] && ! size_in_range "$CHECKED_DISK" "$SIZE_MIN_DISK" "$SIZE_MAX_DISK"; then
+        usage_error "--disk takes whole GiB from ${SIZE_MIN_DISK} to ${SIZE_MAX_DISK}, not '${CHECKED_DISK}'"
+    fi
+    if [ -n "$CHECKED_CPUS" ] && [ "$CHECKED_CPUS" -gt "$LIMIT_MAX_CPUS" ]; then
+        fail "$EX_CONFIG" "--cpus ${CHECKED_CPUS} is more than this Mac's ${HOST_CPUS} CPUs. Nothing was changed."
+    fi
+    if [ -n "$CHECKED_MEMORY" ] && [ "$CHECKED_MEMORY" -gt "$LIMIT_MAX_MEMORY" ]; then
+        fail "$EX_CONFIG" "--memory ${CHECKED_MEMORY} leaves macOS less than ${SIZE_MAC_MEMORY_RESERVE} GiB of this Mac's ${HOST_MEMORY_GIB} GiB. Nothing was changed."
+    fi
+    if [ -n "$CHECKED_DISK" ] && [ "$CHECKED_DISK" -lt "$LIMIT_MIN_DISK" ]; then
+        fail "$EX_CONFIG" "Lima cannot shrink a disk: this VM's is ${LIMIT_MIN_DISK} GiB. Nothing was changed."
+    fi
+}
+
 # One size on the terminal: Enter takes the default, anything else is asked
 # again until it is a whole number from low to high. Into ASKED.
 ASKED=""
@@ -538,10 +606,10 @@ ask_size() {
         answer=""
         read -r -p "[istota-stack] ${prompt} [${default}]: " answer || { ASKED="$default"; echo; return 0; }
         [ -n "$answer" ] || answer="$default"
-        case "$answer" in
-            *[!0-9]*|0*) ;;
-            *) if [ "$answer" -ge "$low" ] && [ "$answer" -le "$high" ]; then ASKED="$answer"; return 0; fi ;;
-        esac
+        if size_in_range "$answer" "$low" "$high"; then
+            ASKED="$answer"
+            return 0
+        fi
         echo "[istota-stack] a whole number from ${low} to ${high}, please." >&2
     done
 }
@@ -550,21 +618,22 @@ ask_size() {
 # a terminal with this Mac's defaults, else those defaults.
 size_new_vm() {
     local cpus memory free
-    cpus="$(host_cpus)"
-    memory="$(host_memory_gib)"
-    free="$(host_free_disk_gib)"
+    size_limits
+    cpus="$HOST_CPUS"
+    memory="$HOST_MEMORY_GIB"
+    free="$HOST_FREE_DISK_GIB"
     if [ -t 0 ] && { [ -z "$CREATE_CPUS" ] || [ -z "$CREATE_MEMORY" ] || [ -z "$CREATE_DISK" ]; }; then
         log "this Mac has ${cpus:-an unknown number of} CPUs, ${memory:-unknown} GiB of memory and ${free:-unknown} GiB of free disk; the VM takes:"
         if [ -z "$CREATE_CPUS" ]; then
-            ask_size "CPUs" "$(default_cpus "$cpus")" 1 "${cpus:-99}"
+            ask_size "CPUs" "$(default_cpus "$cpus")" "$SIZE_MIN_CPUS" "$LIMIT_MAX_CPUS"
             CREATE_CPUS="$ASKED"
         fi
         if [ -z "$CREATE_MEMORY" ]; then
-            ask_size "memory, GiB" "$(default_memory "$memory")" 1 "$(( ${memory:-1001} - 2 ))"
+            ask_size "memory, GiB" "$(default_memory "$memory")" "$SIZE_MIN_MEMORY" "$LIMIT_MAX_MEMORY"
             CREATE_MEMORY="$ASKED"
         fi
         if [ -z "$CREATE_DISK" ]; then
-            ask_size "disk, GiB" "$(default_disk "$free")" 10 999
+            ask_size "disk, GiB" "$(default_disk "$free")" "$LIMIT_MIN_DISK" "$SIZE_MAX_DISK"
             CREATE_DISK="$ASKED"
         fi
     fi
@@ -972,20 +1041,10 @@ create_settings() {
         usage_error "--port takes a port from 1024 to 65535, not '${CREATE_PORT}'"
     fi
     refuse_browser_port "$CREATE_PORT"
-    case "$CREATE_CPUS" in ""|[1-9]|[1-9][0-9]) ;; *) usage_error "--cpus takes a number of CPUs, not '${CREATE_CPUS}'" ;; esac
-    CREATE_MEMORY="${CREATE_MEMORY%GiB}"
-    case "$CREATE_MEMORY" in ""|[1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;; *) usage_error "--memory takes whole GiB, not '${CREATE_MEMORY}'" ;; esac
-    CREATE_DISK="${CREATE_DISK%GiB}"
-    case "$CREATE_DISK" in ""|[1-9][0-9]|[1-9][0-9][0-9]) ;; *) usage_error "--disk takes whole GiB from 10 to 999, not '${CREATE_DISK}'" ;; esac
-    local host
-    host="$(host_cpus)"
-    if [ -n "$CREATE_CPUS" ] && [ -n "$host" ] && [ "$CREATE_CPUS" -gt "$host" ]; then
-        fail "$EX_CONFIG" "--cpus ${CREATE_CPUS} is more than this Mac's ${host} CPUs. Nothing was changed."
-    fi
-    host="$(host_memory_gib)"
-    if [ -n "$CREATE_MEMORY" ] && [ -n "$host" ] && [ "$CREATE_MEMORY" -gt "$(( host - 2 ))" ]; then
-        fail "$EX_CONFIG" "--memory ${CREATE_MEMORY} leaves macOS less than 2 GiB of this Mac's ${host} GiB. Nothing was changed."
-    fi
+    # No disk floor: an existing VM keeps its size, and a new one has a new disk.
+    size_limits
+    check_size "$CREATE_CPUS" "$CREATE_MEMORY" "$CREATE_DISK"
+    CREATE_CPUS="$CHECKED_CPUS" CREATE_MEMORY="$CHECKED_MEMORY" CREATE_DISK="$CHECKED_DISK"
     case "$CREATE_KEY" in *$'\n'*) usage_error "the signing key is one line of an SSH public key" ;; esac
 
     if [ -n "$CREATE_APPLIANCE" ]; then
@@ -1512,6 +1571,141 @@ cmd_set_port() {
     fi
     trap - EXIT
     log "the web UI is http://localhost:${port}/istota; addresses and links for another port no longer reach it."
+}
+
+# --- size and set-size ---------------------------------------------------------
+
+# What a VM may take and what it has, as KEY=VALUE lines, every key always
+# there and empty when unknown. Read-only: no lock and no limactl call.
+cmd_size() {
+    [ "$#" -eq 0 ] || usage_error "size takes no arguments"
+    local disk
+    disk="$(state_get DISK)"
+    size_limits "$disk"
+    printf 'HOST_CPUS=%s\n' "$HOST_CPUS"
+    printf 'HOST_MEMORY_GIB=%s\n' "$HOST_MEMORY_GIB"
+    printf 'HOST_FREE_DISK_GIB=%s\n' "$HOST_FREE_DISK_GIB"
+    printf 'DEFAULT_CPUS=%s\n' "$(default_cpus "$HOST_CPUS")"
+    printf 'DEFAULT_MEMORY_GIB=%s\n' "$(default_memory "$HOST_MEMORY_GIB")"
+    printf 'DEFAULT_DISK_GIB=%s\n' "$(default_disk "$HOST_FREE_DISK_GIB")"
+    printf 'MIN_CPUS=%s\n' "$SIZE_MIN_CPUS"
+    printf 'MAX_CPUS=%s\n' "$LIMIT_MAX_CPUS"
+    printf 'MIN_MEMORY_GIB=%s\n' "$SIZE_MIN_MEMORY"
+    printf 'MAX_MEMORY_GIB=%s\n' "$LIMIT_MAX_MEMORY"
+    printf 'MIN_DISK_GIB=%s\n' "$LIMIT_MIN_DISK"
+    printf 'MAX_DISK_GIB=%s\n' "$SIZE_MAX_DISK"
+    printf 'CPUS=%s\n' "$(state_get CPUS)"
+    printf 'MEMORY_GIB=%s\n' "$(state_get MEMORY)"
+    printf 'DISK_GIB=%s\n' "$disk"
+}
+
+SET_SIZE_ARGS="" SET_SIZE_STOPPED="" SET_SIZE_WAS_UP="" SET_SIZE_RECORDED=""
+
+# A failure once the VM began to stop for the edit: it is started again and
+# the stack put back as it was, in a subshell since run_step exits. Until the
+# state records the new size the way on is the same command; after that a
+# re-run changes nothing, so only what did not come back is named.
+set_size_exit() {
+    local rc="$1" back=1
+    trap - EXIT
+    if [ -n "$SET_SIZE_STOPPED" ]; then
+        if [ "$(instance_status)" != Running ] && ! limactl start --tty=false "$INSTANCE"; then
+            back=""
+            log "WARNING: the VM did not start again; \`istota-stack start\` starts it."
+        elif ! ( stack_as_before "$SET_SIZE_WAS_UP" ); then
+            back=""
+            if [ -n "$SET_SIZE_WAS_UP" ]; then
+                log "WARNING: the stack did not start again; \`istota-stack up\` starts it."
+            else
+                log "WARNING: the stack did not stop again; \`istota-stack down\` stops it."
+            fi
+        fi
+    fi
+    if [ "$rc" -ne 0 ] && [ -z "$SET_SIZE_RECORDED" ]; then
+        if [ -n "$back" ]; then
+            echo "[istota-stack] the VM was not resized all the way; \`istota-stack set-size ${SET_SIZE_ARGS}\` again goes on from where this stopped." >&2
+        else
+            echo "[istota-stack] the VM was not resized all the way; once that is done, \`istota-stack set-size ${SET_SIZE_ARGS}\` again goes on from where this stopped." >&2
+        fi
+    elif [ "$rc" -ne 0 ] && [ -n "$back" ]; then
+        echo "[istota-stack] ${INSTANCE} was resized, and the VM and the stack are back as they were." >&2
+    elif [ "$rc" -ne 0 ]; then
+        echo "[istota-stack] ${INSTANCE} was resized; \`istota-stack set-size\` again changes nothing." >&2
+    fi
+    exit "$rc"
+}
+
+# "N CPUs, M GiB of memory and a disk of D GiB", for what is known.
+size_words() {
+    printf '%s CPUs, %s GiB of memory and a disk of %s GiB' "${1:-an unrecorded number of}" "${2:-unrecorded}" \
+        "${3:-unrecorded}"
+}
+
+cmd_set_size() {
+    [ "$#" -gt 0 ] || usage_error "set-size takes --cpus N, --memory GIB or --disk GIB"
+    SET_SIZE_ARGS="$*"
+    local cpus="" memory="" disk=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --cpus|--memory|--disk)
+                { [ "$#" -ge 2 ] && [ -n "$2" ]; } || usage_error "$1 needs a value"
+                case "$1" in
+                    --cpus) cpus="$2" ;;
+                    --memory) memory="$2" ;;
+                    --disk) disk="$2" ;;
+                esac
+                shift 2 ;;
+            *) usage_error "set-size takes no '$1'" ;;
+        esac
+    done
+    local old_cpus old_memory old_disk
+    old_cpus="$(state_get CPUS)"
+    old_memory="$(state_get MEMORY)"
+    old_disk="$(state_get DISK)"
+    [ -n "$cpus" ] || cpus="$old_cpus"
+    [ -n "$memory" ] || memory="$old_memory"
+    [ -n "$disk" ] || disk="$old_disk"
+    size_limits "$old_disk"
+    check_size "$cpus" "$memory" "$disk"
+    cpus="$CHECKED_CPUS" memory="$CHECKED_MEMORY" disk="$CHECKED_DISK"
+
+    # Only what changed goes to Lima, and into the state after it.
+    local flags=() changed=()
+    if [ "$cpus" != "$old_cpus" ]; then flags+=(--cpus "$cpus"); changed+=("CPUS=${cpus}"); fi
+    if [ "$memory" != "$old_memory" ]; then flags+=(--memory "$memory"); changed+=("MEMORY=${memory}"); fi
+    if [ "$disk" != "$old_disk" ]; then flags+=(--disk "$disk"); changed+=("DISK=${disk}"); fi
+    if [ "${#changed[@]}" -eq 0 ]; then
+        log "${INSTANCE} already has $(size_words "$cpus" "$memory" "$disk")."
+        return 0
+    fi
+
+    local status
+    status="$(instance_status)"
+    [ -n "$status" ] || fail 1 "there is no Lima instance ${INSTANCE}: \`istota-stack create\` makes one."
+    trap 'set_size_exit $?' EXIT
+    if [ "$status" = Running ]; then
+        if stack_running; then SET_SIZE_WAS_UP=1; fi
+        # Before the stop: it takes the stack down first, and a stop that
+        # fails after that leaves a running VM with the stack down.
+        SET_SIZE_STOPPED=1
+        stop_vm Running
+    fi
+    # Lima edits only a stopped instance; it grows a raw disk at the next
+    # start, and the guest's cloud-init grows / into it.
+    run_step "resize the VM" "limactl edit ${flags[*]} ${INSTANCE}" \
+        limactl edit --tty=false "${flags[@]}" "$INSTANCE"
+    state_set "${changed[@]}"
+    SET_SIZE_RECORDED=1
+    if [ "$status" = Running ]; then
+        run_step "start the VM" "limactl start ${INSTANCE}" limactl start --tty=false "$INSTANCE"
+        stack_as_before "$SET_SIZE_WAS_UP"
+        SET_SIZE_STOPPED=""
+        trap - EXIT
+        log "${INSTANCE} now has $(size_words "$cpus" "$memory" "$disk")."
+    else
+        trap - EXIT
+        log "${INSTANCE} has $(size_words "$cpus" "$memory" "$disk") from its next start."
+    fi
 }
 
 cmd_status() {
@@ -2221,6 +2415,8 @@ main() {
         start) cmd_start "$@" ;;
         stop) cmd_stop "$@" ;;
         set-port) cmd_set_port "$@" ;;
+        size) cmd_size "$@" ;;
+        set-size) cmd_set_size "$@" ;;
         status) cmd_status "$@" ;;
         open) cmd_open "$@" ;;
         shell) [ "$#" -eq 0 ] || usage_error; exec limactl shell "$INSTANCE" ;;

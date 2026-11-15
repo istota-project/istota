@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`istota-stack set-size` on a Mac** changes an existing VM's CPUs, memory and disk, which until now were fixed when the VM was made. A running VM is restarted for it, a stopped one takes the new size at its next start, and a disk can grow but never shrink. `istota-stack size` prints what the Mac has, the defaults and the size the VM has. See docs/getting-started/local-install.md, "Changing the VM's size".
+
 ### Fixed
 
 - **Invoices issue again on a Nextcloud workspace.** Since 0.47.0 every invoice published to the rclone mount failed after the PDF was already in place, and that PDF then blocked every retry. A PDF left at the next invoice's name is now named in the error as one with no invoice record. A retried task also keeps each failed attempt's error in its task log.

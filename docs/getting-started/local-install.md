@@ -18,7 +18,7 @@ login Keychain: istota.local / secret-key-istota (a copy of the master key)
 - A Mac with Apple silicon. An Intel Mac is refused.
 - Lima 2.0 or later: `brew install lima`. The installer does not install Homebrew or Lima for you.
 - A model backend: a Claude Code OAuth token, an API key, or an OpenAI-compatible server through the [native brain](../configuration/native-brain.md). A model server on the Mac itself needs one more step, [below](#reaching-a-service-on-your-mac).
-- Room for the VM. By default it takes half the Mac's CPUs (2 to 8), a quarter of its memory (4 to 16 GiB) and a disk of up to a quarter of the free space (40 to 100 GiB). The disk grows as it is used, so its size is a ceiling. On a terminal, `create` shows these defaults and asks for each one; Enter takes the default. The size is chosen once, when the VM is made.
+- Room for the VM. By default it takes half the Mac's CPUs (2 to 8), a quarter of its memory (4 to 16 GiB) and a disk of up to a quarter of the free space (40 to 100 GiB). The disk grows as it is used, so its size is a ceiling. On a terminal, `create` shows these defaults and asks for each one; Enter takes the default. `--cpus`, `--memory` and `--disk` give the size without asking, and `istota-stack set-size` changes it later ([changing the VM's size](#changing-the-vms-size)).
 
 ## Install
 
@@ -147,6 +147,18 @@ istota-stack set-port 8081     # the web UI moves to http://localhost:8081/istot
 `set-port N` moves an existing install to port `N`, from 1024 to 65535. Before it changes anything, it refuses a port another program listens on and 6080 and 9223, which the browser uses inside the VM (exit 78), and anything that is not a port (exit 64). Then it writes the port into the VM's `host.env`, runs the setup again with `--yes --force` and `localhost:N` as the address (which keeps every other answer and rewrites the address in `config.toml` and the port nginx publishes on), moves Lima's forward, which Lima allows only on a stopped VM, and records the port for `open` and `status`. A running VM is stopped and started again for it, and the stack is left running or stopped as it was. A stopped VM is started for the change, the stack taken down as soon as the VM has booted, and the VM stopped again, which takes a minute or two. If a step fails, the VM is put back running or stopped as it was; run the same command again, since each step checks what is already done.
 
 Bookmarks, enrolment and setup links for the old port stop working. Passkeys are tied to `localhost`, not the port, so they keep working. An install that signs in with Nextcloud has its OAuth redirect address in Nextcloud's OAuth client, which `set-port` does not change; update it in Nextcloud's admin settings.
+
+### Changing the VM's size
+
+```bash
+istota-stack size                          # this Mac, the defaults, the bounds and the VM's size
+istota-stack set-size --memory 12          # 12 GiB of memory; CPUs and disk stay
+istota-stack set-size --cpus 6 --disk 200  # 6 CPUs and a disk of up to 200 GiB
+```
+
+`size` prints the Mac's CPUs, memory and free disk, the size `create` would pick, the smallest and largest values `create` and `set-size` take, and the size the VM was made with, one `KEY=VALUE` line each. It changes nothing.
+
+`set-size` changes the size of an existing VM. What you do not give stays as it is. Before it changes anything, it refuses more CPUs than the Mac has, memory that leaves macOS under 2 GiB, and a disk smaller than the VM's (exit 78): Lima can grow a disk but not shrink one. A running VM is stopped, resized and started again, which takes about a minute, and the stack is left running or stopped as it was. A stopped VM is resized and left stopped; it takes the new size when it next starts. A larger disk is grown at that start, and the VM grows its filesystem into it. If a step fails, a VM that was running is started again; run the same command again to finish.
 
 ### Reaching a service on your Mac
 
