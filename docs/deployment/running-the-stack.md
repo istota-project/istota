@@ -408,7 +408,7 @@ In full Nextcloud integration and on the local VM the workspace is not in `/data
 
 ## Local VM
 
-On a Mac the stack runs in a Lima VM that the Mac's own `istota-stack` creates and controls; the [local install](../getting-started/local-install.md) page covers installing and running it. Inside the VM it is this stack, with host settings that `create` writes into `host.env`:
+On a Mac the stack runs in a Lima VM that the Mac's own `istota-stack` creates and controls; the [local install](../getting-started/local-install.md) page covers installing and running it from the command line, and the [Mac app](../getting-started/mac-app.md) drives the same CLI from a window. Inside the VM it is this stack, with host settings that `create` writes into `host.env`:
 
 | `host.env` | Value | Effect |
 |---|---|---|

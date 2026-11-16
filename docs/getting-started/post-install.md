@@ -1,6 +1,6 @@
 # Post-install
 
-After the [quickstart](quickstart-server.md), complete these steps on the machine, as root. `istota` there runs the CLI inside the daemon container. On the [local VM](local-install.md), run them on the Mac as yourself: the Mac's `istota-stack` and `istota` forward each command into the VM.
+After the [quickstart](quickstart-server.md), complete these steps on the machine, as root. `istota` there runs the CLI inside the daemon container. On the [local VM](local-install.md), run them on the Mac as yourself: the Mac's `istota-stack` and `istota` forward each command into the VM. With the [Mac app](mac-app.md), install those two first in its Settings, under Command-Line Tools.
 
 :::tip[User profiles]
 Profile fields (display_name, timezone, email addresses, log/alerts channels, worker overrides, trusted email senders, disabled skills) live in the `user_profiles` SQLite table. They're auto-seeded the first time a user logs into the web UI, or you can pre-seed them with the CLI (the optional [Ansible management role](../deployment/ansible.md), where an estate uses it, runs the same command):

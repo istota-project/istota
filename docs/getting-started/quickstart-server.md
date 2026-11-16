@@ -88,7 +88,7 @@ The optional containers (`browser`, `whatsapp-baileys`, `signaling`) are Compose
 
 ## On a Mac
 
-On an Apple silicon Mac the same stack runs in a Lima VM dedicated to it, with a folder in your home (`~/Istota`) as the workspace. `install.sh --local` installs a Mac-side `istota-stack` that creates the VM, runs this page's sequence inside it and forwards every command above to it:
+On an Apple silicon Mac the same stack runs in a Lima VM dedicated to it, with a folder in your home (`~/Istota`) as the workspace. The [Mac app](mac-app.md) sets it up with nothing else installed. From the command line, `install.sh --local` installs a Mac-side `istota-stack` that creates the VM, runs this page's sequence inside it and forwards every command above to it:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --local

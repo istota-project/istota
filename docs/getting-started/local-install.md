@@ -1,5 +1,7 @@
 # Local install: a Lima VM on your Mac
 
+Most people should use the [Mac app](mac-app.md) instead: download it, open it, and it sets up the same kind of VM with nothing else to install. This page covers the command-line install, for running the VM from Terminal, choosing the release tag or signing key yourself, or developing on a checkout.
+
 The local install runs Istota on your own Apple silicon Mac. It is the same stack a server runs: the same image, compose file, `provision.sh`, `istota-stack` and bubblewrap sandbox, inside a [Lima](https://lima-vm.io/) VM that is dedicated to it. The one thing a server does not have is a folder in your home, `~/Istota`, which is the bot's workspace. The VM mounts it, the bot writes its files there, and you open them with any Mac app. Time Machine backs it up, and the database snapshots land in it too.
 
 A command on the Mac, also called `istota-stack`, creates and controls the VM. It handles the VM's own life (create, start, stop, restore) and passes every other verb to the `istota-stack` inside the VM unchanged, so the [server documentation](../deployment/running-the-stack.md) applies as written.

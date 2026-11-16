@@ -20,7 +20,7 @@ Istota has been in active development since February 2026. The application, task
 
 ## Install
 
-Choose a fresh Debian 13 machine dedicated to Istota, or an Apple silicon Mac with Lima. Both run the same container stack and Linux task sandbox. The machine must be dedicated because the container gets the access bubblewrap needs to build the sandbox, which is only acceptable with nothing else on the host. Have a model backend ready: an Anthropic or OpenRouter API key, or a Claude subscription token. Nextcloud is optional.
+Choose a fresh Debian 13 machine dedicated to Istota, or an Apple silicon Mac, where Istota runs in a Linux VM of its own. Both run the same container stack and Linux task sandbox. The machine must be dedicated because the container gets the access bubblewrap needs to build the sandbox, which is only acceptable with nothing else on the host. Have a model backend ready: an Anthropic or OpenRouter API key, or a Claude subscription token. Nextcloud is optional.
 
 ### Server
 
@@ -38,7 +38,11 @@ The installer verifies a signed release tag, provisions the machine, builds the 
 
 ### Local on a Mac
 
-Requires Apple silicon and Lima 2.0 or later. With Homebrew installed:
+Requires a Mac with Apple silicon (M1 or later); Intel Macs are not supported. The Mac app needs nothing else installed: download `Istota-<version>.dmg` (the app's own version) from `https://stacks.cynium.com/istota-mac/<version>/`, drag it into Applications and open it. It needs macOS 14 or later and 25 GB free. It carries the VM's disk, the images and a signed release, walks you through setup in its own window, and updates from the menu bar.
+
+[The Mac app](docs/getting-started/mac-app.md)
+
+To run the same VM from the command line instead, you need Lima 2.0 or later. With Homebrew installed:
 
 ```bash
 brew install lima
@@ -47,11 +51,11 @@ less install.sh
 bash install.sh --local
 ```
 
-Run this as your normal user. It creates a dedicated Debian VM, runs setup in the terminal, and opens a web link to set your password. The web app is available at `http://localhost:8080/istota/`. Your workspace is `~/Istota`, accessible from Finder; databases stay inside the VM, with snapshots written to the workspace. A copy of the credential master key is stored in your login Keychain.
+Run this as your normal user. It creates a dedicated Debian VM and opens setup in your browser (`--terminal-setup` runs it in the terminal). The web app is available at `http://localhost:8080/istota/`. Your workspace is `~/Istota`, accessible from Finder; databases stay inside the VM, with snapshots written to the workspace. A copy of the credential master key is stored in your login Keychain.
 
 [Local install, requirements, and recovery](docs/getting-started/local-install.md)
 
-The older standalone single-user install was removed. `istota-stack import-standalone` moves an existing one into the local VM; see [moving from the standalone install](docs/getting-started/local-install.md#moving-from-the-standalone-install).
+The older standalone single-user install was removed. The Mac app offers to import one at first run, and `istota-stack import-standalone` moves an existing one into the local VM; see [moving from the standalone install](docs/getting-started/local-install.md#moving-from-the-standalone-install).
 
 ### After setup
 
