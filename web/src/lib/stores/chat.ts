@@ -37,7 +37,9 @@ import {
   editOutboundDraft,
   type OutboundDraft,
   markAllRoomsRead,
+  markMessagesSeen,
   markRoomRead,
+  type ReadSeenResponse,
   sendChatMessage,
   setChatMessageStarred,
   updateChatRoom,
@@ -373,7 +375,21 @@ export interface ChatSession {
     cursor?: { ts: string; id: number },
   ) => Promise<boolean>;
   scrollToCid: (cid: number) => void;
-  scrollTarget: Writable<{ cid: number; nonce: number } | null>;
+  // `block: 'start'` asks for the row at the top of the scroller with no
+  // highlight: the Unread pane opening at its oldest row (read on view).
+  // Absent means the jump's centred, highlighted scroll.
+  scrollTarget: Writable<{ cid: number; nonce: number; block?: 'start' } | null>;
+  // Read on view: whether rows seen in an aggregate pane move read cursors
+  // (`chat_read_on_view` from `/chat/config`, refreshed where the external-turn
+  // setting is). A pane keeps the value it opened with.
+  readOnView: Readable<boolean>;
+  // A row of the open aggregate pane has been on screen long enough to count
+  // as seen. No-op outside a pane opened with `readOnView`, and for a row
+  // that is not unread.
+  noteSeen: (cid: number) => void;
+  // Post the pending seen ids now. `keepalive` is for a page going away: the
+  // request may outlive it, and it is sent even while another is in flight.
+  flushSeen: (opts?: { keepalive?: boolean }) => void;
   newRoom: (name: string, options?: { incognito?: boolean }) => Promise<void>;
   renameRoom: (id: number, name: string) => Promise<void>;
   updateRoomSettings: (id: number, patch: RoomPatch) => Promise<void>;
@@ -592,6 +608,9 @@ function createSession(): ChatSession {
   // answered before the first transcript paints, and the safe direction there
   // is to show less of a stranger's mail rather than more.
   const externalTurnDisplay = writable<ExternalTurnDisplay>('collapsed');
+  // Off until a config says otherwise: a backend that does not send the key
+  // has no read-seen endpoint to post to.
+  const readOnView = writable(false);
 
   // ---- Client-only rows -----------------------------------------------------
   //
@@ -1092,6 +1111,7 @@ function createSession(): ChatSession {
     // list it refetches.
     activeRoomId.set(null);
     externalTurnDisplay.set(normalizeExternalTurnDisplay(live.external_turn_display));
+    readOnView.set(live.chat_read_on_view === true);
     return true;
   }
 
@@ -1662,6 +1682,9 @@ function createSession(): ChatSession {
   // Halt the active stream and drop the queue without advancing — for room
   // switches and unmount. Remounting/reselecting resumes from history.
   function stopActive() {
+    // Every way out of an aggregate pane comes through here (selectView,
+    // selectRoom, teardown), so this is where the pane's seen ids go out.
+    leaveSeenPane();
     if (activeStream) {
       activeStream.stop();
       activeStream = null;
@@ -1707,6 +1730,118 @@ function createSession(): ChatSession {
       .catch(() => {
         /* transient; next open/poll retries */
       });
+  }
+
+  // ---- Read on view (web-chat-read-on-view spec) ----
+  //
+  // The server moves a room's cursor only across the unbroken run of seen
+  // unread rows just past it, so an id seen now may count only once an older
+  // row in its room is seen too. Every seen id therefore stays here, with its
+  // room, until a response's cursor passes it, and each flush sends the whole
+  // set. The server keeps no seen state of its own.
+  const SEEN_FLUSH_DEBOUNCE_MS = 1000;
+  const SEEN_MAX_IDS = 500;
+  const UNREAD_PAGE_LIMIT = 200;
+  const pendingSeen = new Map<number, string>();
+  // The preference as it stood when the open pane was entered.
+  let paneReadsOnView = false;
+  let seenTimer: ReturnType<typeof setTimeout> | null = null;
+  let seenInFlight = false;
+  let seenFlushAgain = false;
+
+  function noteSeen(cid: number) {
+    if (!paneReadsOnView || get(view) === 'room') return;
+    const m = get(messages).find((x) => x.cid === cid);
+    if (!m || m.unread !== true || typeof m.msgId !== 'number' || !m.roomToken) return;
+    if (pendingSeen.has(m.msgId)) return;
+    pendingSeen.set(m.msgId, m.roomToken);
+    if (seenTimer) clearTimeout(seenTimer);
+    seenTimer = setTimeout(() => {
+      seenTimer = null;
+      flushSeen();
+    }, SEEN_FLUSH_DEBOUNCE_MS);
+  }
+
+  // The lowest ids, because a lower id is what unblocks a room.
+  function seenBatch(): number[] {
+    return [...pendingSeen.keys()].sort((a, b) => a - b).slice(0, SEEN_MAX_IDS);
+  }
+
+  function flushSeen(opts: { keepalive?: boolean } = {}) {
+    if (seenTimer) {
+      clearTimeout(seenTimer);
+      seenTimer = null;
+    }
+    if (pendingSeen.size === 0) return;
+    // A keepalive flush is the last chance before the page goes, so it does
+    // not wait behind the one in flight. The server's write is forward-only,
+    // so the overlap cannot move a cursor back.
+    if (opts.keepalive) {
+      markMessagesSeen(seenBatch(), { keepalive: true })
+        .then(applySeenResponse)
+        .catch(() => {});
+      return;
+    }
+    if (seenInFlight) {
+      seenFlushAgain = true;
+      return;
+    }
+    seenInFlight = true;
+    markMessagesSeen(seenBatch())
+      .then(applySeenResponse)
+      .catch(() => {
+        // Background bookkeeping, like markActiveRead: the ids stay pending
+        // and go with the next flush.
+      })
+      .finally(() => {
+        seenInFlight = false;
+        if (!seenFlushAgain) return;
+        seenFlushAgain = false;
+        flushSeen();
+      });
+  }
+
+  // Badges come from the response only, never from a local decrement, so the
+  // next refreshRooms agrees with them. The response is true wherever it lands:
+  // a cursor that passed a row means the row is read in any pane.
+  function applySeenResponse(resp: ReadSeenResponse) {
+    const cursors = new Map<string, number>();
+    let advanced = false;
+    const heldRoom = get(view) === 'room' ? get(activeRoomId) : null;
+    for (const r of resp?.rooms ?? []) {
+      cursors.set(r.token, r.last_read_message_id);
+      if (r.advanced) advanced = true;
+      const target = get(rooms).find((x) => x.token === r.token);
+      // The open room's badge is held at 0 while it is on screen.
+      if (target && target.id !== heldRoom) setRoomUnread(target.id, r.unread_count);
+    }
+    for (const [id, token] of pendingSeen) {
+      const cursor = cursors.get(token);
+      if (cursor !== undefined && id <= cursor) pendingSeen.delete(id);
+    }
+    messages.update((arr) => {
+      let changed = false;
+      const next = arr.map((m) => {
+        if (!m.unread || !m.roomToken || typeof m.msgId !== 'number') return m;
+        const cursor = cursors.get(m.roomToken);
+        if (cursor === undefined || m.msgId > cursor) return m;
+        changed = true;
+        return { ...m, unread: false };
+      });
+      return changed ? next : arr;
+    });
+    if (advanced) {
+      invalidateNavUnreadCounts();
+      invalidateNotificationCounts();
+    }
+  }
+
+  // Ids that could not advance go with the pane: an older unseen row in their
+  // room still blocks them, and a later visit starts from the server's cursor.
+  function leaveSeenPane() {
+    flushSeen({ keepalive: true });
+    pendingSeen.clear();
+    seenFlushAgain = false;
   }
 
   // Re-fetch the room list and merge fresh unread counts (and any name/origin
@@ -2205,7 +2340,11 @@ function createSession(): ChatSession {
     // The All view carries no queued rows (`carryClientOnlyRows` drops them in
     // the `token === null` branch) but it does carry stranded failed ones, and
     // the tail rule is the same for those.
-    messages.update((arr) => appendAboveClientOnly(arr, buildHistoryMessage(row)));
+    // Stream frames carry no `unread`. A row that arrived after the pane
+    // loaded is past the cursor unless another device read it since, and then
+    // the next read-seen response clears the marker.
+    const built = { ...buildHistoryMessage(row), unread: row.role !== 'user' };
+    messages.update((arr) => appendAboveClientOnly(arr, built));
   }
 
   function applyRoomEvent(row: ChatRoomEvent, opts: { countUnread?: boolean } = {}) {
@@ -2892,6 +3031,7 @@ function createSession(): ChatSession {
       starred: typeof m.msg_id === 'number' ? !!m.starred : undefined,
       roomToken: m.room_token,
       roomName: m.room_name,
+      unread: typeof m.unread === 'boolean' ? m.unread : undefined,
       // Server-resolved author for a user row the viewer did not write, and —
       // when that writer holds an account here — the id their picture is
       // served under. Folded to `undefined` the same way, since an empty id
@@ -3160,9 +3300,17 @@ function createSession(): ChatSession {
 
   // Load (or reload) the first page of an aggregate view into the transcript.
   // Shared by selectView and the mark-all-read reload of an open Unread view.
-  async function loadViewPage(v: ChatView) {
+  // `entry` is a step into the pane, as against a reload of the open one: it
+  // takes the read-on-view preference for the pane and may move the scroll.
+  async function loadViewPage(v: ChatView, opts: { entry?: boolean } = {}) {
+    if (opts.entry) paneReadsOnView = get(readOnView);
+    // Unread is read top down with read on view, and a room clears only once
+    // its oldest unread row is seen, so it loads as much as the endpoint gives.
+    const readsTopDown = v === 'unread' && paneReadsOnView;
     try {
-      const hist = await getChatMessagesView(v);
+      const hist = await (readsTopDown
+        ? getChatMessagesView(v, { limit: UNREAD_PAGE_LIMIT })
+        : getChatMessagesView(v));
       // Switched away mid-fetch — drop the page.
       if (get(view) !== v) return;
       const prev = get(messages);
@@ -3177,6 +3325,7 @@ function createSession(): ChatSession {
       hasMore.set(!!hist.has_more);
       olderPages.invalidate();
       loadingOlder.set(false);
+      if (opts.entry && readsTopDown && next.length) scrollToCid(next[0].cid, 'start');
     } catch {
       // The aggregate panes are deliberately not cached — they are a cross-room
       // query the client cannot reproduce from per-room tails — so offline they
@@ -3204,7 +3353,7 @@ function createSession(): ChatSession {
     saveSetting('chat.view', v);
     activeRoomId.set(null);
     messages.set([]);
-    await loadViewPage(v);
+    await loadViewPage(v, { entry: true });
   }
 
   // Star/unstar a transcript row optimistically; revert on failure. In the
@@ -3485,6 +3634,7 @@ function createSession(): ChatSession {
       // edit puts in it, and an unrecognized value must read as the default
       // instead of leaving the transcript with no branch to take.
       externalTurnDisplay.set(normalizeExternalTurnDisplay(cfg?.external_turn_display));
+      readOnView.set(cfg?.chat_read_on_view === true);
       // Same shape as the transcript below: ask, paint whatever is stored
       // while the answer is on its way, then reconcile. The room list is what
       // the sidebar renders *and* what the transcript cache is read through —
@@ -3552,7 +3702,7 @@ function createSession(): ChatSession {
       if (aggregate) {
         view.set(aggregate);
         activeRoomId.set(null);
-        await loadViewPage(aggregate);
+        await loadViewPage(aggregate, { entry: true });
         if (superseded()) return;
       } else {
         view.set('room');
@@ -3881,10 +4031,10 @@ function createSession(): ChatSession {
   // the room, page history to find the turn); the DOM scroll + highlight is the
   // route's job, driven by the `scrollTarget` signal. The nonce lets a repeated
   // jump to the same cid re-fire the effect.
-  const scrollTarget = writable<{ cid: number; nonce: number } | null>(null);
+  const scrollTarget = writable<{ cid: number; nonce: number; block?: 'start' } | null>(null);
   let scrollNonce = 0;
-  function scrollToCid(cid: number) {
-    scrollTarget.set({ cid, nonce: ++scrollNonce });
+  function scrollToCid(cid: number, block?: 'start') {
+    scrollTarget.set(block ? { cid, nonce: ++scrollNonce, block } : { cid, nonce: ++scrollNonce });
   }
 
   // The cid of the (assistant, else any) transcript row for a task, or null.
@@ -5718,6 +5868,9 @@ function createSession(): ChatSession {
     answerDraft,
     editDraft,
     externalTurnDisplay,
+    readOnView: { subscribe: readOnView.subscribe },
+    noteSeen,
+    flushSeen: (opts?: { keepalive?: boolean }) => flushSeen(opts),
     teardown,
   };
 }

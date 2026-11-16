@@ -3930,6 +3930,9 @@ export interface ChatConfig {
   user_id?: string;
   /** How an external-origin turn's body renders. */
   external_turn_display?: ExternalTurnDisplay;
+  /** Whether rows seen in All, Unread and Starred mark their rooms read.
+   * Absent on a backend without the read-seen endpoint. */
+  chat_read_on_view?: boolean;
   /** The caller's own raw setting, where `''` means "follow the operator". */
   outbound_approval?: string;
   /**
@@ -3998,6 +4001,9 @@ export interface ChatHistoryMessage {
   // Aggregate-view rows (GET /chat/messages) additionally carry their room.
   room_token?: string;
   room_name?: string;
+  // Aggregate-view rows: past the viewer's web read cursor and not their own
+  // turn. Absent on room-event stream frames and room history.
+  unread?: boolean;
   // Display names of files a user turn carried, so the attachment chips
   // survive a transcript rebuild (the composer's in-memory names don't).
   attachments?: string[];
@@ -4819,6 +4825,33 @@ export function markAllRoomsRead(): Promise<{ ok: boolean; updated: number }> {
   return apiFetch<{ ok: boolean; updated: number }>('/chat/rooms/read-all', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+/** One room a read-seen request touched, whether or not its cursor moved. */
+export interface ReadSeenRoom {
+  token: string;
+  last_read_message_id: number;
+  unread_count: number;
+  advanced: boolean;
+}
+
+export interface ReadSeenResponse {
+  rooms: ReadSeenRoom[];
+}
+
+/** Report message ids seen in the aggregate panes. Each room's cursor moves
+ * across the unbroken run of seen unread rows past it; at most 500 ids.
+ * `keepalive` lets the request outlive a page that is going away. */
+export function markMessagesSeen(
+  seen: number[],
+  opts: { keepalive?: boolean } = {},
+): Promise<ReadSeenResponse> {
+  return apiFetch<ReadSeenResponse>('/chat/read-seen', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ seen }),
+    ...(opts.keepalive ? { keepalive: true } : {}),
   });
 }
 
