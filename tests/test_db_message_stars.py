@@ -207,6 +207,45 @@ class TestListMessagesAcrossRooms:
         db.set_room_archived(conn, r2.token, True)
         assert db.count_starred_messages_by_room(conn, "alice") == {}
 
+    def test_unread_flag_in_all_view(self, conn):
+        r1, r2, rb, ids = self._seed(conn)
+        db.set_room_read_state(conn, r1.token, "web", ids["a1"], "alice")
+        rows = db.list_messages_across_rooms(conn, "alice")
+        flags = {r["msg_id"]: bool(r["unread"]) for r in rows}
+        # Room one: read through a1, so only s1 is unread. Room two has no
+        # cursor row: its assistant row is unread, its user turn never is.
+        assert flags == {
+            ids["u1"]: False, ids["a1"]: False, ids["s1"]: True,
+            ids["u2"]: False, ids["a2"]: True,
+        }
+
+    def test_unread_flag_in_starred_view(self, conn):
+        r1, r2, rb, ids = self._seed(conn)
+        db.set_room_read_state(conn, r1.token, "web", ids["a1"], "alice")
+        for key in ("a1", "s1", "u2", "a2"):
+            db.set_message_starred(conn, ids[key], "alice", True)
+        rows = db.list_messages_across_rooms(conn, "alice", view="starred")
+        flags = {r["msg_id"]: bool(r["unread"]) for r in rows}
+        assert flags == {
+            ids["a1"]: False, ids["s1"]: True, ids["u2"]: False, ids["a2"]: True,
+        }
+
+    def test_unread_flag_true_on_every_unread_view_row(self, conn):
+        r1, r2, rb, ids = self._seed(conn)
+        db.set_room_read_state(conn, r1.token, "web", ids["a1"], "alice")
+        rows = db.list_messages_across_rooms(conn, "alice", view="unread")
+        assert rows
+        assert all(r["unread"] for r in rows)
+
+    def test_unread_flag_reads_only_the_readers_web_cursor(self, conn):
+        r1 = _room(conn, "alice", "shared")
+        db.add_room_member(conn, r1.token, "bob")
+        mid = _msg(conn, r1.token)
+        db.set_room_read_state(conn, r1.token, "web", mid, "bob")
+        db.set_room_read_state(conn, r1.token, "talk", mid, "alice")
+        rows = db.list_messages_across_rooms(conn, "alice")
+        assert [bool(r["unread"]) for r in rows] == [True]
+
     def test_starred_flag_in_all_view(self, conn):
         r1, r2, rb, ids = self._seed(conn)
         db.set_message_starred(conn, ids["a1"], "alice", True)
