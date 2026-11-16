@@ -754,6 +754,8 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # inferred, and an existing row must not start following on upgrade.
         "timezone_follow_location": "INTEGER NOT NULL DEFAULT 0",
         "show_nav_unread_badges": "INTEGER NOT NULL DEFAULT 0",
+        # On for existing rows too: the behaviour is the default after upgrade.
+        "chat_read_on_view": "INTEGER NOT NULL DEFAULT 1",
         "push_chat_alerts": "TEXT NOT NULL DEFAULT 'alerts'",
         "push_preview": "INTEGER NOT NULL DEFAULT 1",
         "push_inbox_categories": "TEXT NOT NULL DEFAULT '{}'",

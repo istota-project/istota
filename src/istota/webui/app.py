@@ -11701,8 +11701,9 @@ async def chat_config(user: dict = Depends(_require_api_auth)):
     because hiding it would leave the user unable to see what is actually
     stored; the flag is what tells the pane to show it as unrecognized.
 
-    `external_turn_display` is read **live from `user_profiles`**, not off the
-    `_config.users` snapshot the rest of this handler uses. That snapshot
+    `external_turn_display` and `chat_read_on_view` are read **live from
+    `user_profiles`**, not off the `_config.users` snapshot the rest of this
+    handler uses. That snapshot
     follows `user_profiles` through `refresh_user_profiles_if_changed`, which
     `_require_api_auth` runs at most once a second, so it can be up to a second
     behind a save; the live read keeps the transcript in step with the settings
@@ -11726,6 +11727,7 @@ async def chat_config(user: dict = Depends(_require_api_auth)):
         "external_turn_display": (
             getattr(profile, "external_turn_display", "") or "collapsed"
         ),
+        "chat_read_on_view": bool(getattr(profile, "chat_read_on_view", True)),
         "outbound_approval": raw_approval,
         "outbound_approval_valid": (
             raw_approval == "" or raw_approval in VALID_POLICIES
@@ -18415,6 +18417,7 @@ _PROFILE_FIELD_SPECS: dict[str, dict] = {
     "briefing_email_html":    {"type": "bool"},
     "timezone_follow_location": {"type": "bool"},
     "show_nav_unread_badges": {"type": "bool", "strict": True},
+    "chat_read_on_view": {"type": "bool", "strict": True},
     "push_chat_alerts": {"type": "enum", "values": user_profiles.PUSH_CHAT_ALERTS_VALUES},
     "push_preview": {"type": "bool", "strict": True},
     "push_inbox_categories": {"type": "push_categories"},
@@ -19147,6 +19150,7 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "briefing_email_html": profile.briefing_email_html,
         "timezone_follow_location": profile.timezone_follow_location,
         "show_nav_unread_badges": profile.show_nav_unread_badges,
+        "chat_read_on_view": profile.chat_read_on_view,
         "push_chat_alerts": profile.push_chat_alerts,
         "push_preview": profile.push_preview,
         "push_inbox_categories": profile.push_inbox_categories,

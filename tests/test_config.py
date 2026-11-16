@@ -3698,6 +3698,32 @@ def test_nav_badge_preference_config(tmp_path, value):
     assert load_config(path).users["alice"].show_nav_unread_badges is (value is True)
 
 
+@pytest.mark.parametrize("value", [None, True, False])
+def test_chat_read_on_view_config(tmp_path, value):
+    path = tmp_path / "config.toml"
+    field = "" if value is None else f"chat_read_on_view = {str(value).lower()}\n"
+    path.write_text("[users.alice]\n" + field)
+    assert load_config(path).users["alice"].chat_read_on_view is (value is not False)
+
+
+def test_chat_read_on_view_db_row_wins(tmp_path):
+    from istota import db, user_profiles
+    from istota.lib import toml_write
+
+    database = tmp_path / "framework.db"
+    db.init_db(database)
+    user_profiles.ensure_profile(database, "alice")
+    path = tmp_path / "config.toml"
+    path.write_text(toml_write.dumps({
+        "db_path": str(database),
+        "users": {"alice": {"chat_read_on_view": True}},
+    }))
+    user_profiles.update_profile(database, "alice", chat_read_on_view=False)
+    assert load_config(path).users["alice"].chat_read_on_view is False
+    user_profiles.update_profile(database, "alice", chat_read_on_view=True)
+    assert load_config(path).users["alice"].chat_read_on_view is True
+
+
 def test_nav_badge_preference_survives_config_reload(tmp_path):
     from istota import db, user_profiles
     from istota.lib import toml_write
