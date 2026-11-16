@@ -271,6 +271,29 @@ def test_nav_badge_preference_snapshot_apply(install, enabled):
     assert engine.execute_plan(operations, context).exit_code == 0
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_chat_read_on_view_snapshot_apply(install, enabled):
+    from istota.settings_plan.profiles import snapshot_profile
+
+    _, database = install
+    assert snapshot_profile(user_profiles.UserProfile("alice"))["profile"]["chat_read_on_view"] is True
+    desired = snapshot_profile(user_profiles.UserProfile("alice", chat_read_on_view=enabled))
+    assert desired["profile"]["chat_read_on_view"] is enabled
+    context, operations = preview(install, {"alice": {"profile": {"chat_read_on_view": enabled}}})
+    engine.execute_plan(operations, context)
+    assert user_profiles.get_profile(database, "alice").chat_read_on_view is enabled
+    context, operations = preview(install, {"alice": desired})
+    engine.execute_plan(operations, context)
+    context, operations = preview(install, {"alice": desired})
+    assert engine.execute_plan(operations, context).exit_code == 0
+
+
+def test_chat_read_on_view_plan_rejects_a_non_boolean():
+    from istota.settings_plan.schema import SchemaError
+    with pytest.raises(SchemaError):
+        parse_plan({"users": {"alice": {"profile": {"chat_read_on_view": "yes"}}}})
+
+
 def test_push_preferences_plan_and_snapshot_preserve_booleans(install):
     from istota.settings_plan.profiles import snapshot_profile
     fields = {"push_inbox_categories": {"confirmation": False}, "push_chat_alerts": "off", "push_preview": False}

@@ -11701,8 +11701,9 @@ async def chat_config(user: dict = Depends(_require_api_auth)):
     because hiding it would leave the user unable to see what is actually
     stored; the flag is what tells the pane to show it as unrecognized.
 
-    `external_turn_display` is read **live from `user_profiles`**, not off the
-    `_config.users` snapshot the rest of this handler uses. That snapshot
+    `external_turn_display` and `chat_read_on_view` are read **live from
+    `user_profiles`**, not off the `_config.users` snapshot the rest of this
+    handler uses. That snapshot
     follows `user_profiles` through `refresh_user_profiles_if_changed`, which
     `_require_api_auth` runs at most once a second, so it can be up to a second
     behind a save; the live read keeps the transcript in step with the settings
@@ -11726,6 +11727,7 @@ async def chat_config(user: dict = Depends(_require_api_auth)):
         "external_turn_display": (
             getattr(profile, "external_turn_display", "") or "collapsed"
         ),
+        "chat_read_on_view": bool(getattr(profile, "chat_read_on_view", True)),
         "outbound_approval": raw_approval,
         "outbound_approval_valid": (
             raw_approval == "" or raw_approval in VALID_POLICIES
@@ -13078,6 +13080,11 @@ def _cross_room_message_dict(
         "msg_id": r["msg_id"], "starred": bool(r["starred"]),
         "room_token": r["room_token"], "room_name": r["room_name"] or "",
     }
+    # Only the aggregate query selects `unread`; a stream row omits the key
+    # rather than claim false, and the client derives it from the role there.
+    unread = _row_get(r, "unread")
+    if unread is not None:
+        base["unread"] = bool(unread)
     if r["role"] == "user":
         # `status` is the owning task's — the stream reads it to decide whether
         # a user turn from another surface is still in flight (and so needs a
@@ -13280,6 +13287,67 @@ async def chat_read_all_rooms(
     for room_token in moved:
         _fire_and_forget(_push_read_to_talk(user["username"], room_token))
     return {"ok": True, "updated": len(moved)}
+
+
+_READ_SEEN_MAX_IDS = 500
+
+
+def _chat_read_seen(username: str, seen: list[int]) -> list[dict]:
+    """Advance the user's web cursors for ids seen in the aggregate panes.
+
+    The resolver drops ids outside the panes' visibility without saying which,
+    so the response names only rooms the user can already see."""
+    from istota import db
+    with db.get_db(_config.db_path) as conn:
+        rooms = db.advance_read_cursors_for_seen(conn, username, seen)
+    advanced = sum(1 for r in rooms if r["advanced"])
+    if advanced:
+        logger.info("read_seen user=%s rooms_advanced=%d", username, advanced)
+    return rooms
+
+
+@api_router.post("/chat/read-seen")
+async def chat_read_seen(
+    request: Request,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Mark rows seen in All / Unread / Starred read, room by room.
+
+    Body `{"seen": [id, ...]}`, at most 500 positive ids. Each room's cursor
+    moves only across an unbroken run of seen unread rows, and a room that ends
+    up fully read gets the Talk read push, as a room-view mark-read does."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = None
+    seen = data.get("seen") if isinstance(data, dict) else None
+    valid = (
+        isinstance(seen, list)
+        and len(seen) <= _READ_SEEN_MAX_IDS
+        # bool is an int subclass; `true` is not a message id.
+        and all(type(i) is int and i > 0 for i in seen)
+    )
+    if not valid:
+        return JSONResponse(
+            {"error": f"body must be {{\"seen\": [positive int, ...]}} "
+                      f"with at most {_READ_SEEN_MAX_IDS} ids"},
+            status_code=422,
+        )
+    username = user["username"]
+    rooms = await asyncio.to_thread(_chat_read_seen, username, seen)
+    for room in rooms:
+        if room["advanced"] and room["fully_read"]:
+            _fire_and_forget(_push_read_to_talk(username, room["token"]))
+    return {"rooms": [
+        {
+            "token": r["token"],
+            "last_read_message_id": r["last_read_message_id"],
+            "unread_count": r["unread_count"],
+            "advanced": r["advanced"],
+        }
+        for r in rooms
+    ]}
 
 
 @api_router.post("/chat/rooms/{room_id}/messages")
@@ -18349,6 +18417,7 @@ _PROFILE_FIELD_SPECS: dict[str, dict] = {
     "briefing_email_html":    {"type": "bool"},
     "timezone_follow_location": {"type": "bool"},
     "show_nav_unread_badges": {"type": "bool", "strict": True},
+    "chat_read_on_view": {"type": "bool", "strict": True},
     "push_chat_alerts": {"type": "enum", "values": user_profiles.PUSH_CHAT_ALERTS_VALUES},
     "push_preview": {"type": "bool", "strict": True},
     "push_inbox_categories": {"type": "push_categories"},
@@ -19081,6 +19150,7 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "briefing_email_html": profile.briefing_email_html,
         "timezone_follow_location": profile.timezone_follow_location,
         "show_nav_unread_badges": profile.show_nav_unread_badges,
+        "chat_read_on_view": profile.chat_read_on_view,
         "push_chat_alerts": profile.push_chat_alerts,
         "push_preview": profile.push_preview,
         "push_inbox_categories": profile.push_inbox_categories,

@@ -245,6 +245,9 @@ export interface ChatMessage {
   // label each message with its room and jump to it.
   roomToken?: string;
   roomName?: string;
+  // Aggregate-view rows: past the room's web read cursor. Cleared when a
+  // read-seen response's cursor passes it. The room view ignores it.
+  unread?: boolean;
   // System rows only: when a !search command produced structured results, the
   // row renders result cards from this instead of its markdown `text`.
   searchResults?: SearchResultsData;

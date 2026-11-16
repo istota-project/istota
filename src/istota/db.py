@@ -754,6 +754,8 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # inferred, and an existing row must not start following on upgrade.
         "timezone_follow_location": "INTEGER NOT NULL DEFAULT 0",
         "show_nav_unread_badges": "INTEGER NOT NULL DEFAULT 0",
+        # On for existing rows too: the behaviour is the default after upgrade.
+        "chat_read_on_view": "INTEGER NOT NULL DEFAULT 1",
         "push_chat_alerts": "TEXT NOT NULL DEFAULT 'alerts'",
         "push_preview": "INTEGER NOT NULL DEFAULT 1",
         "push_inbox_categories": "TEXT NOT NULL DEFAULT '{}'",
@@ -7353,6 +7355,26 @@ def set_room_read_state(
     )
 
 
+def advance_room_read_state(
+    conn: sqlite3.Connection,
+    room_token: str,
+    surface: str,
+    last_read_message_id: int,
+    user_id: str = "",
+) -> None:
+    """`set_room_read_state`, forward only: an existing cursor past
+    `last_read_message_id` is kept, so two tabs or a pane flush racing a
+    room-view mark-read can never move a cursor backwards."""
+    conn.execute(
+        "INSERT INTO room_read_state "
+        "(room_token, surface, user_id, last_read_message_id) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT (room_token, surface, user_id) DO UPDATE SET "
+        "last_read_message_id = MAX(last_read_message_id, excluded.last_read_message_id)",
+        (room_token, surface, user_id, last_read_message_id),
+    )
+
+
 def room_max_message_id(conn: sqlite3.Connection, room_token: str) -> int:
     """The highest `messages.id` in a room, or 0 when the room is empty. Used to
     seed / advance a read cursor to "everything so far"."""
@@ -7892,16 +7914,22 @@ def list_messages_across_rooms(
       contributes everything (COALESCE to 0); in practice the rooms listing
       seeds cursors on every load.
     - ``starred``: rows the user has starred, still in transcript order.
+
+    Every row carries ``unread``: past the reader's web cursor and not their
+    own turn, the same test the ``unread`` view filters on. Selected here
+    rather than in `_CROSS_ROOM_COLUMNS`, which the search and the room-event
+    stream share without the read-state join.
     """
     if view not in ("all", "unread", "starred"):
         raise ValueError(f"unknown view: {view!r}")
-    sql = _CROSS_ROOM_COLUMNS + _CROSS_ROOM_FROM
-    if view == "unread":
-        sql += (
-            "LEFT JOIN room_read_state rs ON rs.room_token = m.room_token "
-            "  AND rs.surface = 'web' AND rs.user_id = :user "
-        )
-    sql += _CROSS_ROOM_WHERE
+    sql = (
+        _CROSS_ROOM_COLUMNS
+        + ", (m.role != 'user' AND m.id > COALESCE(rs.last_read_message_id, 0)) AS unread "
+        + _CROSS_ROOM_FROM
+        + "LEFT JOIN room_read_state rs ON rs.room_token = m.room_token "
+        + "  AND rs.surface = 'web' AND rs.user_id = :user "
+        + _CROSS_ROOM_WHERE
+    )
     if view == "unread":
         sql += (
             "AND m.role != 'user' "
@@ -7921,6 +7949,87 @@ def list_messages_across_rooms(
         "before_id": before_id,
         "exclude": json.dumps(sorted(exclude_tokens)),
     }).fetchall()
+
+
+def advance_read_cursors_for_seen(
+    conn: sqlite3.Connection,
+    user_id: str,
+    seen_ids: list[int],
+    *,
+    exclude_tokens: set[str] | frozenset[str] | None = None,
+) -> list[dict]:
+    """Advance the user's web read cursors for message ids seen in the All /
+    Unread / Starred panes.
+
+    Ids resolve to rooms with the panes' own visibility (`_CROSS_ROOM_FROM` /
+    `_CROSS_ROOM_WHERE`, minus ``exclude_tokens``). ``exclude_tokens`` defaults
+    to `hidden_room_tokens_for_member`, the set the web passes to
+    `list_messages_across_rooms`; pass a set only to override it. An id that
+    does not exist or resolves to no visible room is dropped silently.
+
+    Per room the cursor moves to the end of the unbroken run of seen unread
+    rows just past it, so an unseen older row stops it. When every unread row
+    up to the room's newest message was seen, it moves to that newest id, which
+    covers trailing user turns. The newest id is read before the unread list
+    and bounds it, so a row inserted meanwhile stays past the cursor. Writes go
+    through `advance_room_read_state` and never lower a cursor.
+
+    Returns one dict per room touched, sorted by token: ``token``,
+    ``last_read_message_id`` (after the write), ``unread_count``
+    (`count_unread_messages` after it), ``advanced`` (this call moved the
+    cursor) and ``fully_read`` (the cursor is at the room's newest message).
+    """
+    seen = {int(i) for i in seen_ids}
+    if not seen:
+        return []
+    if exclude_tokens is None:
+        exclude_tokens = hidden_room_tokens_for_member(conn, user_id)
+    sql = (
+        "SELECT DISTINCT m.room_token AS room_token "
+        + _CROSS_ROOM_FROM + _CROSS_ROOM_WHERE
+        + "AND m.id IN (SELECT value FROM json_each(:seen)) "
+    )
+    if exclude_tokens:
+        sql += "AND m.room_token NOT IN (SELECT value FROM json_each(:exclude)) "
+    rows = conn.execute(sql, {
+        "user": user_id,
+        "seen": json.dumps(sorted(seen)),
+        "exclude": json.dumps(sorted(exclude_tokens)),
+    }).fetchall()
+
+    results: list[dict] = []
+    for token in sorted(row["room_token"] for row in rows):
+        cursor = get_room_read_state(conn, token, "web", user_id)
+        max_id = room_max_message_id(conn, token)
+        unread = [
+            int(r["id"]) for r in conn.execute(
+                "SELECT id FROM messages "
+                "WHERE room_token = ? AND id > ? AND id <= ? AND role != 'user' "
+                "ORDER BY id",
+                (token, cursor, max_id),
+            ).fetchall()
+        ]
+        new = cursor
+        all_seen = True
+        for mid in unread:
+            if mid not in seen:
+                all_seen = False
+                break
+            new = mid
+        if all_seen:
+            new = max_id
+        advanced = new > cursor
+        if advanced:
+            advance_room_read_state(conn, token, "web", new, user_id)
+        last_read = get_room_read_state(conn, token, "web", user_id)
+        results.append({
+            "token": token,
+            "last_read_message_id": last_read,
+            "unread_count": count_unread_messages(conn, token, "web", user_id),
+            "advanced": advanced,
+            "fully_read": last_read >= max_id,
+        })
+    return results
 
 
 def search_messages(

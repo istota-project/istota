@@ -117,6 +117,9 @@ class UserProfile:
     # rewrites a setting the user chose, so it is opted into, not inferred.
     timezone_follow_location: bool = False
     show_nav_unread_badges: bool = False
+    # Rows seen in web chat's All, Unread and Starred panes advance the read
+    # cursor. Default on; the client decides whether to observe.
+    chat_read_on_view: bool = True
     push_chat_alerts: str = "alerts"
     push_preview: bool = True
     push_inbox_categories: dict[str, bool] = field(default_factory=dict)
@@ -143,7 +146,7 @@ _PROFILE_COLUMNS = (
     "routing", "default_destination", "default_room",
     "outbound_approval", "external_turn_display", "relay_delivery",
     "calendar_delivery", "default_briefings", "briefing_email_html",
-    "timezone_follow_location", "show_nav_unread_badges",
+    "timezone_follow_location", "show_nav_unread_badges", "chat_read_on_view",
     "push_chat_alerts", "push_preview", "push_inbox_categories",
     "google_scopes", "quick_notes_folder", "correspondent_scopes",
 )
@@ -163,6 +166,7 @@ _BOOL_COLUMN_DEFAULTS = {
     "briefing_email_html": True,
     "timezone_follow_location": False,
     "show_nav_unread_badges": False,
+    "chat_read_on_view": True,
     "push_preview": True,
 }
 _BOOL_COLUMNS = frozenset(_BOOL_COLUMN_DEFAULTS)
@@ -181,7 +185,7 @@ SELF_EDITABLE_FIELDS = (
     "email_addresses", "trusted_email_senders", "quiet_email_senders",
     "disabled_skills", "disabled_modules",
     "default_destination", "default_room", "routing",
-    "briefing_email_html", "timezone_follow_location", "show_nav_unread_badges",
+    "briefing_email_html", "timezone_follow_location", "show_nav_unread_badges", "chat_read_on_view",
     "external_turn_display", "relay_delivery", "push_chat_alerts", "push_preview", "push_inbox_categories",
     "quick_notes_folder", "calendar_delivery",
 )
@@ -545,6 +549,7 @@ def _row_to_profile(row: sqlite3.Row, *, strict: bool = False) -> UserProfile:
         show_nav_unread_badges=_coerce_bool(
             _row_get(row, "show_nav_unread_badges"), False,
         ),
+        chat_read_on_view=_coerce_bool(_row_get(row, "chat_read_on_view"), True),
         push_chat_alerts=str(_row_get(row, "push_chat_alerts") or "alerts"),
         push_preview=_coerce_bool(_row_get(row, "push_preview"), True),
         push_inbox_categories=stored_inbox_categories(_row_get(row, "push_inbox_categories") or {}, strict=strict),
@@ -747,6 +752,7 @@ def _seeded_profile(
         show_nav_unread_badges=_coerce_bool(
             _attr(seed_from, "show_nav_unread_badges"), False,
         ),
+        chat_read_on_view=_coerce_bool(_attr(seed_from, "chat_read_on_view"), True),
     )
 
 
@@ -1156,6 +1162,7 @@ def insert_profile(conn: sqlite3.Connection, profile: UserProfile, *, replace: b
         1 if profile.briefing_email_html else 0,
         1 if profile.timezone_follow_location else 0,
         1 if profile.show_nav_unread_badges else 0,
+        1 if profile.chat_read_on_view else 0,
         profile.push_chat_alerts or "alerts",
         1 if profile.push_preview else 0,
         json.dumps(_normalized_profile_value("push_inbox_categories", profile.push_inbox_categories)),
@@ -1247,6 +1254,9 @@ def import_from_user_configs(
             show_nav_unread_badges=_coerce_bool(
                 getattr(user_config, "show_nav_unread_badges", False), False,
             ),
+            chat_read_on_view=_coerce_bool(
+                getattr(user_config, "chat_read_on_view", True), True,
+            ),
         )
         try:
             _insert(db_path, profile, replace=False)
@@ -1288,6 +1298,7 @@ def merge_into_user_config(profile: UserProfile, user_config: "object") -> "obje
     setattr(user_config, "default_briefings", bool(profile.default_briefings))
     setattr(user_config, "briefing_email_html", bool(profile.briefing_email_html))
     setattr(user_config, "show_nav_unread_badges", bool(profile.show_nav_unread_badges))
+    setattr(user_config, "chat_read_on_view", bool(profile.chat_read_on_view))
     setattr(user_config, "push_chat_alerts", profile.push_chat_alerts)
     setattr(user_config, "push_preview", bool(profile.push_preview))
     setattr(user_config, "push_inbox_categories", dict(profile.push_inbox_categories))

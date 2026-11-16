@@ -126,3 +126,12 @@ it('disables the managed navigation preference', async () => {
   ).toBeDisabled();
   expect(screen.getByText(BADGE)).toBeInTheDocument();
 });
+
+it('disables the managed chat read-on-view preference', async () => {
+  currentProfile.value = profile(['chat_read_on_view']);
+  render(Harness, { component: PreferencesPage, layout: SettingsLayout, user: person });
+  expect(
+    await screen.findByRole('checkbox', { name: /Mark chat messages read in All and Unread/ }),
+  ).toBeDisabled();
+  expect(screen.getByText(BADGE)).toBeInTheDocument();
+});

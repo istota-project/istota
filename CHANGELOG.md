@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Web chat marks messages read as you scroll through All, Unread and Starred**, and the Unread view opens at its oldest message. A room is never marked read past a message you have not reached. It is on by default; turn it off in Settings → Preferences.
+
 ## [0.51.0] - 2026-11-15
 
 On a Mac you can now resize the Istota VM after it is made: `istota-stack set-size` changes its CPUs, memory and disk, and `istota-stack size` shows what the VM has and what the Mac can give it.

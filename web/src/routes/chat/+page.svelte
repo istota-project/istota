@@ -95,6 +95,7 @@
     sendReturned,
     outboundDrafts,
     externalTurnDisplay,
+    readOnView,
   } = session;
 
   type ChatSelection =
@@ -848,6 +849,7 @@
   async function onScroll() {
     if (!listEl) return;
     clearActivation();
+    seenWatch?.recheck();
     // A switch's settle pin is still moving the viewport. On iOS WebKit the
     // offset this event reads can be the one a dropped write left behind, part
     // way up the new transcript, and paging from there would prepend a page
@@ -1030,6 +1032,12 @@
       showJumpToLatest = true;
       settles.invalidate();
       settling = false;
+      // The Unread pane opening at its oldest row (read on view): nothing was
+      // searched for, so nothing is highlighted.
+      if (t.block === 'start') {
+        el.scrollIntoView({ behavior: 'instant', block: 'start' });
+        return;
+      }
       // A long smooth scroll can still report the old bottom before moving,
       // which lets the resize pin cancel the jump. Move atomically instead.
       el.scrollIntoView({ behavior: 'instant', block: 'center' });
@@ -1037,6 +1045,176 @@
       if (highlightTimer) clearTimeout(highlightTimer);
       highlightTimer = setTimeout(() => el.classList.remove('jump-highlight'), 2000);
     });
+  });
+
+  // Read on view: an unread row of an aggregate pane counts as seen once half
+  // of it, or half the scroller for a row taller than that, has been on screen
+  // for the dwell with the tab visible. The dwell keeps a fast flick through
+  // All from marking everything it passes. The store decides what seen does.
+  const SEEN_DWELL_MS = 500;
+  const SEEN_SHARE = 0.5;
+  const SEEN_THRESHOLDS = [0, 0.5, 1];
+
+  type SeenWatch = {
+    sync: () => void;
+    recheck: () => void;
+    visibilityChanged: () => void;
+    stop: () => void;
+  };
+  let seenWatch: SeenWatch | null = null;
+
+  function seenEnough(visible: number, rowHeight: number, scrollerHeight: number): boolean {
+    if (visible <= 0) return false;
+    return visible >= rowHeight * SEEN_SHARE || visible >= scrollerHeight * SEEN_SHARE;
+  }
+
+  function watchSeenRows(root: HTMLElement): SeenWatch {
+    const observed = new Map<number, Element>();
+    const inView = new Map<number, Element>();
+    const enough = new Set<number>();
+    const timers = new Map<number, ReturnType<typeof setTimeout>>();
+
+    function cancel(cid: number) {
+      const timer = timers.get(cid);
+      if (timer === undefined) return;
+      clearTimeout(timer);
+      timers.delete(cid);
+    }
+    function arm(cid: number) {
+      if (timers.has(cid) || document.visibilityState !== 'visible') return;
+      timers.set(
+        cid,
+        setTimeout(() => {
+          timers.delete(cid);
+          session.noteSeen(cid);
+        }, SEEN_DWELL_MS),
+      );
+    }
+    function judge(cid: number, ok: boolean) {
+      if (ok) {
+        enough.add(cid);
+        arm(cid);
+      } else {
+        enough.delete(cid);
+        cancel(cid);
+      }
+    }
+    function forget(cid: number, el: Element) {
+      io.unobserve(el);
+      observed.delete(cid);
+      inView.delete(cid);
+      judge(cid, false);
+    }
+
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          const cid = Number((entry.target as HTMLElement).dataset.cid);
+          if (observed.get(cid) !== entry.target) continue;
+          if (entry.isIntersecting) inView.set(cid, entry.target);
+          else inView.delete(cid);
+          const scroller = entry.rootBounds?.height ?? root.clientHeight;
+          judge(
+            cid,
+            entry.isIntersecting &&
+              seenEnough(entry.intersectionRect.height, entry.boundingClientRect.height, scroller),
+          );
+        }
+      },
+      { root, threshold: SEEN_THRESHOLDS },
+    );
+
+    return {
+      // Watch the unread rows on screen now: paging, a streamed row, and a
+      // flush response clearing `unread` all change the set.
+      sync() {
+        const unread = new Set(
+          get(messages)
+            .filter((m) => m.unread === true)
+            .map((m) => m.cid),
+        );
+        for (const [cid, el] of observed) {
+          if (!unread.has(cid) || !el.isConnected) forget(cid, el);
+        }
+        for (const el of root.querySelectorAll<HTMLElement>('[data-cid]')) {
+          const cid = Number(el.dataset.cid);
+          if (!unread.has(cid) || observed.has(cid)) continue;
+          observed.set(cid, el);
+          io.observe(el);
+        }
+      },
+      // A row taller than the scroller can pass half the scroller between two
+      // of the observer's thresholds, so a scroll measures those by hand.
+      recheck() {
+        const box = root.getBoundingClientRect();
+        for (const [cid, el] of inView) {
+          const rect = el.getBoundingClientRect();
+          if (rect.height <= box.height) continue;
+          const visible = Math.min(rect.bottom, box.bottom) - Math.max(rect.top, box.top);
+          judge(cid, seenEnough(visible, rect.height, box.height));
+        }
+      },
+      // Hidden stops every dwell; visible starts one for each row still on
+      // screen, from zero.
+      visibilityChanged() {
+        if (document.visibilityState === 'visible') {
+          for (const cid of enough) arm(cid);
+          return;
+        }
+        for (const timer of timers.values()) clearTimeout(timer);
+        timers.clear();
+      },
+      stop() {
+        io.disconnect();
+        for (const timer of timers.values()) clearTimeout(timer);
+        timers.clear();
+        observed.clear();
+        inView.clear();
+        enough.clear();
+      },
+    };
+  }
+
+  $effect(() => {
+    const root = listEl;
+    // A pane switch (All to Unread) starts a fresh watch.
+    void $view;
+    if (!root || !inViewMode || !$readOnView) return;
+    if (typeof IntersectionObserver === 'undefined') return;
+    const watch = watchSeenRows(root);
+    seenWatch = watch;
+    tick().then(() => {
+      if (seenWatch === watch) watch.sync();
+    });
+    return () => {
+      watch.stop();
+      if (seenWatch === watch) seenWatch = null;
+    };
+  });
+
+  $effect(() => {
+    void $messages;
+    const watch = seenWatch;
+    if (!watch) return;
+    tick().then(() => {
+      if (seenWatch === watch) watch.sync();
+    });
+  });
+
+  // Seen ids wait a second before they are posted; a page going away cannot
+  // wait. Leaving the pane flushes in the store.
+  $effect(() => {
+    const onVisibility = () => {
+      seenWatch?.visibilityChanged();
+      if (document.visibilityState === 'hidden') session.flushSeen({ keepalive: true });
+    };
+    const onPageHide = () => session.flushSeen({ keepalive: true });
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pagehide', onPageHide);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pagehide', onPageHide);
+    };
   });
 
   function selectRoom(id: number) {
@@ -1636,6 +1814,7 @@
                 draftActions={inViewMode ? undefined : draftActions}
                 externalDisplay={$externalTurnDisplay}
                 aggregate={inViewMode}
+                unreadMarks={inViewMode && $readOnView}
                 active={message.cid === activeCid}
                 touch={pointerIsTouch}
                 answerByText={inViewMode || readOnlyGroup ? null : readOnlyPhone}

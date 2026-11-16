@@ -3,7 +3,7 @@
 Per-user data lives in three DB tables and (optionally) the user's Nextcloud workspace:
 
 1. **DB tables** (authoritative)
-   - `user_profiles` — display_name, timezone, channels, worker overrides, email lists, SMS phone binding, trusted senders, quiet senders, disabled_skills, **disabled_modules**, **delivery routing** (`default_destination` + a purpose-keyed `routing` table), `default_briefings`, `briefing_email_html`, `timezone_follow_location`, `outbound_approval`, `external_turn_display`, `show_nav_unread_badges`
+   - `user_profiles` — display_name, timezone, channels, worker overrides, email lists, SMS phone binding, trusted senders, quiet senders, disabled_skills, **disabled_modules**, **delivery routing** (`default_destination` + a purpose-keyed `routing` table), `default_briefings`, `briefing_email_html`, `timezone_follow_location`, `outbound_approval`, `external_turn_display`, `show_nav_unread_badges`, `chat_read_on_view`
    - `user_resources` — folder mounts (`folder`) and internal `shared_file` organizer state. Only `folder` is declarable after the Resources sunset; the other path-shaped types were retired (calendars are CalDAV-discovered, todo/reminders/notes are workspace-convention files).
    - `briefing_configs` — briefing schedules. `enabled=0` mutes a briefing without deletion.
    - `secrets` — Fernet-encrypted credentials (Karakeep, Monarch, Tumblr, Overland ingest token, ntfy, etc.). See [credentials](credentials.md) for the full per-user inventory.
@@ -72,6 +72,12 @@ external_turn_display = "collapsed"
 # items (default false). The user changes it in Settings → Preferences, and
 # the saved profile wins.
 show_nav_unread_badges = false
+
+# Messages seen in web chat's All, Unread and Starred views count as read and
+# lower their rooms' unread counts (default true). False: only opening a room
+# marks it read. The user changes it in Settings → Preferences, and the saved
+# profile wins.
+chat_read_on_view = true
 
 # Modules to opt out of (default-on otherwise)
 disabled_modules = ["money"]

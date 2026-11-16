@@ -1036,6 +1036,7 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     default_briefings INTEGER NOT NULL DEFAULT 1,        -- seed the shared [[default_briefings]] set into this user
     briefing_email_html INTEGER NOT NULL DEFAULT 1,      -- briefing email as multipart/alternative (HTML + plain) vs plain only
     show_nav_unread_badges INTEGER NOT NULL DEFAULT 0,
+    chat_read_on_view INTEGER NOT NULL DEFAULT 1,         -- rows seen in web chat's All/Unread/Starred panes advance the read cursor
     push_chat_alerts TEXT NOT NULL DEFAULT 'alerts',
     push_preview INTEGER NOT NULL DEFAULT 1,
     push_inbox_categories TEXT NOT NULL DEFAULT '{}',

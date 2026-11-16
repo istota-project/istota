@@ -522,3 +522,51 @@ class TestNavUnreadBadges:
         user_profiles.update_profile(db_path, "alice", show_nav_unread_badges=True)
         db.init_db(db_path)
         assert user_profiles.get_profile(db_path, "alice").show_nav_unread_badges is True
+
+
+class TestChatReadOnView:
+    """Default on: every place the default is spelled must say True."""
+
+    def test_default_and_round_trip(self, db_path):
+        assert UserProfile("alice").chat_read_on_view is True
+        assert user_profiles.ensure_profile(db_path, "alice").chat_read_on_view is True
+        assert user_profiles.get_profile(db_path, "alice").chat_read_on_view is True
+        for value in (False, True):
+            user_profiles.update_profile(db_path, "alice", chat_read_on_view=value)
+            assert user_profiles.get_profile(db_path, "alice").chat_read_on_view is value
+        assert "chat_read_on_view" in user_profiles.SELF_EDITABLE_FIELDS
+        assert "chat_read_on_view" not in user_profiles.ADMIN_EDITABLE_FIELDS
+
+    def test_seed_import_and_db_precedence(self, db_path):
+        assert user_profiles.ensure_profile(db_path, "carol", seed_from=UserConfig()).chat_read_on_view
+        assert user_profiles.import_from_user_configs(db_path, {"dave": UserConfig()}) == 1
+        assert user_profiles.get_profile(db_path, "dave").chat_read_on_view is True
+
+        config = UserConfig(chat_read_on_view=False)
+        assert user_profiles.ensure_profile(db_path, "alice", seed_from=config).chat_read_on_view is False
+        assert user_profiles.import_from_user_configs(db_path, {"bob": config}) == 1
+        assert user_profiles.get_profile(db_path, "bob").chat_read_on_view is False
+        user_profiles.update_profile(db_path, "alice", chat_read_on_view=True)
+        assert user_profiles.import_from_user_configs(db_path, {"alice": config}) == 0
+        user_profiles.merge_into_user_config(user_profiles.get_profile(db_path, "alice"), config)
+        assert config.chat_read_on_view is True
+
+    def test_upgrade_adds_the_column_switched_on(self, db_path):
+        from istota import db
+
+        user_profiles.ensure_profile(db_path, "alice", display_name="Alice", timezone="Europe/Paris")
+        with db.get_db(db_path) as conn:
+            conn.execute("ALTER TABLE user_profiles DROP COLUMN chat_read_on_view")
+        assert user_profiles.get_profile(db_path, "alice").chat_read_on_view is True
+        db.init_db(db_path)
+        with db.get_db(db_path) as conn:
+            stored = conn.execute(
+                "SELECT chat_read_on_view FROM user_profiles WHERE user_id = 'alice'"
+            ).fetchone()[0]
+        assert stored == 1
+        profile = user_profiles.get_profile(db_path, "alice")
+        assert profile.chat_read_on_view is True
+        assert (profile.display_name, profile.timezone) == ("Alice", "Europe/Paris")
+        user_profiles.update_profile(db_path, "alice", chat_read_on_view=False)
+        db.init_db(db_path)
+        assert user_profiles.get_profile(db_path, "alice").chat_read_on_view is False

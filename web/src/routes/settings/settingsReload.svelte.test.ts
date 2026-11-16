@@ -62,6 +62,8 @@ const profile = {
 };
 
 const savedPreference = { value: false };
+// Undefined leaves `chat_read_on_view` out of the profile, as an older server would.
+const savedReadOnView: { value: boolean | undefined } = { value: undefined };
 const updateProfile = vi.fn<(patch: Partial<UserProfile>) => Promise<object>>();
 const online = writable(true);
 const getMe = vi.fn<() => Promise<User>>();
@@ -87,7 +89,13 @@ vi.mock('$lib/api', async (importOriginal) => {
     getNavUnreadCounts: async () => ({ enabled: true, chat: 4, briefings: 2, feeds: 108 }),
     getProfile: async () =>
       structuredClone({
-        profile: { ...profile.profile, show_nav_unread_badges: savedPreference.value },
+        profile: {
+          ...profile.profile,
+          show_nav_unread_badges: savedPreference.value,
+          ...(savedReadOnView.value === undefined
+            ? {}
+            : { chat_read_on_view: savedReadOnView.value }),
+        },
       }),
     getSettingsServices: async () => ({ services: [] }),
     getModules: async () => ({ modules: [] }),
@@ -127,6 +135,7 @@ const PreferenceProbe = (await import('./navPreferenceProbe.test.svelte')).defau
 beforeEach(() => {
   vi.clearAllMocks();
   savedPreference.value = false;
+  savedReadOnView.value = undefined;
   updateProfile.mockImplementation(async (patch) => {
     savedPreference.value = patch.show_nav_unread_badges ?? savedPreference.value;
     return {};
@@ -286,6 +295,33 @@ describe('navigation preference through the root identity', () => {
     expect(savedPreference.value).toBe(true);
     expect(startNavUnreadPoll).not.toHaveBeenCalled();
     expect(screen.getByLabelText('Confirmed navigation preference')).toHaveTextContent('false');
+  });
+});
+
+describe('chat read-on-view preference', () => {
+  const label = /Mark chat messages read in All and Unread/;
+
+  beforeEach(() => {
+    getMe.mockResolvedValue(person());
+  });
+
+  it('reads as on when the profile omits it, and saves only the change', async () => {
+    // The fixture profile has no `chat_read_on_view`: an absent key is the
+    // server's default, which is on.
+    render(SettingsInLayout, { component: PreferenceProbe });
+    const checkbox = await screen.findByRole('checkbox', { name: label });
+    expect(checkbox).toBeChecked();
+    await fireEvent.click(checkbox);
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() =>
+      expect(updateProfile).toHaveBeenCalledExactlyOnceWith({ chat_read_on_view: false }),
+    );
+  });
+
+  it('a saved off loads as off', async () => {
+    savedReadOnView.value = false;
+    render(SettingsInLayout, { component: PreferenceProbe });
+    expect(await screen.findByRole('checkbox', { name: label })).not.toBeChecked();
   });
 });
 

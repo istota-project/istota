@@ -28,7 +28,7 @@ PROFILE_FIELDS = {
     "sms_phone_number": str,
     "max_foreground_workers": int, "max_background_workers": int,
     "briefing_email_html": bool, "timezone_follow_location": bool,
-    "show_nav_unread_badges": bool,
+    "show_nav_unread_badges": bool, "chat_read_on_view": bool,
     "push_chat_alerts": str, "push_preview": bool, "push_inbox_categories": dict,
     "quick_notes_folder": str, "correspondent_scopes": list,
 }

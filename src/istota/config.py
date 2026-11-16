@@ -1061,6 +1061,7 @@ class UserConfig:
     briefing_email_html: bool = True  # briefing email as multipart/alternative (HTML + plain)
     timezone_follow_location: bool = False  # follow the GPS timezone on travel (opt-in; ISSUE-096)
     show_nav_unread_badges: bool = False
+    chat_read_on_view: bool = True  # rows seen in web chat's All/Unread/Starred mark read
     push_chat_alerts: str = "alerts"
     push_preview: bool = True
     push_inbox_categories: dict[str, bool] = field(default_factory=dict)
@@ -3744,6 +3745,7 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         ),
         briefing_email_html=bool(user_data.get("briefing_email_html", True)),
         show_nav_unread_badges=bool(user_data.get("show_nav_unread_badges", False)),
+        chat_read_on_view=bool(user_data.get("chat_read_on_view", True)),
         push_chat_alerts=str(user_data.get("push_chat_alerts", "alerts")),
         push_preview=bool(user_data.get("push_preview", True)),
         push_inbox_categories=validate_inbox_categories(user_data.get("push_inbox_categories", {})),

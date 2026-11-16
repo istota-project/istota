@@ -26,7 +26,7 @@
     renderGroups,
   } from '$lib/stores/segments';
   import { online } from '$lib/stores/connectivity';
-  import { Icon, Badge, Button, Chip, IconButton } from '@minot/ui';
+  import { Icon, Badge, Button, Chip, IconButton, StatusDot } from '@minot/ui';
   import UserAvatar from '$lib/components/UserAvatar.svelte';
   import ActivityTrace from './ActivityTrace.svelte';
   import ConfirmationCard from './ConfirmationCard.svelte';
@@ -68,6 +68,7 @@
     draftActions,
     externalDisplay = 'collapsed',
     aggregate = false,
+    unreadMarks = false,
     active = false,
     touch = false,
     answerByText = null,
@@ -167,6 +168,9 @@
     // the turn row's metadata is only the task number — model and timings are
     // room-level detail that belongs in the room view.
     aggregate?: boolean;
+    // The aggregate pane reads on view, so its unread rows carry a dot that
+    // clears once the room's read cursor passes them.
+    unreadMarks?: boolean;
     // Touch surrogate for hover: the one row the user last tapped. A touch
     // device has no hover to reveal the metadata + star with, and leaning on
     // Safari's synthesized :hover left the affordances stuck on every row
@@ -437,6 +441,7 @@
   // and only when the surface passes a toggle handler.
   const starrable = $derived(typeof message.msgId === 'number' && !!onToggleStar);
   const showRoomChip = $derived(!!message.roomName && !!onRoomClick);
+  const showUnread = $derived(aggregate && unreadMarks && message.unread === true);
 
   // The metadata is always in the markup when the row has it, and hidden with
   // the row's opacity like the buttons beside it. Gating it on `revealed`
@@ -768,6 +773,10 @@
   {/if}
 {/snippet}
 
+{#snippet unreadDot()}
+  <StatusDot tone="info" label="Unread" title="Unread" class="unread-dot" />
+{/snippet}
+
 {#if isSystem}
   <!-- Command (!…) output / delivered notifications. Left-aligned block, not a
 	     centered notice: it carries lists / code / tables that must read
@@ -826,6 +835,7 @@
            direct child of the column it is asserted to sit in. -->
       {#if botVoice}<span class="author bot">{botName}</span>{/if}
       {#if time}<time class="stamp">{time}</time>{/if}
+      {#if showUnread}{@render unreadDot()}{/if}
       {#if showRoomChip}
         <Chip size="xs" class="room-chip" onclick={() => onRoomClick?.(message.roomToken!)}
           ><span class="truncate">{message.roomName}</span></Chip
@@ -929,6 +939,10 @@
           version={isUser ? (ownTurn ? userAvatar : undefined) : botAvatar}
           label={author}
         />
+      {:else if showUnread}
+        <!-- A continuation row has no header line, so its mark takes the
+             gutter, in place of the hover time the group header also shows. -->
+        <span class="unread-gutter caption">{@render unreadDot()}</span>
       {:else if revealed}
         <time class="hover-time caption">{time}</time>
       {/if}
@@ -943,6 +957,7 @@
         <div class="meta">
           <span class="author" class:bot={!isUser}>{author}</span>
           {#if time}<time class="stamp">{time}</time>{/if}
+          {#if showUnread}{@render unreadDot()}{/if}
           {#if showRoomChip}
             <Chip
               size="xs"
@@ -1544,6 +1559,18 @@
     .hover-time {
       display: none;
     }
+  }
+
+  /* The unread mark lines up with the header line's text. */
+  .meta :global(.unread-dot) {
+    align-self: center;
+  }
+  .cmd-row .content :global(.unread-dot) {
+    margin-right: var(--space-2);
+    vertical-align: middle;
+  }
+  .unread-gutter {
+    line-height: var(--leading-relaxed);
   }
 
   /* Continuation-row timestamp, revealed with the row. */

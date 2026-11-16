@@ -3826,6 +3826,39 @@ class TestProfileEndpoints:
         after = await client.get("/istota/api/chat/config", cookies=cookies)
         assert after.json()["external_turn_display"] == "full"
 
+    async def test_chat_read_on_view_saves_and_reaches_chat_config_live(
+        self, tmp_path, client, app,
+    ):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        profile = await client.get("/istota/api/settings/profile", cookies=cookies)
+        assert profile.json()["profile"]["chat_read_on_view"] is True
+        before = await client.get("/istota/api/chat/config", cookies=cookies)
+        assert before.json()["chat_read_on_view"] is True
+
+        for enabled in (False, True):
+            saved = await client.put(
+                "/istota/api/settings/profile", json={"chat_read_on_view": enabled},
+                cookies=cookies, headers={"origin": "https://example.com"},
+            )
+            assert saved.status_code == 200
+            profile = await client.get("/istota/api/settings/profile", cookies=cookies)
+            assert profile.json()["profile"]["chat_read_on_view"] is enabled
+            after = await client.get("/istota/api/chat/config", cookies=cookies)
+            assert after.json()["chat_read_on_view"] is enabled
+
+    @pytest.mark.parametrize("invalid", [0, "false", None, []])
+    async def test_chat_read_on_view_rejects_invalid_boolean(self, tmp_path, client, app, invalid):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.put(
+            "/istota/api/settings/profile", json={"chat_read_on_view": invalid},
+            cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
     async def test_chat_config_carries_the_authenticated_username(
         self, tmp_path, client, app,
     ):
