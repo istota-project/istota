@@ -78,6 +78,7 @@
         next.default_room = next.default_room || '';
         next.relay_delivery = next.relay_delivery || '';
         next.show_nav_unread_badges = next.show_nav_unread_badges ?? false;
+        next.chat_read_on_view = next.chat_read_on_view ?? true;
         next.push_chat_alerts = next.push_chat_alerts ?? 'alerts';
         next.push_preview = next.push_preview ?? true;
         next.push_inbox_categories = next.push_inbox_categories ?? {};
@@ -112,6 +113,7 @@
         routing: profile.routing || {},
         timezone_follow_location: profile.timezone_follow_location,
         show_nav_unread_badges: profile.show_nav_unread_badges,
+        chat_read_on_view: profile.chat_read_on_view,
         push_chat_alerts: profile.push_chat_alerts,
         push_preview: profile.push_preview,
         push_inbox_categories: profile.push_inbox_categories,

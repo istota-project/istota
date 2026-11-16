@@ -2526,6 +2526,9 @@ export interface UserProfile {
   // it overwrites the timezone the user chose above.
   timezone_follow_location: boolean;
   show_nav_unread_badges: boolean;
+  // Rows seen in chat's All, Unread and Starred panes move the room's read
+  // cursor. On by default; absent on a server that predates it.
+  chat_read_on_view?: boolean;
   push_chat_alerts?: 'alerts' | 'badge' | 'off';
   push_preview?: boolean;
   // Missing category IDs remain enabled, including newly registered sources.

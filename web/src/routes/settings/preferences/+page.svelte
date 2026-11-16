@@ -157,6 +157,17 @@
         />
       </Field>
       <Field
+        label="Mark chat messages read in All and Unread"
+        checkbox
+        badge={managedBadge(profile, 'chat_read_on_view')}
+        hint="Messages you scroll past in All, Unread and Starred count as read, and their rooms' unread counts go down. Off: only opening a room marks it read."
+      >
+        <Checkbox
+          bind:checked={profile.chat_read_on_view}
+          disabled={isManaged(profile, 'chat_read_on_view')}
+        />
+      </Field>
+      <Field
         label="Trusted email senders (fnmatch patterns, comma-separated)"
         badge={managedBadge(profile, 'trusted_email_senders')}
       >
