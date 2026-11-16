@@ -63,7 +63,7 @@ Backups work as in the [command-line install](local-install.md#backups-and-recov
 
 The app keeps its VM apart from the command-line install's, under `~/Library/Application Support/Istota`, and uses the same folder and the same Keychain item. Moving stops the command-line install's VM, then makes the app's VM from the backups in the folder and the master key in the Keychain, as `istota-stack restore` does. If the old VM is running when you start, the app reads its credentials first and writes them into the new one; otherwise you enter them again in the web UI.
 
-The move restores the newest database snapshot, and snapshots are taken once a day by default. Conversations, tasks and other database changes made since that snapshot are not carried over. Files in the folder are. Move soon after a snapshot, or check the newest date in `Backups/db/snapshots/` first.
+When the command-line install is running, the app first has it back up its databases, so the move carries them as they are at that moment. If that backup fails, or a database comes out empty, the app refuses the move and leaves the old install running. A stopped install is not started for this: the move restores its newest backup, and the form says when that backup was written. Backups are daily by default, so conversations, tasks and other database changes made after it are not carried over. Files in the folder always are. If you used the command-line install since its last backup, start it before moving it.
 
 The app refuses the move, and leaves the command-line install running, when that install runs a newer Istota release than the one the app carries. Update the app first.
 
