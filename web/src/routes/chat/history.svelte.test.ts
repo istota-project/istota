@@ -19,6 +19,7 @@ vi.mock('$lib/stores/chat', async () => {
     sendReturned: writable({ n: 0, token: null, text: '', attachments: [] }),
     outboundDrafts: writable([]),
     externalTurnDisplay: writable('full'),
+    readOnView: writable(false),
     offlineTranscript: writable(false),
     queuedCounts: writable({}),
   };
