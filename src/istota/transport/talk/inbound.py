@@ -5,6 +5,8 @@ conversation/participant/DM caches. ``poll_talk_conversations`` self-creates its
 tasks (see its atomicity note); ``TalkTransport.poll`` delegates here.
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import logging
