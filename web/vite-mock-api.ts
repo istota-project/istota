@@ -1483,6 +1483,15 @@ const mockDraft65Full: MockDraft = {
 // Everything newer than this reads as unread (assistant rows only); read-all
 // advances it to now. Seeded ~16h back so the last few turns light up.
 let mockReadCursorMs = Date.now() - 16 * 60 * 60 * 1000;
+// Per-room message-id cursors moved by `POST /chat/read-seen`, on top of the
+// time cursor above.
+const mockRoomReadMsgId = new Map<string, number>();
+
+function mockRowUnread(token: string, role: string, msgId: number, createdAtMs: number): boolean {
+  return (
+    role !== 'user' && createdAtMs > mockReadCursorMs && msgId > (mockRoomReadMsgId.get(token) ?? 0)
+  );
+}
 
 function mockRoomFor(token: string): MockChatRoom | undefined {
   return mockChatRooms.find((r) => r.token === token);
@@ -1767,7 +1776,8 @@ function mockUnreadCount(token: string): number {
   for (const t of mockChatTasks.values()) {
     if (t.roomToken !== token) continue;
     if (now - t.createdAt < mockTaskDoneMs(t)) continue;
-    if (t.createdAt > mockReadCursorMs) n++; // one unread assistant row per turn
+    // One unread assistant row per turn.
+    if (mockRowUnread(token, 'assistant', mockAsstMsgId(t), t.createdAt)) n++;
   }
   return n;
 }
@@ -1788,6 +1798,7 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
       attachment_extensions: ['pdf', 'png', 'jpg'],
       client_poll_interval_ms: 600,
       external_turn_display: 'collapsed',
+      chat_read_on_view: true,
     };
   }
 
@@ -1881,6 +1892,37 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
     mockReadCursorMs = Date.now();
     return { ok: true, updated: moved };
   }
+  // The contiguous rule of `db.advance_read_cursors_for_seen`: a room's cursor
+  // moves across the seen unread rows just past it and stops at the first unseen.
+  if (path === '/istota/api/chat/read-seen' && method === 'POST') {
+    const seen = new Set<number>(Array.isArray(body?.seen) ? body.seen : []);
+    const all = mockAggregateRows();
+    const touched = new Set(all.filter((m) => seen.has(m.msg_id)).map((m) => m.room_token));
+    const out = [];
+    for (const token of touched) {
+      const rows = all.filter((m) => m.room_token === token);
+      const before = mockRoomReadMsgId.get(token) ?? 0;
+      let cursor = before;
+      let blocked = false;
+      for (const m of rows) {
+        if (!mockRowUnread(token, m.role, m.msg_id, m._createdAtMs)) continue;
+        if (!seen.has(m.msg_id)) {
+          blocked = true;
+          break;
+        }
+        cursor = m.msg_id;
+      }
+      if (!blocked) cursor = Math.max(cursor, ...rows.map((m) => m.msg_id));
+      if (cursor > before) mockRoomReadMsgId.set(token, cursor);
+      out.push({
+        token,
+        last_read_message_id: Math.max(cursor, before),
+        unread_count: mockUnreadCount(token),
+        advanced: cursor > before,
+      });
+    }
+    return { rooms: out };
+  }
   // Cross-room aggregate views (All / Unread / Starred).
   // Held outbound mail. The card reads this on mount and again whenever a stub
   // arrives, so the truncated entry resolves itself on the second read.
@@ -1927,7 +1969,7 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
         : null;
     let rows = mockAggregateRows(); // oldest-first
     if (viewName === 'unread') {
-      rows = rows.filter((m) => m.role !== 'user' && m._createdAtMs > mockReadCursorMs);
+      rows = rows.filter((m) => mockRowUnread(m.room_token, m.role, m.msg_id, m._createdAtMs));
     } else if (viewName === 'starred') {
       rows = rows.filter((m) => mockStars.has(m.msg_id));
     }
@@ -1941,7 +1983,10 @@ const chatHandler: MockHandler = ({ url, method, body }) => {
     const oldest = page[0];
     const hasMore = oldest ? older.length > page.length : false;
     return {
-      messages: page.map(({ _createdAtMs, ...m }) => m),
+      messages: page.map(({ _createdAtMs, ...m }) => ({
+        ...m,
+        unread: mockRowUnread(m.room_token, m.role, m.msg_id, _createdAtMs),
+      })),
       has_more: hasMore,
       oldest_cursor: oldest
         ? { ts: new Date(oldest._createdAtMs).toISOString(), id: oldest.msg_id }
@@ -9841,6 +9886,7 @@ const handlers: MockHandler[] = [
       briefing_email_html: true,
       timezone_follow_location: false,
       external_turn_display: 'collapsed',
+      chat_read_on_view: true,
       quick_notes_folder: null,
       relay_delivery: '',
       relay_delivery_options: [

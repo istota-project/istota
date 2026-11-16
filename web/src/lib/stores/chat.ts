@@ -1741,8 +1741,14 @@ function createSession(): ChatSession {
   // set. The server keeps no seen state of its own.
   const SEEN_FLUSH_DEBOUNCE_MS = 1000;
   const SEEN_MAX_IDS = 500;
+  // A stalled request would otherwise hold the in-flight latch until the pane
+  // is left, and nothing seen meanwhile would be sent.
+  const SEEN_FETCH_TIMEOUT_MS = 15000;
   const UNREAD_PAGE_LIMIT = 200;
   const pendingSeen = new Map<number, string>();
+  // The highest cursor applied per room. A keepalive flush can overlap the one
+  // in flight, and the older answer must not put a cleared badge back.
+  const appliedSeenCursor = new Map<string, number>();
   // The preference as it stood when the open pane was entered.
   let paneReadsOnView = false;
   let seenTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1787,7 +1793,7 @@ function createSession(): ChatSession {
       return;
     }
     seenInFlight = true;
-    markMessagesSeen(seenBatch())
+    markMessagesSeen(seenBatch(), { timeoutMs: SEEN_FETCH_TIMEOUT_MS })
       .then(applySeenResponse)
       .catch(() => {
         // Background bookkeeping, like markActiveRead: the ids stay pending
@@ -1811,6 +1817,8 @@ function createSession(): ChatSession {
     for (const r of resp?.rooms ?? []) {
       cursors.set(r.token, r.last_read_message_id);
       if (r.advanced) advanced = true;
+      if (r.last_read_message_id < (appliedSeenCursor.get(r.token) ?? 0)) continue;
+      appliedSeenCursor.set(r.token, r.last_read_message_id);
       const target = get(rooms).find((x) => x.token === r.token);
       // The open room's badge is held at 0 while it is on screen.
       if (target && target.id !== heldRoom) setRoomUnread(target.id, r.unread_count);
@@ -3414,6 +3422,10 @@ function createSession(): ChatSession {
       return;
     }
     rooms.update((r) => r.map((x) => ({ ...x, unread_count: 0 })));
+    pendingSeen.clear();
+    messages.update((arr) =>
+      arr.some((m) => m.unread) ? arr.map((m) => (m.unread ? { ...m, unread: false } : m)) : arr,
+    );
     if (get(view) === 'unread') await loadViewPage('unread');
   }
 

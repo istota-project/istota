@@ -209,6 +209,48 @@ describe('chat store — read on view', () => {
     s.teardown();
   });
 
+  it('bounds the flush it waits on, so a stalled request cannot hold the latch', async () => {
+    const s = await openView('unread', [row(10, 't1')]);
+    s.noteSeen(cidOf(s, 10));
+    await vi.advanceTimersByTimeAsync(1000);
+    const [, opts] = api.markMessagesSeen.mock.calls[0];
+    expect(opts.timeoutMs).toBeGreaterThan(0);
+    expect(opts.keepalive).toBeUndefined();
+    s.teardown();
+  });
+
+  it('does not let an older response put a badge back up', async () => {
+    const s = await openView('unread', [row(10, 't1'), row(12, 't1')]);
+    let answerOld: (r: ReadSeenResponse) => void = () => {};
+    api.markMessagesSeen.mockImplementationOnce(
+      () => new Promise<ReadSeenResponse>((resolve) => (answerOld = resolve)),
+    );
+    s.noteSeen(cidOf(s, 10));
+    await vi.advanceTimersByTimeAsync(1000);
+    api.markMessagesSeen.mockResolvedValueOnce(
+      seenResponse({ token: 't1', last_read_message_id: 12, unread_count: 0, advanced: true }),
+    );
+    s.noteSeen(cidOf(s, 12));
+    s.flushSeen({ keepalive: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(get(s.rooms).find((r) => r.token === 't1')?.unread_count).toBe(0);
+    answerOld(
+      seenResponse({ token: 't1', last_read_message_id: 10, unread_count: 2, advanced: true }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(get(s.rooms).find((r) => r.token === 't1')?.unread_count).toBe(0);
+    s.teardown();
+  });
+
+  it('clears every unread marker on mark all read', async () => {
+    api.markAllRoomsRead.mockResolvedValue({ ok: true, updated: 2 });
+    const s = await openView('all', [row(10, 't1'), row(11, 't2')]);
+    await s.markAllRead();
+    expect(unreadOf(s, 10)).toBe(false);
+    expect(unreadOf(s, 11)).toBe(false);
+    s.teardown();
+  });
+
   it('sends the lowest 500 ids when more are pending', async () => {
     const rows = Array.from({ length: 600 }, (_, i) => row(i + 1, 't1'));
     const s = await openView('unread', rows);

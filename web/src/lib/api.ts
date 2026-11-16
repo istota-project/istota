@@ -4845,17 +4845,22 @@ export interface ReadSeenResponse {
 
 /** Report message ids seen in the aggregate panes. Each room's cursor moves
  * across the unbroken run of seen unread rows past it; at most 500 ids.
- * `keepalive` lets the request outlive a page that is going away. */
+ * `keepalive` lets the request outlive a page that is going away; `timeoutMs`
+ * bounds one the caller waits on. */
 export function markMessagesSeen(
   seen: number[],
-  opts: { keepalive?: boolean } = {},
+  opts: { keepalive?: boolean; timeoutMs?: number } = {},
 ): Promise<ReadSeenResponse> {
-  return apiFetch<ReadSeenResponse>('/chat/read-seen', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ seen }),
-    ...(opts.keepalive ? { keepalive: true } : {}),
-  });
+  return apiFetch<ReadSeenResponse>(
+    '/chat/read-seen',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ seen }),
+      ...(opts.keepalive ? { keepalive: true } : {}),
+    },
+    opts.timeoutMs ?? 0,
+  );
 }
 
 /** Mark a room read on the web surface — clears its sidebar unread badge by
