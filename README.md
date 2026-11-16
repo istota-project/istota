@@ -38,7 +38,7 @@ The installer verifies a signed release tag, provisions the machine, builds the 
 
 ### Local on a Mac
 
-Requires a Mac with Apple silicon (M1 or later); Intel Macs are not supported. The Mac app needs nothing else installed: download `Istota-<version>.dmg` (the app's own version) from `https://stacks.cynium.com/istota-mac/<version>/`, drag it into Applications and open it. It needs macOS 14 or later and 25 GB free. It carries the VM's disk, the images and a signed release, walks you through setup in its own window, and updates from the menu bar.
+Requires a Mac with Apple silicon (M1 or later); Intel Macs are not supported. The Mac app needs nothing else installed: [download it](https://stacks.cynium.com/istota-mac/download.html), drag it into Applications and open it. It needs macOS 14 or later and 25 GB free. It carries the VM's disk, the images and a signed release, walks you through setup in its own window, and updates from the menu bar.
 
 [The Mac app](docs/getting-started/mac-app.md)
 

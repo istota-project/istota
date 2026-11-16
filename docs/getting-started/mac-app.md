@@ -16,7 +16,7 @@ You also need a model backend: a Claude Code OAuth token, an API key, or an Open
 
 ## Install
 
-1. Download `Istota-<version>.dmg` from `https://stacks.cynium.com/istota-mac/<version>/`, where `<version>` is the app's version, not Istota's. A `.sha256` file sits beside it; `shasum -a 256 -c Istota-<version>.dmg.sha256` in the same folder checks the download.
+1. [Download the newest version](https://stacks.cynium.com/istota-mac/download.html), which saves `Istota-<version>.dmg`; the version is the app's own, not Istota's. The DMG's folder on the same host, `https://stacks.cynium.com/istota-mac/<version>/`, also holds `Istota-<version>.dmg.sha256`; `shasum -a 256 -c Istota-<version>.dmg.sha256` in the folder you saved both to checks the download.
 2. Open the DMG and drag Istota into Applications.
 3. Open Istota from Applications.
 
