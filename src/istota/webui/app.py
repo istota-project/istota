@@ -13078,6 +13078,11 @@ def _cross_room_message_dict(
         "msg_id": r["msg_id"], "starred": bool(r["starred"]),
         "room_token": r["room_token"], "room_name": r["room_name"] or "",
     }
+    # Only the aggregate query selects `unread`; a stream row omits the key
+    # rather than claim false, and the client derives it from the role there.
+    unread = _row_get(r, "unread")
+    if unread is not None:
+        base["unread"] = bool(unread)
     if r["role"] == "user":
         # `status` is the owning task's — the stream reads it to decide whether
         # a user turn from another surface is still in flight (and so needs a
@@ -13280,6 +13285,67 @@ async def chat_read_all_rooms(
     for room_token in moved:
         _fire_and_forget(_push_read_to_talk(user["username"], room_token))
     return {"ok": True, "updated": len(moved)}
+
+
+_READ_SEEN_MAX_IDS = 500
+
+
+def _chat_read_seen(username: str, seen: list[int]) -> list[dict]:
+    """Advance the user's web cursors for ids seen in the aggregate panes.
+
+    The resolver drops ids outside the panes' visibility without saying which,
+    so the response names only rooms the user can already see."""
+    from istota import db
+    with db.get_db(_config.db_path) as conn:
+        rooms = db.advance_read_cursors_for_seen(conn, username, seen)
+    advanced = sum(1 for r in rooms if r["advanced"])
+    if advanced:
+        logger.info("read_seen user=%s rooms_advanced=%d", username, advanced)
+    return rooms
+
+
+@api_router.post("/chat/read-seen")
+async def chat_read_seen(
+    request: Request,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Mark rows seen in All / Unread / Starred read, room by room.
+
+    Body `{"seen": [id, ...]}`, at most 500 positive ids. Each room's cursor
+    moves only across an unbroken run of seen unread rows, and a room that ends
+    up fully read gets the Talk read push, as a room-view mark-read does."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = None
+    seen = data.get("seen") if isinstance(data, dict) else None
+    valid = (
+        isinstance(seen, list)
+        and len(seen) <= _READ_SEEN_MAX_IDS
+        # bool is an int subclass; `true` is not a message id.
+        and all(type(i) is int and i > 0 for i in seen)
+    )
+    if not valid:
+        return JSONResponse(
+            {"error": f"body must be {{\"seen\": [positive int, ...]}} "
+                      f"with at most {_READ_SEEN_MAX_IDS} ids"},
+            status_code=422,
+        )
+    username = user["username"]
+    rooms = await asyncio.to_thread(_chat_read_seen, username, seen)
+    for room in rooms:
+        if room["advanced"] and room["fully_read"]:
+            _fire_and_forget(_push_read_to_talk(username, room["token"]))
+    return {"rooms": [
+        {
+            "token": r["token"],
+            "last_read_message_id": r["last_read_message_id"],
+            "unread_count": r["unread_count"],
+            "advanced": r["advanced"],
+        }
+        for r in rooms
+    ]}
 
 
 @api_router.post("/chat/rooms/{room_id}/messages")
