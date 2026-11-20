@@ -254,6 +254,42 @@ class TestRefusals:
         assert outcome.status == "failed"
 
 
+class TestTimezoneField:
+    """The page's `timezone`: empty or `user` is the owner's clock, else a zone that loads (#976)."""
+
+    @pytest.mark.parametrize("value", ["", "user", "UTC", "America/New_York"])
+    def test_a_zone_or_the_user_clock_is_accepted(self, config, value):
+        assert validate_job_input(config, USER, payload(timezone=value), None).timezone == value
+
+    @pytest.mark.parametrize("value", ["America/NewYork", "PST", "User", "x" * 300])
+    def test_an_unknown_zone_is_refused_beside_its_field(self, config, value):
+        with pytest.raises(JobFieldError) as refused:
+            validate_job_input(config, USER, payload(timezone=value), None)
+        assert refused.value.field == "timezone"
+        assert refused.value.message == "That is not a timezone Istota knows."
+
+    def test_a_zone_that_is_not_text_is_refused(self, config):
+        with pytest.raises(JobFieldError) as refused:
+            validate_job_input(config, USER, payload(timezone=5), None)
+        assert refused.value.field == "timezone"
+
+    def test_an_unsent_zone_is_kept_and_null_clears_it(self, config):
+        stored = job(timezone="America/New_York")
+        assert validate_job_input(config, USER, {"prompt": "p"}, stored).timezone == "America/New_York"
+        assert validate_job_input(config, USER, {"timezone": None}, stored).timezone == ""
+
+    def test_a_saved_zone_reaches_the_row(self, config):
+        candidate = validate_job_input(config, USER, payload(timezone="America/New_York"), None)
+        assert save_job_definition(
+            config, USER, candidate, original_name=None, expected_revision=None,
+        ).status == "ok"
+        assert only_job(config).timezone == "America/New_York"
+        with db.get_db(config.db_path) as conn:
+            sync(config, conn)
+            row = db.get_scheduled_job_by_name(conn, USER, "j")
+        assert row.timezone == "America/New_York"
+
+
 class TestRevision:
     def test_it_follows_the_definition(self):
         assert job_revision(job()) == job_revision(job())
@@ -325,6 +361,7 @@ class TestEveryFieldRoundTrips:
         sent = {
             "name": "  everything  ",
             "cron": " 15 7 * * 1 ",
+            "timezone": " America/New_York ",
             "kind": "prompt",
             "prompt": "  a prompt with \"quotes\", a \\ and `ticks`  ",
             "target": f"web:{room.token}",
@@ -357,6 +394,7 @@ class TestEveryFieldRoundTrips:
             sync(config, conn, ADMIN)
             row = dict(conn.execute("SELECT * FROM scheduled_jobs WHERE name = 'everything'").fetchone())
         assert row["cron_expression"] == "15 7 * * 1"
+        assert row["timezone"] == "America/New_York"
         assert row["conversation_token"] == room.token
         assert row["output_target"] == f"web:{room.token}"
         assert (row["enabled"], row["once"], row["silent_unless_action"], row["skip_log_channel"]) == (0, 1, 1, 1)

@@ -2691,6 +2691,10 @@ def validate_job_input(config, user_id: str, payload, stored: CronJob | None) ->
     if not job.cron or not croniter.is_valid(job.cron):
         raise JobFieldError("cron", "That is not a cron schedule.")
 
+    job.timezone = _form_text(payload, "timezone", job.timezone)
+    if job.timezone not in ("", USER_CLOCK) and not is_valid_timezone(job.timezone):
+        raise JobFieldError("timezone", "That is not a timezone Istota knows.")
+
     _apply_job_text(job, payload, stored, is_admin)
 
     job.target = _form_text(payload, "target", job.target)
