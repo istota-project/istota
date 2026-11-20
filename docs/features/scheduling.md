@@ -66,7 +66,8 @@ All job types go through the same task queue with retry logic, `!stop` support, 
 | Field | Required | Description |
 |---|---|---|
 | `name` | yes | Job identifier |
-| `cron` | yes | Cron expression (evaluated in user's timezone) |
+| `cron` | yes | Cron expression, read in the zone `timezone` names |
+| `timezone` | no | `"UTC"` or a zone name such as `"America/New_York"`. Left out, or `"user"`, the job follows your own timezone. See "Which clock a job follows" below |
 | `prompt` | for prompt jobs | The prompt to send to Claude |
 | `prompt_file` | for prompt_file jobs | Path to prompt file, `/Users/<owner>/...` |
 | `command` | for command jobs | Shell command to execute |
@@ -85,6 +86,28 @@ All job types go through the same task queue with retry logic, `!stop` support, 
 | `publish_shared_kv_trusted` | no | Mark the published value trusted, so consuming briefings splice it without the untrusted-content wrapper |
 
 The five flags — `enabled`, `once`, `silent_unless_action`, `skip_log_channel` and `publish_shared_kv_trusted` — take a bare TOML boolean, `true` or `false`. A quoted `"false"` is a string and a bare `1` is an integer; either one logs a warning and the field takes its default rather than being read for truthiness. `enabled = "false"` used to leave the job running, and `once = "false"` used to delete it after one run.
+
+## Which clock a job follows
+
+A job's `cron` is read as wall-clock time in one zone, and `timezone` says which:
+
+- Left out, empty, or `"user"`: your own timezone, as set in Settings. When it changes, the job moves with it, and that includes the automatic switch when location tracking sees you in another zone. A reminder at 9:00 stays at 9:00 wherever you are.
+- `"UTC"`: UTC, which has no daylight saving.
+- A zone name such as `"America/New_York"` or `"Europe/Warsaw"`: that zone, with its own daylight saving changes. Use this when the time belongs to a place or a market rather than to you. A job written as `20 13 * * 1-5` with `timezone = "America/New_York"` runs at 13:20 New York time all year and does not move when you travel.
+
+```toml
+[[jobs]]
+name = "market-watch"
+cron = "20 13 * * 1-5"
+timezone = "America/New_York"
+prompt = "Summarise today's close"
+```
+
+UTC alone cannot say "after the US close" all year: the close is 21:00 UTC in winter and 20:00 UTC in summer.
+
+Changing a job's zone is a schedule change, like editing its `cron`. The job's last run is set to the moment of the change, so a slot that falls between the old last run and now in the new zone does not fire as a catch-up. It does not lift a suspension; use `!cron enable` for that.
+
+A zone the server does not know is an error for that job, and the job is dropped from the schedule until the name is fixed. It never falls back to UTC or to your own zone, because a typo would then move the job by hours with nothing said. `istota-skill schedules check` and the web editor report the error. Zone names are case-sensitive: `"america/new_york"` is not one, and abbreviations such as `"PST"` or `"EST"` are not zones.
 
 ## Delivering into a room
 

@@ -3254,7 +3254,7 @@ prompt = "ok"
 class TestATemplateIsNotAnEmptyList:
     """The shipped seed has a fence, which the spec assumed it did not.
 
-    ``storage.CRON_TEMPLATE`` writes a toml fence holding five commented-out
+    ``storage.CRON_TEMPLATE`` writes a toml fence holding six commented-out
     example lines, so a freshly seeded CRON.md has ``block`` set and parses
     to zero jobs. Keying the restore branch on ``block is None`` therefore
     read the seed as "the user deleted everything" and handed the orphan

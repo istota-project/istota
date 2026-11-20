@@ -1657,6 +1657,7 @@ See `examples/CRON.md` for all options and cron format reference.
 # [[jobs]]
 # name = "daily-report"
 # cron = "0 9 * * *"             # 9am daily (in your timezone)
+# timezone = "America/New_York"  # omit to follow your own timezone
 # prompt = "Generate my daily report"
 # target = "talk"                 # "talk", "email", or omit
 # room = "{conversation_token}"   # Talk room token (required for target = "talk")
@@ -1695,12 +1696,23 @@ prompt = "Check for any upcoming deadlines this week"
 target = "talk"
 room = "abc123"
 silent_unless_action = true       # Only post if something needs attention
+
+[[jobs]]
+name = "market-close"
+cron = "20 16 * * 1-5"           # 4:20pm weekdays in New York
+timezone = "America/New_York"     # stays put when you travel
+prompt = "Summarise today's US market close"
+target = "email"
 ```
 
 ## Fields
 
 - **name** — Unique identifier for the job (e.g., `daily-report`, `weekly-cleanup`)
 - **cron** — Standard 5-field cron expression (minute hour day month weekday)
+- **timezone** — The zone **cron** is read in: `"UTC"` or a name such as \
+`"America/New_York"`. Omit it, or write `"user"`, to follow your own timezone, \
+which moves when you travel. A name the server does not know stops the job \
+until it is fixed
 - **prompt** — The full prompt text that will be executed as a task. A backslash or a double quote must be escaped (`\\\\` and `\\"`), or the whole file stops being read and none of your jobs run — use **prompt_file** for anything long or awkward
 - **target** — Where to deliver results: `"talk"` or `"email"` (omit for no delivery)
 - **room** — Talk conversation token (required when target is `"talk"`)
@@ -1728,7 +1740,7 @@ Standard 5-field cron: `minute hour day-of-month month day-of-week`
 - `0 */6 * * *` — Every 6 hours
 - `0 8 1 * *` — First of every month at 8:00 AM
 
-Evaluated in the user's configured timezone.
+Evaluated in the user's configured timezone, unless the job sets **timezone**.
 """
 
 
