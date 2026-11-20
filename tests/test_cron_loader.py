@@ -4655,3 +4655,90 @@ class TestWritesKeepEntriesThatDidNotLoad:
         )
         assert remove_job_definition(config, "alice", "typo") is False
         assert remove_job_definition(config, "alice", "never-there") is True
+
+
+# ---------------------------------------------------------------------------
+# A job's own timezone (#976): the field, its parse and its render
+# ---------------------------------------------------------------------------
+
+
+class TestJobTimezoneField:
+    @pytest.fixture
+    def config(self, make_config_with_mount):
+        return make_config_with_mount()
+
+    @staticmethod
+    def _job(name, extra=""):
+        return f'[[jobs]]\nname = "{name}"\ncron = "20 13 * * 1-5"\nprompt = "p"\n{extra}'
+
+    def _parse(self, config, *blocks):
+        from istota.cron_loader import parse_cron_document
+        return parse_cron_document(_in_fence("".join(blocks)), config, "alice")
+
+    @pytest.mark.parametrize("zone", ["UTC", "America/New_York", "user"])
+    def test_a_zone_is_kept_as_written(self, config, zone):
+        doc = self._parse(config, self._job("market", f'timezone = "{zone}"\n'))
+        assert doc.errors == ()
+        assert [job.timezone for job in doc.jobs] == [zone]
+
+    def test_an_absent_zone_is_empty(self, config):
+        doc = self._parse(config, self._job("market"))
+        assert doc.jobs[0].timezone == ""
+
+    def test_an_unknown_zone_drops_only_that_job_and_names_it(self, config, caplog):
+        with caplog.at_level(logging.WARNING, "istota.cron_loader"):
+            doc = self._parse(
+                config,
+                self._job("market", 'timezone = "America/NewYork"\n'),
+                self._job("other"),
+            )
+        assert [job.name for job in doc.jobs] == ["other"]
+        assert doc.errors == (
+            "Job 'market': timezone 'America/NewYork' is not a timezone Istota knows",)
+        assert doc.skipped_entries == 1
+        assert any("market" in record.getMessage() for record in caplog.records)
+
+    def test_a_long_unknown_zone_is_truncated_in_the_error(self, config):
+        doc = self._parse(config, self._job("market", f'timezone = "{"a" * 300}"\n'))
+        assert doc.jobs == []
+        assert len(doc.errors) == 1 and "a" * 81 not in doc.errors[0]
+
+    @pytest.mark.parametrize("value", ["5", '["UTC"]'])
+    def test_a_non_string_zone_drops_the_job(self, config, value):
+        doc = self._parse(config, self._job("market", f"timezone = {value}\n"), self._job("other"))
+        assert [job.name for job in doc.jobs] == ["other"]
+        assert doc.errors[0].startswith("Job 'market': timezone must be a TOML string")
+
+    def test_user_is_matched_exactly(self, config):
+        doc = self._parse(config, self._job("market", 'timezone = "User"\n'))
+        assert doc.jobs == []
+
+    def test_render_writes_the_zone_after_cron(self):
+        out = render_jobs_block([CronJob(name="j", cron="0 9 * * *", prompt="t",
+                                         timezone="America/New_York")])
+        lines = out.splitlines()
+        assert lines[lines.index('cron = "0 9 * * *"') + 1] == 'timezone = "America/New_York"'
+
+    def test_render_omits_an_empty_zone(self):
+        out = render_jobs_block([CronJob(name="j", cron="0 9 * * *", prompt="t")])
+        assert "timezone" not in out
+
+    @pytest.mark.parametrize("zone", ["America/New_York", "user"])
+    def test_render_round_trips(self, config, zone):
+        from istota.cron_loader import parse_cron_document
+        original = [CronJob(name="j", cron="0 9 * * *", prompt="t", timezone=zone)]
+        doc = parse_cron_document(_in_fence(render_jobs_block(original)), config, "alice")
+        assert doc.jobs == original
+
+    @pytest.mark.parametrize("written, stored", [
+        ("", None), ("user", None), ("UTC", "UTC"), ("America/New_York", "America/New_York"),
+    ])
+    def test_stored_timezone(self, written, stored):
+        from istota.cron_loader import stored_timezone
+        assert stored_timezone(CronJob(name="j", cron="0 9 * * *", timezone=written)) == stored
+
+    def test_job_timezone_name(self):
+        from istota.cron_loader import USER_CLOCK, job_timezone_name
+        assert USER_CLOCK == "user"
+        assert job_timezone_name(None, "Europe/Warsaw") == "Europe/Warsaw"
+        assert job_timezone_name("America/New_York", "Europe/Warsaw") == "America/New_York"

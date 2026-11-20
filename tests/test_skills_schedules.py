@@ -206,3 +206,22 @@ class TestAScheduleCroniterRefuses:
             with patch.object(scheduler, "_sync_cron_files"):
                 created = scheduler.check_scheduled_jobs(conn, config)
             assert [db.get_task(conn, t).user_id for t in created] == ["bob"]
+
+
+class TestAZoneTheServerCannotLoad:
+    """#976: a job's `timezone` that does not load drops the job, as a bad cron does,
+    and `check` says which job and why."""
+
+    def test_check_reports_it(self, capsys, mount):
+        _write(mount, _document('timezone = "America/NewYork"'))
+        out, code = _run(capsys, ["check"])
+        assert code == 1
+        assert out["jobs"] == []
+        assert out["problems"] == [
+            "Job 'probe': timezone 'America/NewYork' is not a timezone Istota knows"]
+
+    def test_a_real_zone_is_clean(self, capsys, mount):
+        _write(mount, _document('timezone = "America/New_York"'))
+        out, code = _run(capsys, ["check"])
+        assert code == 0
+        assert out["jobs"] == ["probe"]

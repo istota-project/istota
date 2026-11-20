@@ -33,7 +33,7 @@ PROFILE_FIELDS = {
     "quick_notes_folder": str, "correspondent_scopes": list,
 }
 JOB_FIELDS = {
-    "name": str, "cron": str, "prompt": str, "command": str, "prompt_file": str,
+    "name": str, "cron": str, "timezone": str, "prompt": str, "command": str, "prompt_file": str,
     "target": str, "room": str, "enabled": bool, "silent_unless_action": bool,
     "skip_log_channel": bool, "once": bool, "model": str, "effort": str, "brain": str, "provider": str,
     "publish_shared_kv": str, "publish_shared_kv_trusted": bool, "reach": str, "egress": list,

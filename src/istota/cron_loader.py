@@ -17,6 +17,7 @@ import tomli
 from croniter import croniter
 
 from . import db
+from .lib.timezones import is_valid_timezone
 from .rooms import egress
 from .workspace import text_files
 from .workspace.text_files import MemoryMdLocked
@@ -458,6 +459,9 @@ def _coerce_bool(
 class CronJob:
     name: str
     cron: str
+    # The zone `cron` is read in, as written: empty or `USER_CLOCK` follows the
+    # owner's live timezone, anything else is a zone the parser loaded (#976).
+    timezone: str = ""
     prompt: str = ""
     command: str = ""
     prompt_file: str = ""  # path relative to mount; resolved to prompt at load time
@@ -500,6 +504,20 @@ class CronJob:
     # into an id within its provider and the provider column (D22). None
     # stores ``model`` and ``provider`` as written.
     model_split: tuple | None = field(default=None, compare=False)
+
+
+USER_CLOCK = "user"
+"""A job's `timezone` spelling for the owner's clock, the same as leaving it out."""
+
+
+def stored_timezone(job: CronJob) -> str | None:
+    """What `scheduled_jobs.timezone` holds for `job`: None follows the owner's clock."""
+    return None if job.timezone in ("", USER_CLOCK) else job.timezone
+
+
+def job_timezone_name(stored: str | None, user_timezone: str) -> str:
+    """The zone a scheduled job's cron is read in: its own, else its owner's."""
+    return stored or user_timezone
 
 
 @dataclass
@@ -943,6 +961,21 @@ def _parse_jobs(
             )
             errors.append(f"Job '{name}': cron {cron[:80]!r} is not a cron schedule")
             continue
+        # Dropped like a bad cron, never read as UTC or as the user's zone: a typo
+        # would move the job by hours with nothing said (#976).
+        raw_timezone = j.get("timezone", "")
+        timezone = _str_field(name, user_id, "timezone", raw_timezone, errors)
+        if not isinstance(raw_timezone, str):
+            continue
+        if timezone not in ("", USER_CLOCK) and not is_valid_timezone(timezone):
+            logger.warning(
+                "Skipping job '%s' in CRON.md for %s: timezone %r does not load",
+                name, user_id, timezone[:80],
+            )
+            errors.append(
+                f"Job '{name}': timezone {timezone[:80]!r} is not a timezone Istota knows"
+            )
+            continue
         # Resolve prompt_file to prompt contents
         if prompt_file:
             if prompt or command:
@@ -1027,6 +1060,7 @@ def _parse_jobs(
         job = CronJob(
             name=name,
             cron=cron,
+            timezone=timezone,
             prompt=prompt,
             command=command,
             prompt_file=prompt_file,
@@ -1175,6 +1209,8 @@ def render_jobs_block(jobs: list[CronJob]) -> str:
         lines.append("[[jobs]]")
         lines.append(_toml_string("name", job.name))
         lines.append(_toml_string("cron", job.cron))
+        if job.timezone:
+            lines.append(_toml_string("timezone", job.timezone))
         if job.command:
             lines.append(_toml_string("command", job.command))
         elif job.prompt_file:
