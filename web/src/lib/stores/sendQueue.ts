@@ -189,6 +189,8 @@ export interface StoredQueuedSend {
   idempotencyKey?: string;
   /** Handed to a send at least once, so it never absorbs another entry (#854). */
   drained?: boolean;
+  /** The newest message id on screen when it was first drained (#973). */
+  afterMsgId?: number;
   held: boolean;
   queuedAt: number;
   reason: QueueReason;
@@ -348,6 +350,9 @@ function readEntry(value: unknown, now: number): StoredQueuedSend | null {
     ...(typeof e.aboutRoom === 'string' && e.aboutRoom ? { aboutRoom: e.aboutRoom } : {}),
     ...(typeof e.idempotencyKey === 'string' ? { idempotencyKey: e.idempotencyKey } : {}),
     ...(e.drained === true ? { drained: true } : {}),
+    ...(Number.isSafeInteger(e.afterMsgId) && (e.afterMsgId as number) >= 0
+      ? { afterMsgId: e.afterMsgId }
+      : {}),
     held: e.held === true,
     // Anything that is not the word `offline` is a busy entry, which is what
     // an entry written before this field existed is: the queue only had the

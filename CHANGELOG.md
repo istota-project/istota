@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **`istota-stack destroy --purge` on a Mac no longer deletes what the Mac app uses.** After a move into the app, the command-line install's purge deleted the shared folder, its backups and the Keychain key the app's snapshots need. It now keeps the folder when the app's settings or VM name it, and keeps the key while another install of the same name exists.
+- A message that waited behind a running turn no longer shows twice in web chat when the transcript reloads while it is being sent, as it could on a phone coming back to the app. The second copy sat under the live turn as "Waiting to send" with a Send button. A message the app was closed on mid-send no longer comes back as unsent beside the copy the server already has.
 
 ## [0.51.0] - 2026-11-15
 

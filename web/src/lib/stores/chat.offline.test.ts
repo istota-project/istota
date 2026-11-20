@@ -942,6 +942,33 @@ describe('chat store — the text outbox', () => {
   describe('restoring across a relaunch', () => {
     const HOUR = 60 * 60 * 1000;
 
+    it('drops a restored drained entry the fetch finds, after a cached paint without it', async () => {
+      // Killed mid-POST (#973). The cached tail predates the send, so the
+      // first paint gives the entry its held row; the fetched paint has the
+      // server's copy and must take that row back off.
+      seedQueue('t1', [
+        storedEntry('did that arrive?', { drained: true, afterMsgId: 10, idempotencyKey: 'k1' }),
+      ]);
+      db.readTranscript.mockResolvedValue({
+        roomId: 1,
+        roomToken: 't1',
+        messages: [row(5, 'earlier')],
+        oldestCursor: null,
+        savedAt: Date.now(),
+      });
+      api.getRoomMessages.mockResolvedValue(
+        history([row(50, 'did that arrive?', { role: 'user', task_id: 43 })]),
+      );
+      const s = await freshSession();
+
+      await s.init();
+
+      expect(get(s.messages).filter((m) => m.text === 'did that arrive?')).toHaveLength(1);
+      expect(get(s.messages).some((m) => m.sendState === 'queued')).toBe(false);
+      expect(storedQueue('t1')).toEqual([]);
+      s.teardown();
+    });
+
     it('sends a recent offline entry on its own', async () => {
       // The whole point of storing the reason: this message was written to a
       // server that could not be reached, and a relaunch is exactly when it
