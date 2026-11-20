@@ -45,6 +45,7 @@ from istota.llm.types import (
     REASONING_REPLAY_MODES,
     STRICT_TOOL_SCHEMA_MODES,
 )
+from istota.lib.timezones import is_valid_timezone
 from istota.mail.outbound_policy import VALID_POLICIES as OUTBOUND_APPROVAL_POLICIES
 from istota.sandbox.user_scope import paths_overlap, scoped_user_dir
 from istota.webui.map_basemap import provider_names as map_provider_names
@@ -7022,24 +7023,6 @@ def whatsapp_provider_has_values(config: Config, provider: str) -> bool:
     )
 
 
-def _is_valid_timezone(name: object) -> bool:
-    """Whether `name` resolves to a zone, without raising for any input.
-
-    `OSError` is in the tuple because `ZoneInfo` resolves the name as a *path*
-    under the tzdata directories, so a 300-character value raises
-    `ENAMETOOLONG` rather than `ZoneInfoNotFoundError` — and this runs inside
-    `load_config`, where that escaped as a traceback carrying the venv path.
-    `ZoneInfoNotFoundError` subclasses `KeyError` and is named for the reader.
-    """
-    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
-    try:
-        ZoneInfo(str(name))
-    except (ZoneInfoNotFoundError, ValueError, KeyError, OSError):
-        return False
-    return True
-
-
 WHATSAPP_WEBHOOK_PROVIDERS = frozenset({"whatsapp_cloud"})
 """The adapters that receive over an HTTP callback rather than their own
 transport.
@@ -7211,7 +7194,7 @@ def _whatsapp_cloud_structural_errors(config: Config) -> list[str]:
         )
     if not _is_e164(config.whatsapp.business_phone_number):
         errors.append("business_phone_number must be an exact E.164 number")
-    if not _is_valid_timezone(cloud.business_timezone):
+    if not is_valid_timezone(cloud.business_timezone):
         errors.append("business_timezone must be a valid IANA timezone name")
     if not 1 <= cloud.request_timeout_seconds <= 30:
         errors.append("request_timeout_seconds must be between 1 and 30")
