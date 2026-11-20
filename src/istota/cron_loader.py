@@ -1488,6 +1488,7 @@ def _cron_md_content(
 #: Columns CRON.md authors. The sync writes exactly these on every tick.
 FILE_OWNED_COLUMNS = frozenset({
     "cron_expression",
+    "timezone",
     "prompt",
     "command",
     "skill",
@@ -1510,7 +1511,7 @@ FILE_OWNED_COLUMNS = frozenset({
 
 #: Columns the daemon authors. The sync never writes one *from the file*, and
 #: the three exceptions are resets rather than values out of CRON.md: the
-#: ``last_run_at`` reset on a cron-expression change or on an edit to what a
+#: ``last_run_at`` reset on a schedule change (cron or timezone) or on an edit to what a
 #: ``once`` job dispatches, the
 #: ``auto_disabled_at`` / ``consecutive_failures`` / ``last_error`` reset on a
 #: change to what the job dispatches, and the ``disabled_at`` reset when the
@@ -1589,6 +1590,7 @@ def _file_owned_values(
     """
     return {
         "cron_expression": fj.cron,
+        "timezone": stored_timezone(fj),
         "prompt": fj.prompt,
         "command": cmd_val,
         "skill": skill_val,
@@ -1718,14 +1720,20 @@ def sync_cron_jobs_to_db(
             # Update definition fields, preserve state
             updates = {col: file_values[col] for col in file_columns}
 
-            # Reset last_run_at when cron expression changes to prevent
-            # catch-up runs for past slots in the new expression
-            cron_changed = fj.cron != existing.cron_expression
-            if cron_changed:
+            # Reset last_run_at when the schedule moves, its expression or the
+            # zone it is read in, so past slots in the new one are not caught up.
+            moved = []
+            if fj.cron != existing.cron_expression:
+                moved.append(f"cron {existing.cron_expression!r} -> {fj.cron!r}")
+            if file_values["timezone"] != existing.timezone:
+                moved.append(
+                    f"timezone {existing.timezone!r} -> {file_values['timezone']!r}"
+                )
+            schedule_changed = bool(moved)
+            if schedule_changed:
                 logger.info(
-                    "Cron expression changed for job '%s' (user %s): "
-                    "'%s' -> '%s', resetting last_run_at",
-                    fj.name, user_id, existing.cron_expression, fj.cron,
+                    "Schedule changed for job '%s' (user %s): %s, resetting last_run_at",
+                    fj.name, user_id, "; ".join(moved),
                 )
 
             # An edit to what the job *dispatches* lifts a suspension. Without
@@ -1787,7 +1795,7 @@ def sync_cron_jobs_to_db(
 
             set_parts = [f"{k} = ?" for k in updates]
             values = list(updates.values())
-            if cron_changed:
+            if schedule_changed:
                 set_parts.append("last_run_at = datetime('now')")
             elif fj.once and existing.once and egress.task_text_digest(
                 file_values,
@@ -2007,6 +2015,7 @@ def _migrate_db_jobs_locked(conn, config, user_id: str, config_dir, overwrite: b
         file_jobs.append(CronJob(
             name=j.name,
             cron=j.cron_expression,
+            timezone=j.timezone or "",
             prompt=j.prompt,
             command=cmd,
             target=j.output_target or "",

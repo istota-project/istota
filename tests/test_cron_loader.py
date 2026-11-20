@@ -933,24 +933,26 @@ class TestColumnOwnership:
     # rather than riding on either branch.
     _ENABLED_RESET = {"disabled_at"}
 
-    @pytest.mark.parametrize("file_cron,file_prompt,cleared", [
+    @pytest.mark.parametrize("file_cron,file_prompt,file_tz,cleared", [
         # The file changed nothing the job dispatches. Every daemon-owned
         # column survives, suspension included.
-        ("0 9 * * *", "old", _ENABLED_RESET),
+        ("0 9 * * *", "old", "", _ENABLED_RESET),
         # A prompt edit: the suspension and the failure history it was charged
         # against go, and nothing else moves.
-        ("0 9 * * *", "new", _DISPATCH_RESET | _ENABLED_RESET),
+        ("0 9 * * *", "new", "", _DISPATCH_RESET | _ENABLED_RESET),
         # A cron edit: last_run_at is reset, and the dispatch reset rides along.
-        ("30 9 * * *", "old", _DISPATCH_RESET | _ENABLED_RESET | {"last_run_at"}),
+        ("30 9 * * *", "old", "", _DISPATCH_RESET | _ENABLED_RESET | {"last_run_at"}),
+        # A zone edit moves the schedule, not what runs: last_run_at alone.
+        ("0 9 * * *", "old", "America/New_York", _ENABLED_RESET | {"last_run_at"}),
     ])
     def test_the_sync_leaves_every_daemon_owned_column_alone(
-        self, db_path, file_cron, file_prompt, cleared,
+        self, db_path, file_cron, file_prompt, file_tz, cleared,
     ):
         """The behavioural half, over the whole daemon-owned set at once.
 
-        Three legs, because there are exactly two branches where this sync
-        writes a daemon-owned column at all — the cron-expression change that
-        resets ``last_run_at``, and the dispatch-field change that clears the
+        Four legs, because there are exactly two branches where this sync
+        writes a daemon-owned column at all — the schedule change (cron or
+        timezone) that resets ``last_run_at``, and the dispatch-field change that clears the
         suspension and the failure history charged against the old definition
         — and those are the branches where a third write would be easiest to
         add without noticing what else it touches. The first leg is the
@@ -982,7 +984,8 @@ class TestColumnOwnership:
                 # it differs on every leg, and it is in neither exception set.
                 # The prompt cannot play that part any more, since on two legs
                 # it is deliberately unchanged.
-                [CronJob(name="j1", cron=file_cron, prompt=file_prompt, model="opus")],
+                [CronJob(name="j1", cron=file_cron, prompt=file_prompt,
+                         timezone=file_tz, model="opus")],
             )
             row = conn.execute(
                 "SELECT * FROM scheduled_jobs WHERE user_id = 'alice' AND name = 'j1'"
@@ -1040,6 +1043,7 @@ class TestColumnOwnership:
         job = CronJob(
             name="j1",
             cron="5 4 * * *",
+            timezone="America/New_York",
             prompt="a prompt",
             command=command,
             target="talk",
@@ -1059,6 +1063,7 @@ class TestColumnOwnership:
         )
         expected = {
             "cron_expression": "5 4 * * *",
+            "timezone": "America/New_York",
             "prompt": "a prompt",
             "conversation_token": "r1",
             "output_target": "talk",
@@ -4742,3 +4747,162 @@ class TestJobTimezoneField:
         assert USER_CLOCK == "user"
         assert job_timezone_name(None, "Europe/Warsaw") == "Europe/Warsaw"
         assert job_timezone_name("America/New_York", "Europe/Warsaw") == "America/New_York"
+
+
+# ---------------------------------------------------------------------------
+# A job's own timezone (#976): the column, the sync and the restore
+# ---------------------------------------------------------------------------
+
+
+class TestJobTimezoneColumn:
+    @staticmethod
+    def _seed(conn, *, timezone=None, cron="20 13 * * 1-5"):
+        conn.execute(
+            """INSERT INTO scheduled_jobs
+               (user_id, name, cron_expression, prompt, enabled, timezone,
+                last_run_at, consecutive_failures, last_error, auto_disabled_at)
+               VALUES ('alice', 'market', ?, 'p', 1, ?,
+                       '2026-01-01T00:00:00', 3, 'oops', '2026-01-02T00:00:00')""",
+            (cron, timezone),
+        )
+
+    @staticmethod
+    def _resets(caplog):
+        return [
+            r.getMessage() for r in caplog.records
+            if "resetting last_run_at" in r.getMessage()
+        ]
+
+    def test_an_old_database_gains_the_column_and_its_rows_follow_the_user(self, tmp_path):
+        path = tmp_path / "old.db"
+        db.init_db(path)
+        with db.get_db(path) as conn:
+            conn.execute("ALTER TABLE scheduled_jobs DROP COLUMN timezone")
+            conn.execute(
+                "INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt) "
+                "VALUES ('alice', 'nightly', '0 3 * * *', 'p')"
+            )
+        db.init_db(path)
+        with db.get_db(path) as conn:
+            columns = {r["name"] for r in conn.execute("PRAGMA table_info(scheduled_jobs)")}
+            job = db.get_scheduled_job_by_name(conn, "alice", "nightly")
+        assert "timezone" in columns
+        assert job.timezone is None
+
+    @pytest.mark.parametrize("written, stored", [
+        ("", None), ("user", None), ("America/New_York", "America/New_York"),
+    ])
+    def test_the_value_map_stores_the_zone(self, written, stored):
+        values = _file_owned_values(
+            CronJob(name="j", cron="0 9 * * *", prompt="p", timezone=written),
+            None, None, None, None,
+        )
+        assert values["timezone"] == stored
+
+    @pytest.mark.parametrize("written, stored", [
+        ("", None), ("user", None), ("America/New_York", "America/New_York"),
+    ])
+    def test_the_sync_inserts_the_zone(self, db_path, written, stored):
+        with db.get_db(db_path) as conn:
+            sync_cron_jobs_to_db(conn, "alice", [
+                CronJob(name="market", cron="20 13 * * 1-5", prompt="p", timezone=written),
+            ])
+            job = db.get_scheduled_job_by_name(conn, "alice", "market")
+        assert job.timezone == stored
+
+    def test_every_reader_carries_the_zone(self, db_path):
+        with db.get_db(db_path) as conn:
+            self._seed(conn, timezone="UTC")
+            conn.execute("UPDATE scheduled_jobs SET auto_disabled_at = NULL")
+            by_name = db.get_scheduled_job_by_name(conn, "alice", "market")
+            readers = [
+                by_name,
+                db.get_scheduled_job(conn, by_name.id),
+                db.get_user_scheduled_jobs(conn, "alice")[0],
+                db.get_enabled_scheduled_jobs(conn)[0],
+            ]
+        assert [job.timezone for job in readers] == ["UTC"] * 4
+
+    @pytest.mark.parametrize("before, written", [
+        (None, "America/New_York"),
+        ("America/New_York", "Europe/Warsaw"),
+        ("America/New_York", ""),
+    ])
+    def test_a_zone_change_resets_the_schedule_and_nothing_else(
+        self, db_path, caplog, before, written,
+    ):
+        with db.get_db(db_path) as conn:
+            self._seed(conn, timezone=before)
+            with caplog.at_level(logging.INFO, "istota.cron_loader"):
+                sync_cron_jobs_to_db(conn, "alice", [
+                    CronJob(name="market", cron="20 13 * * 1-5", prompt="p", timezone=written),
+                ])
+            job = db.get_scheduled_job_by_name(conn, "alice", "market")
+        assert job.timezone == (written or None)
+        assert job.last_run_at not in (None, "2026-01-01T00:00:00")
+        # Not a change to what the job dispatches: the suspension stands.
+        assert job.auto_disabled_at == "2026-01-02T00:00:00"
+        assert job.consecutive_failures == 3
+        assert job.last_error == "oops"
+        resets = self._resets(caplog)
+        assert len(resets) == 1
+        assert "timezone" in resets[0] and "cron" not in resets[0]
+
+    def test_user_spelled_out_is_no_change_from_absent(self, db_path):
+        with db.get_db(db_path) as conn:
+            self._seed(conn, timezone=None)
+            sync_cron_jobs_to_db(conn, "alice", [
+                CronJob(name="market", cron="20 13 * * 1-5", prompt="p", timezone="user"),
+            ])
+            job = db.get_scheduled_job_by_name(conn, "alice", "market")
+        assert job.last_run_at == "2026-01-01T00:00:00"
+
+    def test_cron_and_zone_together_are_one_reset_naming_both(self, db_path, caplog):
+        with db.get_db(db_path) as conn:
+            self._seed(conn, timezone=None)
+            with caplog.at_level(logging.INFO, "istota.cron_loader"):
+                sync_cron_jobs_to_db(conn, "alice", [
+                    CronJob(name="market", cron="30 13 * * 1-5", prompt="p",
+                            timezone="America/New_York"),
+                ])
+            job = db.get_scheduled_job_by_name(conn, "alice", "market")
+        assert job.last_run_at not in (None, "2026-01-01T00:00:00")
+        resets = self._resets(caplog)
+        assert len(resets) == 1
+        assert "cron" in resets[0] and "timezone" in resets[0]
+
+    def test_a_once_job_whose_zone_and_text_change_is_reset_to_now(self, db_path):
+        """The schedule reset wins over the `once` text-change rule, as for cron."""
+        with db.get_db(db_path) as conn:
+            self._seed(conn, timezone=None)
+            conn.execute("UPDATE scheduled_jobs SET once = 1")
+            sync_cron_jobs_to_db(conn, "alice", [
+                CronJob(name="market", cron="20 13 * * 1-5", prompt="new", once=True,
+                        timezone="America/New_York"),
+            ])
+            job = db.get_scheduled_job_by_name(conn, "alice", "market")
+        assert job.last_run_at is not None
+        assert job.last_run_at != "2026-01-01T00:00:00"
+
+    def test_a_restore_from_the_table_keeps_the_zone(
+        self, db_path, mount_path, make_config_with_mount,
+    ):
+        config = make_config_with_mount(db_path=db_path)
+        with db.get_db(db_path) as conn:
+            self._seed(conn, timezone="America/New_York")
+            assert migrate_db_jobs_to_file(conn, config, "alice")
+
+        cron_path = mount_path / get_user_cron_path("alice", "istota").lstrip("/")
+        assert 'timezone = "America/New_York"' in cron_path.read_text()
+        assert load_cron_jobs(config, "alice")[0].timezone == "America/New_York"
+
+    def test_a_restore_of_a_user_clock_row_writes_no_zone(
+        self, db_path, mount_path, make_config_with_mount,
+    ):
+        config = make_config_with_mount(db_path=db_path)
+        with db.get_db(db_path) as conn:
+            self._seed(conn, timezone=None)
+            assert migrate_db_jobs_to_file(conn, config, "alice")
+
+        cron_path = mount_path / get_user_cron_path("alice", "istota").lstrip("/")
+        assert "timezone" not in cron_path.read_text()

@@ -393,6 +393,9 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
     user_id TEXT NOT NULL,
     name TEXT NOT NULL,
     cron_expression TEXT NOT NULL,
+    -- CRON.md's `timezone`: the zone cron_expression is read in. NULL follows
+    -- the owner's live timezone (`cron_loader.stored_timezone`).
+    timezone TEXT,
     prompt TEXT NOT NULL DEFAULT '',
     command TEXT,                    -- Shell command (mutually exclusive with prompt)
     conversation_token TEXT,
