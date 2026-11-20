@@ -2865,7 +2865,10 @@ async def cmd_cron(ctx: CommandContext):
         else:
             status = "enabled"
         kind = " (cmd)" if job.command else ""
-        line = f"- **{job.name}**{kind} `{job.cron_expression}` [{status}]"
+        line = f"- **{job.name}**{kind} `{job.cron_expression}`"
+        if job.timezone:
+            line += f" `tz: {job.timezone}`"
+        line += f" [{status}]"
         if job.model:
             line += f" `model: {job.model}`"
         if job.effort:

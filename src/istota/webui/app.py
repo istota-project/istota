@@ -4082,7 +4082,7 @@ def _admin_scheduler_section(conn: sqlite3.Connection) -> dict:
         """
         SELECT id, user_id, name, cron_expression, enabled, last_run_at,
                last_success_at, consecutive_failures, last_error,
-               auto_disabled_at
+               auto_disabled_at, timezone
         FROM scheduled_jobs
         ORDER BY user_id, name
         """,
@@ -4107,6 +4107,7 @@ def _admin_scheduler_section(conn: sqlite3.Connection) -> dict:
             "user_id": r["user_id"],
             "name": r["name"],
             "cron": r["cron_expression"],
+            "timezone": r["timezone"] or "",
             "enabled": enabled,
             "auto_disabled_at": suspended_at,
             "last_run_at": _iso_utc(r["last_run_at"]),
