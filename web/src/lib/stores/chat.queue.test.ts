@@ -1716,4 +1716,168 @@ describe('chat store — the send queue', () => {
       expect(storedQueue('t1')).toHaveLength(1);
     });
   });
+
+  describe('a rebuild while a drained send is still open (#973)', () => {
+    const TEXT = 'and another thing';
+    const mine = (s: Awaited<ReturnType<typeof freshSession>>) =>
+      get(s.messages).filter((m) => m.role === 'user' && m.text === TEXT);
+
+    /** Room 1's history once the server has stored the drained message as task 43. */
+    function storedHistory(text = TEXT) {
+      return {
+        messages: [
+          { msg_id: 50, role: 'user', text, task_id: 43, created_at: '2026-11-15T21:01:07Z' },
+          {
+            msg_id: 51,
+            role: 'assistant',
+            text: '',
+            task_id: 43,
+            status: 'running',
+            created_at: '2026-11-15T21:01:07Z',
+          },
+        ],
+        active_task: { id: 43, status: 'running' },
+        active_tasks: [{ id: 43, status: 'running' }],
+      };
+    }
+
+    /** Queue `TEXT` behind turn 42, finish 42, and leave the drain's POST open. */
+    async function drainingWithPostOpen(text = TEXT, attachments: ChatAttachment[] = []) {
+      const s = await streaming();
+      await s.send(text, attachments);
+      let release: (v: unknown) => void = () => {};
+      api.sendChatMessage.mockReturnValue(
+        new Promise((r) => {
+          release = r;
+        }),
+      );
+      await emit('done');
+      expect(api.sendChatMessage).toHaveBeenCalledTimes(1);
+      return { s, ack: () => release({ ok: true, status: 200, task_id: 43 }) };
+    }
+
+    it('shows the message once when a room switch repaints the stored copy mid-POST', async () => {
+      const { s, ack } = await drainingWithPostOpen();
+      api.getRoomMessages.mockImplementation(async (roomId: number) =>
+        roomId === 1 ? storedHistory() : { messages: [], active_task: null, active_tasks: [] },
+      );
+
+      await s.selectRoom(2);
+      await s.selectRoom(1);
+      await flush();
+
+      // The server's copy, and no queued mirror of it under the live turn.
+      expect(mine(s).map((m) => m.msgId)).toEqual([50]);
+      expect(queuedRows(get(s.messages))).toHaveLength(0);
+
+      ack();
+      await flush();
+
+      expect(mine(s).map((m) => m.msgId)).toEqual([50]);
+      expect(queuedRows(get(s.messages))).toHaveLength(0);
+      expect(api.sendChatMessage).toHaveBeenCalledTimes(1);
+      expect(storedQueue('t1')).toEqual([]);
+    });
+
+    it('shows the message once when a stream recovery repaints the stored copy mid-POST', async () => {
+      // The same room, rebuilt by a gap rather than a switch: nothing stashes
+      // the row first, and the echo buffer stays open across the reload.
+      const { s, ack } = await drainingWithPostOpen();
+      api.getRoomMessages.mockResolvedValue(storedHistory());
+      api.getRoomEvents.mockResolvedValueOnce({ events: [], cursor: 900, gap: true });
+      await vi.advanceTimersByTimeAsync(2000);
+      await flush();
+
+      expect(mine(s).map((m) => m.msgId)).toEqual([50]);
+      expect(queuedRows(get(s.messages))).toHaveLength(0);
+
+      ack();
+      await flush();
+
+      expect(mine(s).map((m) => m.msgId)).toEqual([50]);
+      expect(api.sendChatMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the row sending, not queued, when the repaint predates the stored copy', async () => {
+      const { s, ack } = await drainingWithPostOpen();
+      const cid = mine(s)[0].cid;
+      // Room 1's reload answered before the server wrote the message.
+      api.getRoomMessages.mockResolvedValue({ messages: [], active_task: null, active_tasks: [] });
+
+      await s.selectRoom(2);
+      await s.selectRoom(1);
+      await flush();
+
+      expect(mine(s).map((m) => [m.cid, m.sendState])).toEqual([[cid, 'sending']]);
+      // Not drained a second time behind its own open POST.
+      expect(api.sendChatMessage).toHaveBeenCalledTimes(1);
+
+      ack();
+      await flush();
+
+      expect(mine(s).map((m) => [m.cid, m.sendState, m.taskId])).toEqual([[cid, undefined, 43]]);
+      expect(storedQueue('t1')).toEqual([]);
+    });
+
+    it('folds the row into the stored copy on the ack when the bodies differ', async () => {
+      // An attachment-only send is stored under a descriptor the client never
+      // saw, so nothing can match it before the ack. The task id can after.
+      const { s, ack } = await drainingWithPostOpen('', [attachment()]);
+      api.getRoomMessages.mockImplementation(async (roomId: number) =>
+        roomId === 1
+          ? storedHistory('[sent an attachment]')
+          : { messages: [], active_task: null, active_tasks: [] },
+      );
+      await s.selectRoom(2);
+      await s.selectRoom(1);
+      await flush();
+
+      ack();
+      await flush();
+
+      const turn = get(s.messages).filter((m) => m.role === 'user' && m.taskId === 43);
+      expect(turn.map((m) => m.msgId)).toEqual([50]);
+      expect(queuedRows(get(s.messages))).toHaveLength(0);
+    });
+
+    it('drops a restored drained entry the history already holds', async () => {
+      // The app was killed mid-POST: the entry comes back `drained`, and the
+      // server's copy is in the first paint.
+      seedQueues({
+        t1: [
+          storedEntry(TEXT, {
+            drained: true,
+            afterMsgId: 10,
+            idempotencyKey: 'k1',
+            reason: 'busy',
+          }),
+        ],
+      });
+      api.getRoomMessages.mockResolvedValue(storedHistory());
+      const s = await freshSession();
+
+      await s.init();
+      await flush();
+
+      expect(mine(s).map((m) => m.msgId)).toEqual([50]);
+      expect(queuedRows(get(s.messages))).toHaveLength(0);
+      expect(storedQueue('t1')).toEqual([]);
+    });
+
+    it('keeps a restored drained entry when the only match is older than its send', async () => {
+      // "ok" sent yesterday is not this "ok": only a row the server stored
+      // after the drain began can be the drain's own.
+      seedQueues({
+        t1: [storedEntry(TEXT, { drained: true, afterMsgId: 60, reason: 'busy' })],
+      });
+      api.getRoomMessages.mockResolvedValue(storedHistory());
+      const s = await freshSession();
+
+      await s.init();
+      await flush();
+
+      expect(queuedRows(get(s.messages)).map((m) => m.text)).toEqual([TEXT]);
+      expect(storedQueue('t1')).toHaveLength(1);
+    });
+  });
 });
