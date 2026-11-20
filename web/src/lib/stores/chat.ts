@@ -716,10 +716,62 @@ function createSession(): ChatSession {
     return next;
   }
 
-  /** Move whatever client-only rows are on screen into the holding map. */
+  /**
+   * A drained entry's row while its send is open (#973).
+   *
+   * Not client-only, since the server may already hold the message, but no
+   * rebuild will put it back if it is dropped: the entry is still in the queue
+   * and its row is the only one the ack can settle. So the holding map and the
+   * carry treat it as client-only until the send resolves.
+   */
+  function isOpenDrain(m: ChatMessage): boolean {
+    return m.sendState === 'sending' && sendsInFlight.has(m.cid) && findQueued(m.cid) !== null;
+  }
+
+  /** The highest message id on screen, which `takeServerCopy` measures a send against. */
+  function newestMsgId(): number {
+    let max = 0;
+    for (const m of get(messages)) {
+      if (m.msgId != null && m.msgId > max) max = m.msgId;
+    }
+    return max;
+  }
+
+  /**
+   * Whether `rows` holds the server's copy of a send whose text is `text`, and
+   * if so mark that row taken in `claimed`.
+   *
+   * History carries no idempotency key, so this is a body match on the viewer's
+   * own rows (no `author`, no `origin`). `after` is the newest message id that
+   * was on screen when the send began: a row at or below it existed before the
+   * send and is an earlier message that says the same thing. Pass 0 where that
+   * is not known, which leaves the body alone to decide.
+   */
+  function takeServerCopy(
+    text: string,
+    after: number,
+    rows: ChatMessage[],
+    claimed: Set<number>,
+  ): boolean {
+    const copy = rows.find(
+      (m) =>
+        m.role === 'user' &&
+        m.msgId != null &&
+        m.msgId > after &&
+        !claimed.has(m.msgId) &&
+        !m.author &&
+        !m.origin &&
+        m.text === text,
+    );
+    if (copy?.msgId == null) return false;
+    claimed.add(copy.msgId);
+    return true;
+  }
+
+  /** Move whatever client-only rows, and open drains, are on screen into the holding map. */
   function stashStrandedSends() {
     for (const m of get(messages)) {
-      if (!isClientOnly(m) || !m.roomToken) continue;
+      if ((!isClientOnly(m) && !isOpenDrain(m)) || !m.roomToken) continue;
       const held = strandedSends.get(m.roomToken) ?? [];
       if (!held.some((x) => x.cid === m.cid)) held.push(m);
       strandedSends.set(m.roomToken, held);
@@ -743,6 +795,11 @@ function createSession(): ChatSession {
    * stay in the holding map on the way past rather than being rendered or
    * dropped. A failed row keeps its existing behaviour in that branch: its
    * Retry is the only way back to a message the server never took.
+   *
+   * An open drain (`isOpenDrain`) is carried like a queued row, for a named
+   * room only (#973). Dropped, the entry behind it was rebuilt by
+   * `appendQueuedRows` as `'queued'`, under the live turn, beside the server's
+   * own copy, with a Send that would POST it again.
    */
   function carryClientOnlyRows(
     prev: ChatMessage[],
@@ -751,22 +808,32 @@ function createSession(): ChatSession {
   ): ChatMessage[] {
     const carried: ChatMessage[] = [];
     const seen = new Set(next.map((m) => m.cid));
-    // The bodies the rebuild is already carrying for this room. A send parked
-    // after it reached the wire (see `parkedAfterPost`) may be one of them —
-    // the server took it and the reload is where that first becomes visible —
-    // and carrying the queued mirror on top would show the same message twice
-    // and then send it again when the entry drained. Same body match, and the
-    // same fallback, as the stream's own adoption in `appendStreamedRow`.
-    const rebuilt = new Set(next.filter((m) => m.role === 'user').map((m) => m.text));
+    const claimed = new Set<number>();
     const take = (m: ChatMessage) => {
-      if (!isClientOnly(m) || seen.has(m.cid)) return;
-      if (token === null && isQueued(m)) return;
+      if (seen.has(m.cid)) return;
+      const open = isOpenDrain(m);
+      if (!open && !isClientOnly(m)) return;
+      if (token === null && (open || isQueued(m))) return;
       if (token !== null && m.roomToken !== token) return;
-      if (parkedAfterPost.has(m.cid) && rebuilt.has(m.text)) {
-        // The entry goes with the row, or the drain would POST a message the
-        // server has already answered.
-        dropQueuedEntry(m.cid);
-        return;
+      // A send that reached the wire, open or parked (see `parkedAfterPost`),
+      // may already be in the rebuild: the server took it and the reload is
+      // where that first shows. Carrying the row on top would show the message
+      // twice. Same body match as the stream's adoption in `appendStreamedRow`.
+      // A restored entry is the third case: a cached paint gave it a row before
+      // the fetch, and this carry is the fetched paint's only look at it.
+      const found = findQueued(m.cid);
+      const entry = found ? found.entries[found.idx] : undefined;
+      if (open || parkedAfterPost.has(m.cid) || (entry && restoredAndSent(entry))) {
+        const after = entry?.afterMsgId ?? 0;
+        if (takeServerCopy(m.text, after, next, claimed)) {
+          // Marked seen, since a reload's `prev` and the holding map can both
+          // hold this row and the second visit would find the copy claimed.
+          seen.add(m.cid);
+          // A parked entry goes with its row, or the drain would POST a message
+          // the server has already answered. An open one is the ack's to drop.
+          if (!open) dropQueuedEntry(m.cid);
+          return;
+        }
       }
       seen.add(m.cid);
       carried.push(m);
@@ -826,6 +893,9 @@ function createSession(): ChatSession {
     // Handed to a send at least once. Such an entry may already be a task on
     // the server, so it goes out alone and unchanged from then on (#854).
     drained?: boolean;
+    // The newest message id on screen when it was first drained. Only a row
+    // above it can be the server's copy of this message (`takeServerCopy`).
+    afterMsgId?: number;
     // True = will not drain on its own; the user has to release it.
     held: boolean;
     queuedAt: number;
@@ -1265,20 +1335,56 @@ function createSession(): ChatSession {
   }
 
   /**
+   * Whether a restored entry may have reached the server before the session
+   * that drained it ended, so that a matching row in the history is its copy.
+   *
+   * Drained, with `afterMsgId`: without the watermark the body alone would
+   * decide, and an older "ok" would cost a message that was never sent. And
+   * holding no bytes, since uploads finish before the POST, so an entry still
+   * holding them never reached it. In-session entries are left to
+   * `parkedAfterPost`, which knows whether this attempt reached the wire.
+   */
+  function restoredAndSent(entry: QueuedSend): boolean {
+    return (
+      restoredCids.has(entry.cid) &&
+      entry.drained === true &&
+      entry.afterMsgId !== undefined &&
+      !entry.pendingAttachments?.length
+    );
+  }
+
+  /**
    * Give a room's queued entries their rows, for any entry that has none.
    *
    * A row that is merely off screen comes back through `carryClientOnlyRows`
    * with whatever the user last saw on it, so this only ever fires for an
    * entry restored from storage — where the queue outlived every row it had.
+   *
+   * Two entries get no row (#973). One whose send is open has none because
+   * the carry found the server's copy on screen, and its ack drops the entry.
+   * A restored entry that went out before the app was killed
+   * (`restoredAndSent`) and whose server copy is on screen is dropped here.
    */
   function appendQueuedRows(roomToken: string) {
     const entries = sendQueue.get(roomToken);
     if (!entries?.length) return;
-    messages.update((arr) => {
-      const seen = new Set(arr.map((m) => m.cid));
-      const missing = entries.filter((e) => !seen.has(e.cid));
-      return missing.length ? [...arr, ...missing.map((e) => queuedRow(e, roomToken))] : arr;
-    });
+    const onScreen = get(messages);
+    const seen = new Set(onScreen.map((m) => m.cid));
+    const claimed = new Set<number>();
+    const delivered: number[] = [];
+    const missing: QueuedSend[] = [];
+    for (const e of entries) {
+      if (seen.has(e.cid) || sendsInFlight.has(e.cid)) continue;
+      if (restoredAndSent(e) && takeServerCopy(e.text, e.afterMsgId ?? 0, onScreen, claimed)) {
+        delivered.push(e.cid);
+      } else {
+        missing.push(e);
+      }
+    }
+    for (const cid of delivered) dropQueuedEntry(cid);
+    if (missing.length) {
+      messages.update((arr) => [...arr, ...missing.map((e) => queuedRow(e, roomToken))]);
+    }
   }
 
   /**
@@ -4427,10 +4533,9 @@ function createSession(): ChatSession {
    * first task, so no second task and no second bubble exist to reconcile.
    */
   async function beginSend(roomId: number, cid: number, payload: SendPayload) {
-    // A second send of the same message, while the first is still uploading
-    // its files, is refused here rather than left to the row state. See
-    // `resolvingSends`.
-    if (resolvingSends.has(cid)) return;
+    // A second send of the same message while the first is still open is
+    // refused here rather than left to the row state. See `sendsInFlight`.
+    if (sendsInFlight.has(cid)) return;
     updateMsg(cid, (m) => {
       m.sendState = 'sending';
       m.sendError = undefined;
@@ -4438,32 +4543,31 @@ function createSession(): ChatSession {
       m.queueHeld = undefined;
       m.sendPayload = payload;
     });
-    let resolved: SendPayload | null;
-    resolvingSends.add(cid);
+    sendsInFlight.add(cid);
     try {
-      resolved = await resolvePendingAttachments(roomId, cid, payload);
+      const resolved = await resolvePendingAttachments(roomId, cid, payload);
+      // The resolution reported the outcome itself — parked, failed, or the
+      // entry left under it — so there is nothing left for this send to do.
+      if (!resolved) return;
+      if (resolved !== payload) {
+        // A retry after this point has to POST the paths, not the chips that
+        // no longer name anything.
+        updateMsg(cid, (m) => {
+          m.sendPayload = resolved;
+        });
+      }
+      await runTurn(
+        roomId,
+        cid,
+        resolved.text,
+        resolved.attachments,
+        resolved.idempotencyKey,
+        resolved.replyToMsgId,
+        resolved.aboutRoom,
+      );
     } finally {
-      resolvingSends.delete(cid);
+      sendsInFlight.delete(cid);
     }
-    // The resolution reported the outcome itself — parked, failed, or the
-    // entry left under it — so there is nothing left for this send to do.
-    if (!resolved) return;
-    if (resolved !== payload) {
-      // A retry after this point has to POST the paths, not the chips that no
-      // longer name anything.
-      updateMsg(cid, (m) => {
-        m.sendPayload = resolved;
-      });
-    }
-    await runTurn(
-      roomId,
-      cid,
-      resolved.text,
-      resolved.attachments,
-      resolved.idempotencyKey,
-      resolved.replyToMsgId,
-      resolved.aboutRoom,
-    );
   }
 
   /**
@@ -4476,25 +4580,23 @@ function createSession(): ChatSession {
   const NO_PLACEHOLDER = -1;
 
   /**
-   * Sends whose files are being uploaded right now, by cid.
+   * Sends that `beginSend` has open, by cid: from the first upload to the
+   * POST's answer.
    *
    * What stops a second drain of the same entry, and it has to be this rather
    * than the row's own `sendState`. A drain marks its row `'sending'`, and
-   * `canDrain` refuses while any row is — but a `'sending'` row is not
-   * client-only, so a room switch drops it (`stashStrandedSends` keeps only
-   * failed and queued rows) and the switch back rebuilds it from the *entry*,
-   * which is still in the queue, as `'queued'`. `loadHistory` then drains at
-   * its foot and a second resolution starts on an entry the first is still
-   * working through: whichever calls `getBlob` after the other's `deleteBlob`
-   * finds nothing and fails a message whose upload had in fact succeeded.
+   * `canDrain` refuses while any row is — but a rebuild can take that row off
+   * screen while the entry is still in the queue. Before #973 a room switch did
+   * exactly that, and the switch back rebuilt it from the entry as `'queued'`,
+   * beside the server's copy when the history already had it; `loadHistory`
+   * then drained at its foot, a second POST for a text send and, for a send
+   * still uploading, a second resolution racing the first over the same blobs.
+   * `canDrain`, `appendQueuedRows` and the carry (`isOpenDrain`) all read this.
    *
-   * That window exists for a plain text send too — it is the length of the
-   * POST — and the idempotency key is what makes it harmless there. Nothing
-   * makes an *upload* idempotent, and this window is as long as the file takes,
-   * so the claim is explicit. Session-lived and never persisted: it describes
-   * work in flight in this tab, which by definition does not survive a reload.
+   * Session-lived and never persisted: it describes work in flight in this
+   * tab, which by definition does not survive a reload.
    */
-  const resolvingSends = new Set<number>();
+  const sendsInFlight = new Set<number>();
 
   /**
    * Turn an entry's held bytes into host paths, one file at a time.
@@ -4718,7 +4820,9 @@ function createSession(): ChatSession {
     const token = roomTokenOf(roomId);
     if (!token) return false;
     const head = sendQueue.get(token)?.[0];
-    return !!head && !head.held;
+    // An open send keeps its entry at the head until it resolves, and its row
+    // may be off screen after a rebuild, so the row check above can miss it.
+    return !!head && !head.held && !sendsInFlight.has(head.cid);
   }
 
   /** The separator between merged messages' texts. */
@@ -4831,7 +4935,8 @@ function createSession(): ChatSession {
    *
    * Draining the same head twice is impossible either way: `canDrain` refuses
    * while any row is `sendState: 'sending'`, which `beginSend` sets
-   * synchronously before it awaits.
+   * synchronously before it awaits, and while the head's send is in
+   * `sendsInFlight`, which covers a rebuild that took that row off screen.
    */
   async function drainSendQueue(roomId: number) {
     if (!canDrain(roomId)) return;
@@ -4840,6 +4945,8 @@ function createSession(): ChatSession {
     if (!token || !run.length) return;
     const entry = run.length > 1 ? collapseRun(token, run) : run[0];
     entry.drained = true;
+    // The first drain's, kept on a re-drain: every attempt's copy is above it.
+    entry.afterMsgId ??= newestMsgId();
     persistRoomQueue(token);
     await beginSend(roomId, entry.cid, {
       text: entry.text,
@@ -5292,6 +5399,22 @@ function createSession(): ChatSession {
     sendSettled.update((s) => ({ n: s.n + 1, token }));
   }
 
+  /**
+   * On the ack: if a rebuild during the POST already painted the server's copy
+   * of this message, take the client's row off and keep that one, which has
+   * the server's id and time (#973). Returns whether it did.
+   *
+   * The exact half of the reconciliation. `takeServerCopy` decides by body
+   * before the ack, and a body the client never saw (an attachment-only send's
+   * stored descriptor) gets no match there and is settled here instead.
+   */
+  function yieldToServerCopy(userCid: number, isCopy: (m: ChatMessage) => boolean): boolean {
+    const onScreen = get(messages);
+    if (!onScreen.some((m) => m.cid !== userCid && m.role === 'user' && isCopy(m))) return false;
+    messages.set(onScreen.filter((m) => m.cid !== userCid));
+    return true;
+  }
+
   /** The user-facing sentence for each way a send can fail. */
   function sendFailureReason(res: SendResult): { reason: string; retryable: boolean } {
     switch (res.failure) {
@@ -5390,9 +5513,11 @@ function createSession(): ChatSession {
       // stream's echo of this row, since a task-less row carries no task id.
       if (typeof res.message_id === 'number') {
         const msgId = res.message_id;
-        updateMsg(userCid, (m) => {
-          m.msgId = msgId;
-        });
+        if (!yieldToServerCopy(userCid, (m) => m.msgId === msgId)) {
+          updateMsg(userCid, (m) => {
+            m.msgId = msgId;
+          });
+        }
       }
       // Room-guarded, and the queue drained, for the reasons the inline
       // branch below gives: no stream will settle for this turn.
@@ -5467,9 +5592,11 @@ function createSession(): ChatSession {
     // needs it to bind its stream; the user bubble needs it so the room stream
     // recognises its own echo — the canonical `messages` user row arrives with
     // this task_id, and (role, task_id) is what dedups it away.
-    updateMsg(userCid, (m) => {
-      m.taskId = res.task_id!;
-    });
+    if (!yieldToServerCopy(userCid, (m) => m.taskId === res.task_id)) {
+      updateMsg(userCid, (m) => {
+        m.taskId = res.task_id!;
+      });
+    }
     updateMsg(assistantCid, (m) => {
       m.taskId = res.task_id!;
       if (!streamAlreadyBound) m.status = 'pending';
