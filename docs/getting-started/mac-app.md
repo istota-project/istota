@@ -67,7 +67,7 @@ When the command-line install is running, the app first has it back up its datab
 
 The app refuses the move, and leaves the command-line install running, when that install runs a newer Istota release than the one the app carries. Update the app first.
 
-The old VM is left stopped, not deleted. If you turned on `istota-stack autostart`, run `istota-stack autostart off` so it does not start at your next login and hold the port. Once Istota works in the app, delete the old VM with the command-line install's own `istota-stack destroy`, without `--purge`. `--purge` would also delete the folder and the Keychain key the app now uses, and the app's backups cannot be read without that key. Then remove that install's commands from `~/.local/bin`, since the app's command-line tools never replace a file they did not write.
+The old VM is left stopped, not deleted. If you turned on `istota-stack autostart`, run `istota-stack autostart off` so it does not start at your next login and hold the port. Once Istota works in the app, delete the old VM with the command-line install's own `istota-stack destroy`. `--purge` is safe there too: it sees that the app uses the same folder and the same Keychain key, and keeps both. Then remove that install's commands from `~/.local/bin`, since the app's command-line tools never replace a file they did not write.
 
 ## Removing it
 

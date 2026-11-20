@@ -112,6 +112,10 @@ STATE_FILE="${STATE_DIR}/${INSTANCE}.env"
 # Where the first releases of this script kept it. Read only when it holds
 # nothing but state, and never written, moved or removed.
 OLD_STATE_FILE="${XDG_CONFIG_HOME:-${HOME}/.config}/istota/${INSTANCE}.env"
+# The Mac app runs this script with XDG_CONFIG_HOME at config/ and LIMA_HOME
+# at lima/ under here (istota-mac's ISTOTA_DESKTOP_STATE_DIR). Read only by
+# destroy --purge, which keeps what that install still uses.
+APP_STATE_DIR="${ISTOTA_DESKTOP_STATE_DIR:-${HOME}/Library/Application Support/Istota}"
 # Where a release with no --tag is looked up; the VM clones the same repository.
 REPO_URL="${ISTOTA_REPO_URL:-https://github.com/istota-project/istota.git}"
 # host/release-signing-key.pub, which is authoritative; tests/test_host_units.py
@@ -1898,20 +1902,78 @@ purge_folder_refusal() {
         return 0
     fi
     old_dir="$(dirname "$OLD_STATE_FILE")"
-    for file in "${STATE_DIR}"/*.env "${old_dir}"/*.env; do
-        [ "$file" != "$STATE_FILE" ] && [ "$file" != "$OLD_STATE_FILE" ] || continue
+    for file in "${STATE_DIR}"/*.env "${HOME}/.config/istota-stack"/*.env \
+        "${APP_STATE_DIR}/config/istota-stack"/*.env "${old_dir}"/*.env "${HOME}/.config/istota"/*.env; do
         [ -e "$file" ] || continue
+        if [ "$file" = "$STATE_FILE" ] || [ "$file" -ef "$STATE_FILE" ] \
+            || [ "$file" = "$OLD_STATE_FILE" ] || [ "$file" -ef "$OLD_STATE_FILE" ]; then
+            continue
+        fi
         case "$file" in
-            "${STATE_DIR}"/*) [ -f "$file" ] && [ ! -L "$file" ] || continue ;;
             # The old directory also holds the standalone install's istota.env.
-            *) is_state_file "$file" || continue ;;
+            "${old_dir}"/* | "${HOME}/.config/istota"/*) is_state_file "$file" || continue ;;
+            *) [ -f "$file" ] && [ ! -L "$file" ] || continue ;;
         esac
         if [ ! -r "$file" ]; then echo "${file} cannot be read to check it"; return 0; fi
         other="$(awk -F= '$1 == "WORKSPACE" { sub(/^[^=]*=/, ""); v = $0 } END { print v }' "$file")"
         if [ -n "$other" ] && { within "$other" "$folder" || within "$folder" "$other"; }; then
-            echo "the instance $(basename "$file" .env) uses it too"
+            echo "the instance $(basename "$file" .env) recorded in ${file} uses it too"
             return 0
         fi
+    done
+    for file in "${LIMA_HOME:-${HOME}/.lima}"/*/lima.yaml "${HOME}/.lima"/*/lima.yaml \
+        "${APP_STATE_DIR}/lima"/*/lima.yaml; do
+        [ -e "$file" ] || [ -L "$file" ] || continue
+        if [ "$(dirname "$file")" -ef "${LIMA_HOME:-${HOME}/.lima}/${INSTANCE}" ]; then continue; fi
+        if [ ! -r "$file" ]; then echo "${file} cannot be read to check it"; return 0; fi
+        other="$(lima_workspace_param "$file")"
+        if [ -n "$other" ] && { within "$other" "$folder" || within "$folder" "$other"; }; then
+            echo "the Lima instance $(basename "$(dirname "$file")") in $(dirname "$(dirname "$file")") mounts it"
+            return 0
+        fi
+    done
+    echo may-delete
+}
+
+# The WORKSPACE param a Lima instance was made with, as Lima writes it back
+# into its lima.yaml: `  WORKSPACE: "/path"` under a top-level `param:`.
+lima_workspace_param() {
+    awk '
+        /^[^[:space:]#]/ { in_param = ($0 ~ /^param:[[:space:]]*$/); next }
+        in_param && $1 == "WORKSPACE:" {
+            v = $0
+            sub(/^[[:space:]]*WORKSPACE:[[:space:]]*/, "", v)
+            sub(/[[:space:]]+$/, "", v)
+            if (v ~ /^".*"$/ || v ~ /^'\''.*'\''$/) v = substr(v, 2, length(v) - 2)
+            print v
+            exit
+        }
+    ' "$1"
+}
+
+# Why --purge keeps the Keychain item even where the folder may go, or
+# `may-delete`. The item is named by the instance alone, so another install
+# of the same name (the Mac app's, after a move) holds this same key.
+purge_key_refusal() {
+    local file
+    for file in "${HOME}/.config/istota-stack/${INSTANCE}.env" \
+        "${APP_STATE_DIR}/config/istota-stack/${INSTANCE}.env" "${HOME}/.config/istota/${INSTANCE}.env"; do
+        { [ -e "$file" ] || [ -L "$file" ]; } || continue
+        if [ "$file" = "$STATE_FILE" ] || [ "$file" -ef "$STATE_FILE" ] \
+            || [ "$file" = "$OLD_STATE_FILE" ] || [ "$file" -ef "$OLD_STATE_FILE" ]; then
+            continue
+        fi
+        case "$file" in
+            "${HOME}/.config/istota/"*) is_state_file "$file" || continue ;;
+        esac
+        echo "the instance ${INSTANCE} recorded in ${file} uses it too"
+        return 0
+    done
+    for file in "${HOME}/.lima/${INSTANCE}" "${APP_STATE_DIR}/lima/${INSTANCE}"; do
+        { [ -e "$file" ] || [ -L "$file" ]; } || continue
+        if [ "$file" -ef "${LIMA_HOME:-${HOME}/.lima}/${INSTANCE}" ]; then continue; fi
+        echo "the Lima instance ${INSTANCE} in $(dirname "$file") uses it too"
+        return 0
     done
     echo may-delete
 }
@@ -1920,7 +1982,7 @@ purge_folder_refusal() {
 # The state file goes last, so a run that stops partway can be run again. A
 # folder kept keeps the Keychain key too: its snapshots cannot be read without it.
 purge_instance() {
-    local status="$1" folder refusal="" key="" state="" old="" answer=""
+    local status="$1" folder refusal="" key="" key_refusal="" state="" old="" answer=""
     folder="$(state_get WORKSPACE)"
     if [ -n "$folder" ] && { [ -e "$folder" ] || [ -L "$folder" ]; }; then
         refusal="$(purge_folder_refusal "$folder")" || true
@@ -1928,7 +1990,11 @@ purge_instance() {
     else
         folder=""
     fi
-    if [ -z "$refusal" ] && keychain_has_item; then key=1; fi
+    if [ -z "$refusal" ] && keychain_has_item; then
+        key_refusal="$(purge_key_refusal)" || true
+        if [ "$key_refusal" = may-delete ]; then key_refusal=""; else key_refusal="${key_refusal:-it could not be checked}"; fi
+        [ -n "$key_refusal" ] || key=1
+    fi
     if [ -f "$STATE_FILE" ]; then state=1; fi
     if [ "$(state_source)" = "$OLD_STATE_FILE" ]; then old=1; fi
     if [ -z "$status" ] && [ -z "$folder" ] && [ -z "$key" ] && [ -z "$state" ]; then
@@ -1941,6 +2007,7 @@ purge_instance() {
         [ -z "$key" ] || echo "  the master key in the login Keychain (${KEYCHAIN_SERVICE}, ${KEYCHAIN_ACCOUNT})"
         [ -z "$state" ] || echo "  ${STATE_FILE}"
         [ -z "$refusal" ] || echo "It keeps ${folder}, and the Keychain key its backups need: ${refusal}."
+        [ -z "$key_refusal" ] || echo "It keeps the master key in the login Keychain (${KEYCHAIN_SERVICE}, ${KEYCHAIN_ACCOUNT}): ${key_refusal}."
         [ -z "$old" ] || echo "It leaves ${OLD_STATE_FILE}, which an earlier version of this script wrote."
         printf '[istota-stack] Type %s to go on: ' "$INSTANCE"
     } >&2
@@ -1957,6 +2024,7 @@ purge_instance() {
     [ -z "$state" ] || rm -f -- "$STATE_FILE"
     log "purged ${INSTANCE}."
     [ -z "$refusal" ] || log "kept ${folder} and the Keychain key (${KEYCHAIN_SERVICE}, ${KEYCHAIN_ACCOUNT}): ${refusal}."
+    [ -z "$key_refusal" ] || log "kept the Keychain key (${KEYCHAIN_SERVICE}, ${KEYCHAIN_ACCOUNT}): ${key_refusal}."
     [ -z "$old" ] || log "left ${OLD_STATE_FILE}."
 }
 
