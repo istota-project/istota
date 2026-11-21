@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.52.0] - 2026-11-21
+
 A scheduled job can now keep its own timezone: give a CRON.md job a `timezone`, or pick one in Settings, Scheduled jobs, and it runs at that zone's wall-clock time wherever you travel. Web chat marks messages read as you scroll through All, Unread and Starred.
 
 Scripts run by `command` jobs and model tasks now see your timezone as `ISTOTA_USER_TZ`, and on a Mac `istota-stack destroy --purge` keeps what the Mac app uses. This release has 28 commits, against 8 in 0.51.0 and 69 in 0.50.0; the rest are fixes to the Scheduled jobs list and to messages showing twice in web chat.
@@ -3575,7 +3577,8 @@ Breaking changes this release:
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://github.com/istota-project/istota/compare/v0.51.0...main
+[Unreleased]: https://github.com/istota-project/istota/compare/v0.52.0...main
+[0.52.0]: https://github.com/istota-project/istota/releases/tag/v0.52.0
 [0.51.0]: https://github.com/istota-project/istota/releases/tag/v0.51.0
 [0.50.0]: https://github.com/istota-project/istota/releases/tag/v0.50.0
 [0.49.0]: https://github.com/istota-project/istota/releases/tag/v0.49.0
