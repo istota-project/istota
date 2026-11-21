@@ -175,6 +175,22 @@ class TestTheEnvironment:
         )
         assert result.details["value"] == "db=[]:user=[alice]"
 
+    def test_a_command_job_gets_the_user_s_live_timezone(self, db_path, tmp_path):
+        """#977: read from the profile on each run, so a move between two runs
+        changes the next one without a restart (ISSUE-099)."""
+        from istota import user_profiles
+
+        config = _config(db_path, tmp_path)
+        user_profiles.ensure_profile(db_path, "alice", timezone="Europe/Warsaw")
+        success, result = _execute_command_task(_task('echo "tz=[$ISTOTA_USER_TZ]"'), config)
+        assert success, result
+        assert result == "tz=[Europe/Warsaw]"
+
+        user_profiles.update_profile(db_path, "alice", timezone="America/Los_Angeles")
+        success, result = _execute_command_task(_task('echo "tz=[$ISTOTA_USER_TZ]"'), config)
+        assert success, result
+        assert result == "tz=[America/Los_Angeles]"
+
     def test_a_pipeline_in_a_nested_script_reports_its_failing_stage(
         self, db_path, tmp_path,
     ):

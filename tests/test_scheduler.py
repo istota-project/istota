@@ -6169,6 +6169,24 @@ class TestExecuteSkillTask:
         assert env.get("NC_USER") == "ncuser"
         assert env.get("FEEDS_USER") == "alice"
 
+    def test_a_skill_job_gets_the_user_s_timezone(self, db_path, tmp_path):
+        from istota import user_profiles
+
+        config = self._make_config(db_path, tmp_path)
+        user_profiles.ensure_profile(db_path, "alice", timezone="Europe/Warsaw")
+        env = self._captured_env(self._task(skill="feeds", skill_args='["list"]'), config)
+        assert env["ISTOTA_USER_TZ"] == "Europe/Warsaw"
+
+    def test_a_zone_the_server_cannot_load_is_left_out(self, db_path, tmp_path):
+        """#977: one rule for every task type, so a script can test for the
+        variable instead of finding the bad name at its own `ZoneInfo` call."""
+        from istota import user_profiles
+
+        config = self._make_config(db_path, tmp_path)
+        user_profiles.ensure_profile(db_path, "alice", timezone="Mars/Olympus")
+        env = self._captured_env(self._task(skill="feeds", skill_args='["list"]'), config)
+        assert "ISTOTA_USER_TZ" not in env
+
     def test_a_limited_job_carries_the_flag(self, db_path, tmp_path):
         config = self._make_config(db_path, tmp_path)
         env = self._captured_env(self._task(skill="feeds", skill_args='["list"]'), config)

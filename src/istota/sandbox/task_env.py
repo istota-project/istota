@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..lib.timezones import is_valid_timezone
 from .claude_runtime_env import without_claude_runtime_env
 from .host_paths import ATTACHMENTS_DIR_VAR
 
@@ -50,6 +51,36 @@ if TYPE_CHECKING:
     from .skill_proxy import SkillProxy
 
 logger = logging.getLogger(__name__)
+
+USER_TZ_VAR = "ISTOTA_USER_TZ"
+
+
+def user_timezone_env(
+    config: Config,
+    task: db.Task,
+    *,
+    conn: "db.sqlite3.Connection | None" = None,
+) -> dict[str, str]:
+    """``{USER_TZ_VAR: zone}`` for a task's env, or ``{}`` with a WARNING when
+    the zone does not load here. Callers pop the name first, so ``{}`` means
+    unset rather than whatever the env inherited.
+
+    The zone the prompt header names (`executor.task_timezone_name`), read from
+    the live profile on every call so a change between two runs reaches the
+    next (ISSUE-099). A user who never chose a zone gets ``UTC``, the zone
+    their cron jobs and briefings already run in; storage cannot tell that
+    apart from a chosen ``UTC`` (#977).
+    """
+    from istota.executor import task_timezone_name
+
+    zone = task_timezone_name(config, task.user_id, conn=conn, task=task)
+    if not is_valid_timezone(zone):
+        logger.warning(
+            "user %r has timezone %r, which this server cannot load; "
+            "%s left unset", task.user_id, zone, USER_TZ_VAR,
+        )
+        return {}
+    return {USER_TZ_VAR: zone}
 
 
 @dataclass
@@ -283,6 +314,8 @@ def build_task_runtime(
         ATTACHMENTS_DIR_VAR: str(attachments_dir(control_dir)),
         "ISTOTA_EXPERIMENTAL_FEATURES": ",".join(config.experimental.features),
     })
+    env.pop(USER_TZ_VAR, None)
+    env.update(user_timezone_env(config, task, conn=conn))
 
     # Both names carry the real workspace root for everyone. Every
     # consumer (the memory / memory_search skill CLIs, the schedules /

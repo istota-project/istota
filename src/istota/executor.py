@@ -203,6 +203,18 @@ def _research_task_timezone(
     return zone.strip() if isinstance(zone, str) and zone.strip() else shared_tz
 
 
+def task_timezone_name(
+    config: Config,
+    user_id: str,
+    *,
+    conn: "sqlite3.Connection | None" = None,
+    task: "db.Task | None" = None,
+) -> str:
+    """The zone name a task's clock reads in, unvalidated: the prompt header's
+    and ``ISTOTA_USER_TZ``'s one rule (#977)."""
+    return _research_task_timezone(config, task, conn) or config.resolve_user_timezone(user_id, conn=conn)
+
+
 def _resolve_user_tz(
     config: Config,
     user_id: str,
@@ -226,7 +238,7 @@ def _resolve_user_tz(
     Pass ``task`` where the clock is the task's: a briefing research task
     reads its zone from `_research_task_timezone` rather than a profile.
     """
-    tz_str = _research_task_timezone(config, task, conn) or config.resolve_user_timezone(user_id, conn=conn)
+    tz_str = task_timezone_name(config, user_id, conn=conn, task=task)
     try:
         return ZoneInfo(tz_str), tz_str
     except Exception:
