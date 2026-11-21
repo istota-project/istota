@@ -19,6 +19,7 @@ const job = (over: Record<string, unknown>) => ({
   user_id: 'bob',
   name: 'digest',
   cron: '0 9 * * *',
+  timezone: '',
   enabled: true,
   auto_disabled_at: null,
   last_run_at: null,
@@ -75,6 +76,22 @@ it('splits user jobs from module pollers and labels the three states', async () 
   expect(flaky).toHaveTextContent('timed out');
   expect(within(users).queryByRole('row', { name: /_module/ })).toBeNull();
   expect(within(await moduleTable()).getByRole('row', { name: /_module\.feeds/ })).toBeTruthy();
+});
+
+it("names the zone of a job pinned to one, and nothing for one on its owner's clock", async () => {
+  api.getAdminScheduledJobs.mockResolvedValue({
+    jobs_total: 2,
+    jobs_active: 2,
+    jobs_paused: 0,
+    jobs: [job({ name: 'market', timezone: 'America/New_York' }), job({ id: 2, name: 'weekly' })],
+  });
+  render(Page);
+  const users = await userTable();
+  const market = within(users).getByRole('row', { name: /market/ });
+  expect(within(market).getByText('America/New_York')).toHaveClass('caption');
+  const weekly = within(users).getByRole('row', { name: /weekly/ });
+  expect(within(weekly).queryByText(/\//)).toBeNull();
+  expect(weekly.querySelector('.col-schedule .caption')).toBeNull();
 });
 
 it('filters by user or job name', async () => {

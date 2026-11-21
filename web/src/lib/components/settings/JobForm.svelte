@@ -31,6 +31,7 @@
     type ModelChoices,
   } from '$lib/components/chat/modelPicker';
   import { deliveryFromJob, jobTarget } from '$lib/settings/jobDelivery';
+  import { timezoneOptions } from '$lib/settings/timezones';
   import { getCurrentUser } from '$lib/userContext';
   import {
     Alert,
@@ -93,6 +94,7 @@
   const FIELDS = new Set([
     'name',
     'cron',
+    'timezone',
     'kind',
     'prompt',
     'command',
@@ -112,6 +114,10 @@
     providers: [],
   };
 
+  // "user" in the file is your own clock, as an absent field is.
+  const USER_CLOCK = 'user';
+  const ZONE_OPTIONS = timezoneOptions();
+
   /** The output a new job starts on: a room if there is one to deliver into. */
   function firstOutput(outputs: string[]): string {
     return ['web', 'talk'].find((output) => outputs.includes(output)) ?? outputs[0] ?? '';
@@ -125,6 +131,7 @@
     return {
       name: source?.name ?? '',
       cron: source?.cron ?? '',
+      timezone: definition?.timezone === USER_CLOCK ? '' : (definition?.timezone ?? ''),
       kind: definition?.kind ?? ('prompt' as 'prompt' | 'command'),
       prompt: definition?.prompt ?? '',
       command: definition?.command ?? '',
@@ -164,6 +171,18 @@
   const definition = $derived(job?.definition ?? null);
   const keepLabel = $derived(keeping.target ? `Keep ${ACCESS_LABEL[keeping.target]}` : '');
   const isAdmin = $derived(identity.user.is_admin);
+  // A zone the file names that this browser does not list is still offered, so the
+  // select shows what the file says and can go back to it.
+  const unlistedZones = $derived(
+    [...new Set([draft.saved.timezone, form.timezone])].filter(
+      (zone) => zone && !ZONE_OPTIONS.some((option) => option.value === zone),
+    ),
+  );
+  const timezoneSelectOptions = $derived([
+    { value: '', label: `Your timezone (${timezone})` },
+    ...ZONE_OPTIONS,
+    ...unlistedZones.map((zone) => ({ value: zone, label: zone })),
+  ]);
 
   // svelte-ignore state_referenced_locally
   const startedWithRunFields = !!(
@@ -360,6 +379,7 @@
     return {
       name: form.name,
       cron: form.cron,
+      ...(form.timezone ? { timezone: form.timezone } : {}),
       ...textFields(),
       ...jobTarget(form.output, form.room),
       enabled: form.enabled,
@@ -384,6 +404,7 @@
     const fields: ScheduledJobFields = {};
     if ('name' in changed) fields.name = form.name;
     if ('cron' in changed) fields.cron = form.cron;
+    if ('timezone' in changed) fields.timezone = form.timezone;
     const text = form.kind === 'prompt' ? 'prompt' : 'command';
     if ('kind' in changed || text in changed) Object.assign(fields, textFields());
     if ('output' in changed || 'room' in changed)
@@ -502,7 +523,7 @@
       </Field>
       <Field
         label="Schedule"
-        description="A cron expression, in your timezone ({timezone})."
+        description="A cron expression, in the timezone beside it."
         error={fieldErrors.cron}
       >
         <Input
@@ -510,6 +531,19 @@
           monospace
           placeholder="0 7 * * *"
           invalid={!!fieldErrors.cron}
+        />
+      </Field>
+      <Field
+        label="Timezone"
+        description="Yours moves when you change it or travel. A named zone keeps its own clock."
+        error={fieldErrors.timezone}
+      >
+        <Select
+          value={form.timezone}
+          options={timezoneSelectOptions}
+          onValueChange={(zone) => (form.timezone = zone)}
+          ariaLabel="Timezone"
+          fullWidth
         />
       </Field>
     </FormGrid>

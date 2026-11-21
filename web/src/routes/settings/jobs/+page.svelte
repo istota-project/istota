@@ -13,6 +13,7 @@
   import { JobForm, NetworkAccessCard, type JobSaved } from '$lib/components/settings';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import { accessBadge, STATE_LABEL, STATE_VARIANT } from '$lib/settings/jobState';
+  import { zonedDateTimeOptions } from '$lib/settings/timezones';
   import { getCurrentUser } from '$lib/userContext';
   import {
     Alert,
@@ -215,6 +216,12 @@
     await refresh();
   }
 
+  function zoneCaption(job: ScheduledJob): string {
+    return job.follows_user_clock
+      ? `in your timezone (${job.schedule_timezone})`
+      : `in ${job.schedule_timezone}`;
+  }
+
   function isModuleJob(job: ScheduledJob): boolean {
     return job.name.startsWith(MODULE_PREFIX);
   }
@@ -333,7 +340,20 @@
     <Card title="Summary">
       <dl class="kv">
         <dt>Schedule</dt>
-        <dd><code>{job.cron}</code></dd>
+        <dd class="hstack wrap schedule">
+          <code>{job.cron}</code>
+          <span class="caption">{zoneCaption(job)}</span>
+        </dd>
+        <dt>Next run</dt>
+        <dd>
+          <Timestamp
+            value={job.next_run_at}
+            format="datetime"
+            options={zonedDateTimeOptions(job.schedule_timezone)}
+            title={false}
+            empty="Not scheduled"
+          />
+        </dd>
         <dt>Last run</dt>
         <dd><Timestamp value={job.last_run_at} format="datetime" empty="Never" /></dd>
         <dt>Last success</dt>
@@ -429,7 +449,12 @@
                       <p class="caption">{job.file_error} {@render cronFix()}</p>
                     {/if}
                   </td>
-                  <td class="col-schedule"><code>{job.cron}</code></td>
+                  <td class="col-schedule">
+                    <code>{job.cron}</code>
+                    {#if !job.follows_user_clock}
+                      <p class="caption zone">{job.schedule_timezone}</p>
+                    {/if}
+                  </td>
                   <td class="col-state">
                     {#if job.pending}
                       <span class="caption">Waiting for the next sync</span>
@@ -496,6 +521,13 @@
   }
   .failing {
     color: var(--status-danger-fg);
+  }
+  .schedule {
+    --hstack-gap: var(--space-1);
+  }
+  .zone {
+    margin: 0;
+    overflow-wrap: anywhere;
   }
   /* Job is the unsized column: the min-width reserves it 12rem past the sized
      ones, and adminTables.test.ts holds the sum. */

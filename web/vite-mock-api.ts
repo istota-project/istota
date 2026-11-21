@@ -2798,6 +2798,7 @@ const mockAdminStats = {
         user_id: 'carol',
         name: 'morning briefing',
         cron: '0 7 * * *',
+        timezone: '',
         enabled: true,
         auto_disabled_at: null,
         last_run_at: new Date(Date.now() - 6 * 3600_000).toISOString(),
@@ -2810,6 +2811,7 @@ const mockAdminStats = {
         user_id: 'carol',
         name: '_module.feeds.run_scheduled',
         cron: '*/5 * * * *',
+        timezone: '',
         enabled: true,
         auto_disabled_at: null,
         last_run_at: new Date(Date.now() - 3 * 60_000).toISOString(),
@@ -2822,6 +2824,7 @@ const mockAdminStats = {
         user_id: 'kasia',
         name: '_module.feeds.run_scheduled',
         cron: '*/5 * * * *',
+        timezone: '',
         enabled: true,
         auto_disabled_at: null,
         last_run_at: new Date(Date.now() - 3 * 60_000).toISOString(),
@@ -2834,6 +2837,7 @@ const mockAdminStats = {
         user_id: 'carol',
         name: '_module.money.run_scheduled',
         cron: '*/30 * * * *',
+        timezone: '',
         enabled: true,
         auto_disabled_at: null,
         last_run_at: new Date(Date.now() - 12 * 60_000).toISOString(),
@@ -2846,6 +2850,7 @@ const mockAdminStats = {
         user_id: 'carol',
         name: 'weekly roundup',
         cron: '0 18 * * 5',
+        timezone: 'America/New_York',
         // Switched off by the user in CRON.md, which reads differently from
         // the suspended row below and must stay in the mock as its own case.
         enabled: false,
@@ -2860,6 +2865,7 @@ const mockAdminStats = {
         user_id: 'carol',
         name: 'evening recap',
         cron: '0 21 * * *',
+        timezone: '',
         enabled: true,
         auto_disabled_at: new Date(Date.now() - 30 * 3600_000).toISOString(),
         last_run_at: new Date(Date.now() - 36 * 3600_000).toISOString(),
@@ -6722,6 +6728,7 @@ function mockJobDefinition(fields: Record<string, unknown>) {
     publish_shared_kv_trusted: false,
     egress: [] as string[],
     egress_kept: [] as string[],
+    timezone: '',
     ...fields,
   };
 }
@@ -6744,6 +6751,7 @@ const mockJobs: MockJob[] = [
       prompt: 'Check the listings site and tell me about anything new.',
       target: 'web:web-carol-general',
       room: 'web-carol-general',
+      timezone: 'Europe/Warsaw',
     }),
     revision: 'rev-1',
     editable: true,
@@ -6792,6 +6800,13 @@ const mockJobs: MockJob[] = [
       'Command jobs are admin-only, so this job does not run. Use a prompt, or remove it.',
   },
 ];
+const MOCK_USER_TIMEZONE = 'Europe/Lisbon';
+/** What the listing adds to a job: the zone its cron is read in, as `_job_view` does. */
+function mockJobView(job: MockJob) {
+  const zone = String(job.definition.timezone ?? '');
+  const own = zone && zone !== 'user' ? zone : '';
+  return { ...job, schedule_timezone: own || MOCK_USER_TIMEZONE, follows_user_clock: !own };
+}
 function mockJobRefusal(job: Record<string, unknown>, current: MockJob | null) {
   const name = job.name ?? current?.name;
   if (!String(name ?? '').trim())
@@ -6853,7 +6868,7 @@ function mockJobRoutes(url: string, method: string, body: any): unknown | undefi
       }
     }
     return {
-      jobs: [...mockJobs].sort((a, b) => a.name.localeCompare(b.name)),
+      jobs: [...mockJobs].sort((a, b) => a.name.localeCompare(b.name)).map(mockJobView),
       file: { readable: true, errors: [] },
       options: {
         outputs: ['email', 'ntfy', 'talk', 'web'],
@@ -6886,7 +6901,7 @@ function mockJobRoutes(url: string, method: string, body: any): unknown | undefi
         can_publish: true,
       },
       external_skills: mockNetwork.external_skills,
-      timezone: 'Europe/Lisbon',
+      timezone: MOCK_USER_TIMEZONE,
     };
   }
   if (url === root && method === 'POST') {

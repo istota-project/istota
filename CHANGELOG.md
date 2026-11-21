@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Web chat marks messages read as you scroll through All, Unread and Starred**, and the Unread view opens at its oldest message. A room is never marked read past a message you have not reached. It is on by default; turn it off in Settings → Preferences.
-- **A scheduled job can keep its own timezone.** Add `timezone = "America/New_York"` (or `"UTC"`) to a CRON.md job and it runs at that zone's wall-clock time, daylight saving included, instead of moving when your own timezone changes or you travel. Jobs without the field follow your timezone as before. See docs/features/scheduling.md.
+- **A scheduled job can keep its own timezone.** Add `timezone = "America/New_York"` (or `"UTC"`) to a CRON.md job, or pick a zone in Settings, Scheduled jobs, and it runs at that zone's wall-clock time, daylight saving included, instead of moving when your own timezone changes or you travel. Jobs without the field follow your timezone as before. See docs/features/scheduling.md.
 
 ## [0.51.0] - 2026-11-15
 

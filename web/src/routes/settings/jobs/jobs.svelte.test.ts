@@ -64,6 +64,8 @@ function job(overrides: Record<string, unknown> = {}) {
     pending: false,
     name,
     cron: '0 9 * * *',
+    schedule_timezone: 'UTC',
+    follows_user_clock: true,
     enabled: true,
     once: false,
     state: 'running',
@@ -88,6 +90,7 @@ function job(overrides: Record<string, unknown> = {}) {
       publish_shared_kv_trusted: false,
       egress: [],
       egress_kept: [],
+      timezone: '',
     },
     revision: 'r1',
     editable: true,
@@ -176,6 +179,54 @@ it('lists a job with its schedule, state, access, failures and last run', async 
   expect((await row('weekly')).getByText('Disabled')).toBeInTheDocument();
   expect((await row('flaky')).getByText('Suspended')).toBeInTheDocument();
   expect((await row('open')).getByText('Full access')).toBeInTheDocument();
+});
+
+it('names the zone under a pinned schedule, and nothing under one on your clock', async () => {
+  open(
+    LIST,
+    job({ schedule_timezone: 'America/New_York', follows_user_clock: false }),
+    job({ id: 2, name: 'weekly', schedule_timezone: 'Europe/Warsaw' }),
+  );
+  const pinned = await row();
+  expect(pinned.getByText('America/New_York')).toHaveClass('caption');
+  const mine = await row('weekly');
+  expect(mine.queryByText(/Europe\/Warsaw/)).toBeNull();
+});
+
+describe('the Summary card', () => {
+  const summary = async () =>
+    within(
+      (await screen.findByRole('heading', { name: 'Summary' })).closest('section') as HTMLElement,
+    );
+
+  it('shows a pinned zone and the next run in it, whatever the browser zone', async () => {
+    open(
+      `${LIST}?job=1`,
+      job({
+        cron: '20 13 * * 1-5',
+        schedule_timezone: 'America/New_York',
+        follows_user_clock: false,
+        // 13:20 in New York on a Monday in November.
+        next_run_at: '2026-11-23T18:20:00Z',
+      }),
+    );
+    const card = await summary();
+    expect(card.getByText('20 13 * * 1-5')).toBeInTheDocument();
+    expect(card.getByText('in America/New_York')).toBeInTheDocument();
+    const next = card.getByText(/EST/);
+    expect(next.tagName).toBe('TIME');
+    expect(next).toHaveAttribute('datetime', '2026-11-23T18:20:00Z');
+    expect(next.textContent).toMatch(/(^|\D)(0?1|13):20(\D|$)/);
+    expect(next.textContent).toMatch(/23/);
+  });
+
+  it('says a job on your clock follows your timezone, and an unscheduled one says so', async () => {
+    open(`${LIST}?job=1`, job({ schedule_timezone: 'Europe/Warsaw', next_run_at: null }));
+    const card = await summary();
+    expect(card.getByText('in your timezone (Europe/Warsaw)')).toBeInTheDocument();
+    expect(card.getByText('Next run')).toBeInTheDocument();
+    expect(card.getByText('Not scheduled')).toBeInTheDocument();
+  });
 });
 
 it('says Never for a job that has not run, and marks a one-time job', async () => {

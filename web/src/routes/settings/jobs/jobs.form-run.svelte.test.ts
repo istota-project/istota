@@ -78,6 +78,8 @@ function job(definition: Record<string, unknown> = {}, overrides: Record<string,
     pending: false,
     name: 'digest',
     cron: '0 9 * * *',
+    schedule_timezone: 'UTC',
+    follows_user_clock: true,
     enabled: true,
     once: false,
     state: 'running',
@@ -102,6 +104,7 @@ function job(definition: Record<string, unknown> = {}, overrides: Record<string,
       publish_shared_kv_trusted: false,
       egress: [],
       egress_kept: [],
+      timezone: '',
       ...definition,
     },
     revision: 'r1',
@@ -589,5 +592,79 @@ describe('asks ahead of its first run', () => {
     await save();
     await waitFor(() => expect(api.createScheduledJob).toHaveBeenCalled());
     expect(api.createScheduledJob.mock.calls[0][0].egress).toEqual(['a.example.com']);
+  });
+});
+
+describe('timezone', () => {
+  const pinned = (zone: string) =>
+    job({ timezone: zone }, { schedule_timezone: zone, follows_user_clock: false });
+
+  it('sits beside Schedule, which says it is read in it', async () => {
+    open(FORM, [job()]);
+    expect(await button('Timezone')).toHaveTextContent('Your timezone (UTC)');
+    expect(screen.getByText('A cron expression, in the timezone beside it.')).toBeInTheDocument();
+  });
+
+  it('a picked zone is sent', async () => {
+    open(FORM, [job()]);
+    await pick('Timezone', 'America/New_York');
+    await save();
+    expect(await sent()).toEqual({ timezone: 'America/New_York', revision: 'r1' });
+  });
+
+  it('your own timezone is sent as an empty value', async () => {
+    open(FORM, [pinned('America/New_York')]);
+    expect(await button('Timezone')).toHaveTextContent('America/New_York');
+    await pick('Timezone', 'Your timezone (UTC)');
+    await save();
+    expect(await sent()).toEqual({ timezone: '', revision: 'r1' });
+  });
+
+  it('a stored "user" reads as your timezone and is not sent with another edit', async () => {
+    open(FORM, [job({ timezone: 'user' })]);
+    expect(await button('Timezone')).toHaveTextContent('Your timezone (UTC)');
+    await edit('Schedule', '0 8 * * *');
+    await save();
+    expect(await sent()).toEqual({ cron: '0 8 * * *', revision: 'r1' });
+  });
+
+  it('a stored zone the browser does not list is still shown and selectable', async () => {
+    open(FORM, [pinned('Etc/Unlisted')]);
+    const trigger = await button('Timezone');
+    expect(trigger).toHaveTextContent('Etc/Unlisted');
+    await pick('Timezone', 'America/New_York');
+    await pick('Timezone', 'Etc/Unlisted');
+    expect(trigger).toHaveTextContent('Etc/Unlisted');
+    await edit('Schedule', '0 8 * * *');
+    await save();
+    expect(await sent()).toEqual({ cron: '0 8 * * *', revision: 'r1' });
+  });
+
+  it('a refused zone sits beside the field', async () => {
+    api.updateScheduledJob.mockRejectedValueOnce(
+      new JobSaveError(
+        'That is not a timezone Istota knows.',
+        400,
+        'invalid_field',
+        'timezone',
+        [],
+      ),
+    );
+    open(FORM, [job()]);
+    await pick('Timezone', 'America/New_York');
+    await save();
+    const message = await screen.findByText('That is not a timezone Istota knows.');
+    expect(message.closest('.field')).toContainElement(await button('Timezone'));
+  });
+
+  it('a new job sends a picked zone, and none by default', async () => {
+    open(`${LIST}?job=new`, []);
+    await edit('Name', 'market');
+    await edit('Schedule', '20 13 * * 1-5');
+    await edit('Prompt', 'Read the close.');
+    await pick('Timezone', 'America/New_York');
+    await save();
+    await waitFor(() => expect(api.createScheduledJob).toHaveBeenCalled());
+    expect(api.createScheduledJob.mock.calls[0][0].timezone).toBe('America/New_York');
   });
 });
