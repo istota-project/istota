@@ -1963,12 +1963,6 @@ class TestThePrompts:
     def test_port_gives_up_on_the_default_rather_than_looping(self):
         assert setup_wizard._ask_port(lambda _p: "nope", "Port", 8080) == 8080
 
-    def test_timezone_validation(self):
-        assert setup_wizard._is_valid_timezone("America/Los_Angeles")
-        assert setup_wizard._is_valid_timezone("UTC")
-        assert not setup_wizard._is_valid_timezone("PDT")
-        assert not setup_wizard._is_valid_timezone("")
-
 
 class TestTheModuleQuestions:
     """``_collect_modules`` on the container path: an unavailable module is

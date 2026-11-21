@@ -17,6 +17,7 @@ import tomli
 from croniter import croniter
 
 from . import db
+from .lib.timezones import is_valid_timezone
 from .rooms import egress
 from .workspace import text_files
 from .workspace.text_files import MemoryMdLocked
@@ -458,6 +459,9 @@ def _coerce_bool(
 class CronJob:
     name: str
     cron: str
+    # The zone `cron` is read in, as written: empty or `USER_CLOCK` follows the
+    # owner's live timezone, anything else is a zone the parser loaded (#976).
+    timezone: str = ""
     prompt: str = ""
     command: str = ""
     prompt_file: str = ""  # path relative to mount; resolved to prompt at load time
@@ -500,6 +504,20 @@ class CronJob:
     # into an id within its provider and the provider column (D22). None
     # stores ``model`` and ``provider`` as written.
     model_split: tuple | None = field(default=None, compare=False)
+
+
+USER_CLOCK = "user"
+"""A job's `timezone` spelling for the owner's clock, the same as leaving it out."""
+
+
+def stored_timezone(job: CronJob) -> str | None:
+    """What `scheduled_jobs.timezone` holds for `job`: None follows the owner's clock."""
+    return None if job.timezone in ("", USER_CLOCK) else job.timezone
+
+
+def job_timezone_name(stored: str | None, user_timezone: str) -> str:
+    """The zone a scheduled job's cron is read in: its own, else its owner's."""
+    return stored or user_timezone
 
 
 @dataclass
@@ -943,6 +961,21 @@ def _parse_jobs(
             )
             errors.append(f"Job '{name}': cron {cron[:80]!r} is not a cron schedule")
             continue
+        # Dropped like a bad cron, never read as UTC or as the user's zone: a typo
+        # would move the job by hours with nothing said (#976).
+        raw_timezone = j.get("timezone", "")
+        timezone = _str_field(name, user_id, "timezone", raw_timezone, errors)
+        if not isinstance(raw_timezone, str):
+            continue
+        if timezone not in ("", USER_CLOCK) and not is_valid_timezone(timezone):
+            logger.warning(
+                "Skipping job '%s' in CRON.md for %s: timezone %r does not load",
+                name, user_id, timezone[:80],
+            )
+            errors.append(
+                f"Job '{name}': timezone {timezone[:80]!r} is not a timezone Istota knows"
+            )
+            continue
         # Resolve prompt_file to prompt contents
         if prompt_file:
             if prompt or command:
@@ -1027,6 +1060,7 @@ def _parse_jobs(
         job = CronJob(
             name=name,
             cron=cron,
+            timezone=timezone,
             prompt=prompt,
             command=command,
             prompt_file=prompt_file,
@@ -1175,6 +1209,8 @@ def render_jobs_block(jobs: list[CronJob]) -> str:
         lines.append("[[jobs]]")
         lines.append(_toml_string("name", job.name))
         lines.append(_toml_string("cron", job.cron))
+        if job.timezone:
+            lines.append(_toml_string("timezone", job.timezone))
         if job.command:
             lines.append(_toml_string("command", job.command))
         elif job.prompt_file:
@@ -1452,6 +1488,7 @@ def _cron_md_content(
 #: Columns CRON.md authors. The sync writes exactly these on every tick.
 FILE_OWNED_COLUMNS = frozenset({
     "cron_expression",
+    "timezone",
     "prompt",
     "command",
     "skill",
@@ -1474,7 +1511,7 @@ FILE_OWNED_COLUMNS = frozenset({
 
 #: Columns the daemon authors. The sync never writes one *from the file*, and
 #: the three exceptions are resets rather than values out of CRON.md: the
-#: ``last_run_at`` reset on a cron-expression change or on an edit to what a
+#: ``last_run_at`` reset on a schedule change (cron or timezone) or on an edit to what a
 #: ``once`` job dispatches, the
 #: ``auto_disabled_at`` / ``consecutive_failures`` / ``last_error`` reset on a
 #: change to what the job dispatches, and the ``disabled_at`` reset when the
@@ -1553,6 +1590,7 @@ def _file_owned_values(
     """
     return {
         "cron_expression": fj.cron,
+        "timezone": stored_timezone(fj),
         "prompt": fj.prompt,
         "command": cmd_val,
         "skill": skill_val,
@@ -1682,14 +1720,20 @@ def sync_cron_jobs_to_db(
             # Update definition fields, preserve state
             updates = {col: file_values[col] for col in file_columns}
 
-            # Reset last_run_at when cron expression changes to prevent
-            # catch-up runs for past slots in the new expression
-            cron_changed = fj.cron != existing.cron_expression
-            if cron_changed:
+            # Reset last_run_at when the schedule moves, its expression or the
+            # zone it is read in, so past slots in the new one are not caught up.
+            moved = []
+            if fj.cron != existing.cron_expression:
+                moved.append(f"cron {existing.cron_expression!r} -> {fj.cron!r}")
+            if file_values["timezone"] != existing.timezone:
+                moved.append(
+                    f"timezone {existing.timezone!r} -> {file_values['timezone']!r}"
+                )
+            schedule_changed = bool(moved)
+            if schedule_changed:
                 logger.info(
-                    "Cron expression changed for job '%s' (user %s): "
-                    "'%s' -> '%s', resetting last_run_at",
-                    fj.name, user_id, existing.cron_expression, fj.cron,
+                    "Schedule changed for job '%s' (user %s): %s, resetting last_run_at",
+                    fj.name, user_id, "; ".join(moved),
                 )
 
             # An edit to what the job *dispatches* lifts a suspension. Without
@@ -1751,7 +1795,7 @@ def sync_cron_jobs_to_db(
 
             set_parts = [f"{k} = ?" for k in updates]
             values = list(updates.values())
-            if cron_changed:
+            if schedule_changed:
                 set_parts.append("last_run_at = datetime('now')")
             elif fj.once and existing.once and egress.task_text_digest(
                 file_values,
@@ -1971,6 +2015,7 @@ def _migrate_db_jobs_locked(conn, config, user_id: str, config_dir, overwrite: b
         file_jobs.append(CronJob(
             name=j.name,
             cron=j.cron_expression,
+            timezone=j.timezone or "",
             prompt=j.prompt,
             command=cmd,
             target=j.output_target or "",
@@ -2645,6 +2690,10 @@ def validate_job_input(config, user_id: str, payload, stored: CronJob | None) ->
     job.cron = _form_text(payload, "cron", job.cron)
     if not job.cron or not croniter.is_valid(job.cron):
         raise JobFieldError("cron", "That is not a cron schedule.")
+
+    job.timezone = _form_text(payload, "timezone", job.timezone)
+    if job.timezone not in ("", USER_CLOCK) and not is_valid_timezone(job.timezone):
+        raise JobFieldError("timezone", "That is not a timezone Istota knows.")
 
     _apply_job_text(job, payload, stored, is_admin)
 

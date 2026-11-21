@@ -420,6 +420,8 @@ export interface AdminStatsJob {
   user_id: string;
   name: string;
   cron: string;
+  /** The zone the job is pinned to, or '' for one on its owner's clock. */
+  timezone: string;
   /** What the user asked for in CRON.md. Not on its own whether the job runs. */
   enabled: boolean;
   /** When the scheduler suspended the job after N consecutive failures, or
@@ -6425,6 +6427,8 @@ export interface ScheduledJobDefinition {
   publish_shared_kv_trusted: boolean;
   egress: string[];
   egress_kept: string[];
+  /** As CRON.md has it: '' or 'user' for your own clock, else a zone name. */
+  timezone?: string;
 }
 export interface ScheduledJob {
   /** Null while the job is in CRON.md and not yet in the table. */
@@ -6432,12 +6436,16 @@ export interface ScheduledJob {
   pending: boolean;
   name: string;
   cron: string;
+  /** The zone the cron is read in: the job's own, else yours. */
+  schedule_timezone: string;
+  /** True when the job pins no zone and so moves with yours. */
+  follows_user_clock: boolean;
   enabled: boolean;
   once: boolean;
   state: 'running' | 'disabled' | 'suspended';
   last_run_at: string | null;
   last_success_at: string | null;
-  /** Null for a job the scheduler is not firing. */
+  /** Null for a job the scheduler is not firing, or whose zone does not load. */
   next_run_at: string | null;
   consecutive_failures: number;
   last_error: string | null;
@@ -6482,6 +6490,8 @@ export function getJobModelChoices(brain: string, provider: string): Promise<Job
 export interface ScheduledJobFields {
   name?: string;
   cron?: string;
+  /** '' follows your own timezone. */
+  timezone?: string;
   kind?: 'prompt' | 'command';
   prompt?: string;
   command?: string;

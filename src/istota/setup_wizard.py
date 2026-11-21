@@ -31,6 +31,7 @@ from pathlib import Path
 
 from istota.lib import toml_write
 from istota.lib.rclone_conf import webdav_remote_for
+from istota.lib.timezones import is_valid_timezone
 
 logger = logging.getLogger("istota.setup")
 
@@ -205,24 +206,6 @@ def _flush_terminal_input() -> None:
         termios.tcflush(sys.stdin, termios.TCIFLUSH)
     except Exception:  # pragma: no cover - platform / non-tty dependent
         pass
-
-
-def _is_valid_timezone(name: str) -> bool:
-    """True if ``name`` is a zone ``ZoneInfo`` accepts (a real IANA name).
-
-    Abbreviations like ``PDT`` / ``EST`` are NOT valid — ``ZoneInfo`` only
-    knows names like ``America/Los_Angeles``. Storing an abbreviation makes
-    the executor's ``_resolve_user_tz`` silently fall back to UTC.
-    """
-    if not name:
-        return False
-    try:
-        from zoneinfo import ZoneInfo
-
-        ZoneInfo(name)
-        return True
-    except Exception:
-        return False
 
 
 #: The opt-out modules, in the order they are asked about and rendered:
@@ -1431,7 +1414,7 @@ def validate_container_answers(a: ContainerAnswers) -> list[FieldError]:
 
     if not a.user_id:
         refuse("user_id", "A user id is required for the first admin (--user).")
-    if not _is_valid_timezone(a.timezone):
+    if not is_valid_timezone(a.timezone):
         refuse("timezone", f"'{a.timezone}' is not a valid IANA timezone.")
     if a.ingress not in INGRESS_HOPS:
         refuse("ingress", f"Unknown ingress {a.ingress!r}; use direct, proxied or local.")
@@ -1865,7 +1848,7 @@ def collect_container_answers(
         _refuse_on(a, "user_id")
         a.display_name = text("display_name", "Display name", a.user_id) or a.user_id
         tz = text("timezone", "Timezone (IANA, e.g. Europe/Berlin)", "UTC")
-        if not _is_valid_timezone(tz):
+        if not is_valid_timezone(tz):
             out(f"  '{tz}' is not a valid IANA timezone; using UTC.")
             tz = "UTC"
         a.timezone = tz

@@ -892,6 +892,19 @@ class TestCmdCron:
         assert "0 9 * * *" in result
         assert "enabled" in result
 
+    async def test_the_listing_names_a_pinned_zone(self, make_config):
+        """A job on its own clock says which; one on the user's clock reads as before (#976)."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            _insert_job(conn, "market", "20 13 * * 1-5", "p", timezone="America/New_York")
+            _insert_job(conn, "nightly", "0 22 * * *", "p")
+            result = await cmd_cron(_ctx(config, conn))
+
+        lines = {line.split("**")[1]: line for line in result.splitlines() if line.startswith("- **")}
+        assert "`20 13 * * 1-5` `tz: America/New_York` [enabled]" in lines["market"]
+        assert "tz:" not in lines["nightly"]
+        assert "`0 22 * * *` [enabled]" in lines["nightly"]
+
     async def test_list_shows_failures(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:

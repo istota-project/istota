@@ -315,6 +315,9 @@ class ScheduledJob:
     reach: str = "private"
     #: CRON.md's `egress`, a JSON list; what the job asks its owner for.
     egress_request: str | None = None
+    #: The zone ``cron_expression`` is read in; None follows the owner's live
+    #: timezone (``cron_loader.job_timezone_name``).
+    timezone: str | None = None
 
 
 @dataclass
@@ -570,6 +573,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         "reach": "TEXT NOT NULL DEFAULT 'private'",
         # CRON.md's `egress`: what a job asks its owner for. A request, never a grant.
         "egress_request": "TEXT",
+        # CRON.md's `timezone` (#976). No backfill: NULL follows the owner's
+        # live timezone, which is what every existing row already means.
+        "timezone": "TEXT",
     })
 
     # What an edit's dropped approval had approved, so the re-ask can show it (#925).
@@ -12838,7 +12844,8 @@ def get_enabled_scheduled_jobs(conn: sqlite3.Connection) -> list[ScheduledJob]:
                consecutive_failures, last_error, last_success_at,
                auto_disabled_at, disabled_at,
                once, model, effort, brain, provider, skill, skill_args,
-               publish_shared_kv, publish_shared_kv_trusted, reach, egress_request
+               publish_shared_kv, publish_shared_kv_trusted, reach, egress_request,
+               timezone
         FROM scheduled_jobs
         WHERE enabled = 1 AND auto_disabled_at IS NULL
         """
@@ -12856,7 +12863,8 @@ def get_user_scheduled_jobs(conn: sqlite3.Connection, user_id: str) -> list[Sche
                consecutive_failures, last_error, last_success_at,
                auto_disabled_at, disabled_at,
                once, model, effort, brain, provider, skill, skill_args,
-               publish_shared_kv, publish_shared_kv_trusted, reach, egress_request
+               publish_shared_kv, publish_shared_kv_trusted, reach, egress_request,
+               timezone
         FROM scheduled_jobs
         WHERE user_id = ?
         ORDER BY name
@@ -12904,6 +12912,7 @@ def _row_to_scheduled_job(row: sqlite3.Row) -> ScheduledJob:
         ),
         reach=row["reach"] if "reach" in row.keys() else "private",
         egress_request=row["egress_request"] if "egress_request" in row.keys() else None,
+        timezone=row["timezone"] if "timezone" in row.keys() else None,
     )
 
 
@@ -13010,7 +13019,8 @@ def get_scheduled_job(conn: sqlite3.Connection, job_id: int) -> ScheduledJob | N
                consecutive_failures, last_error, last_success_at,
                auto_disabled_at, disabled_at,
                once, model, effort, brain, provider, skill, skill_args,
-               publish_shared_kv, publish_shared_kv_trusted, reach, egress_request
+               publish_shared_kv, publish_shared_kv_trusted, reach, egress_request,
+               timezone
         FROM scheduled_jobs
         WHERE id = ?
         """,
@@ -13077,7 +13087,8 @@ def get_scheduled_job_by_name(
                consecutive_failures, last_error, last_success_at,
                auto_disabled_at, disabled_at,
                once, model, effort, brain, provider, skill, skill_args,
-               publish_shared_kv, publish_shared_kv_trusted, reach, egress_request
+               publish_shared_kv, publish_shared_kv_trusted, reach, egress_request,
+               timezone
         FROM scheduled_jobs
         WHERE user_id = ? AND name = ?
         """,

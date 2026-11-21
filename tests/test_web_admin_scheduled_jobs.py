@@ -179,6 +179,17 @@ class TestList:
         assert jobs["digest"]["enabled"] is True
         assert jobs["digest"]["auto_disabled_at"] is None
 
+    async def test_each_job_carries_its_own_zone(self, alice, setup):
+        """A pinned zone is shown; the user clock is the empty string (#976)."""
+        with db.get_db(setup["config"].db_path) as conn:
+            conn.execute(
+                "UPDATE scheduled_jobs SET timezone = 'America/New_York' WHERE name = 'weekly'",
+            )
+        jobs = {job["name"]: job for job in (await alice.get(BASE)).json()["jobs"]}
+        assert jobs["weekly"]["timezone"] == "America/New_York"
+        assert jobs["digest"]["timezone"] == ""
+        assert jobs[MODULE_JOB]["timezone"] == ""
+
     async def test_refuses_a_non_admin(self, bob):
         assert (await bob.get(BASE)).status_code == 403
 

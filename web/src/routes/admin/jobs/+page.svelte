@@ -169,7 +169,12 @@
                       </Disclosure>
                     {/if}
                   </td>
-                  <td class="col-schedule"><code>{job.cron}</code></td>
+                  <td class="col-schedule">
+                    <code>{job.cron}</code>
+                    {#if job.timezone}
+                      <p class="caption zone">{job.timezone}</p>
+                    {/if}
+                  </td>
                   <td class="col-state">
                     <Badge size="sm" variant={STATE_VARIANT[state]}>{STATE_LABEL[state]}</Badge>
                   </td>
@@ -268,6 +273,10 @@
   }
   .failing {
     color: var(--status-danger-fg);
+  }
+  .zone {
+    margin: 0;
+    overflow-wrap: anywhere;
   }
   /* Job is the unsized column: the min-width reserves it 12rem past the sized
      ones, and adminTables.test.ts holds the sum. */

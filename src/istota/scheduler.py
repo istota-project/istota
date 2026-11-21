@@ -197,6 +197,7 @@ from .transport.registry import (
 )
 from .lib.audio_sniff import VOICE_TRANSCRIPT_LABEL
 from .lib.egress_log import refusal_advice
+from .lib.timezones import is_valid_timezone
 from .transport.ingest import describe_attachment_only_message
 from .transport.routing import private_phone_room
 from .storage import BOT_USER_BASE, ensure_user_directories_v2, ensure_workspace_roots
@@ -251,6 +252,13 @@ def _is_stale_fire(
         name, staleness_min, threshold_minutes,
     )
     return True
+
+
+def _load_zone(name: str) -> ZoneInfo | None:
+    """The zone `name` names, or None when this server cannot load it."""
+    if not is_valid_timezone(name):
+        return None
+    return ZoneInfo(name)
 
 
 # Graceful shutdown flag
@@ -10325,11 +10333,13 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
 
     Syncs CRON.md files to DB (module jobs sync on their own gate,
     ``module-job-sync``), then reads job definitions from the
-    scheduled_jobs table and evaluates cron expressions in each user's timezone.
+    scheduled_jobs table and evaluates each cron expression in the job's own
+    timezone, or its owner's when it has none.
 
     Returns:
         List of created task IDs.
     """
+    from .cron_loader import job_timezone_name
     from .rooms import egress as rooms_egress
 
     created_tasks = []
@@ -10349,20 +10359,15 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
     for job in jobs:
         jobs_by_user.setdefault(job.user_id, []).append(job)
 
+    # One clock read per tick, so every job in it is judged at the same instant.
+    now_utc = _now(ZoneInfo("UTC"))
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=ZoneInfo("UTC"))
+
     for user_id, user_jobs in jobs_by_user.items():
         # Live DB timezone (reusing conn) so a web-UI change moves the job
-        # schedule without a daemon restart (ISSUE-099); falls back to UTC.
+        # schedule without a daemon restart (ISSUE-099).
         user_tz_str = app_config.resolve_user_timezone(user_id, conn=conn)
-        try:
-            user_tz = ZoneInfo(user_tz_str)
-        except Exception:
-            user_tz = ZoneInfo("UTC")
-
-        now = _now(user_tz)
-        # Use naive wall-clock times for croniter to avoid DST bugs.
-        # croniter miscomputes next fire time when a tz-aware datetime
-        # crosses a DST boundary (e.g. PST→PDT), causing double-fires.
-        now_naive = now.replace(tzinfo=None)
 
         for job in user_jobs:
             should_run = False
@@ -10376,12 +10381,30 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                 )
                 continue
 
+            zone = _load_zone(job_timezone_name(job.timezone, user_tz_str))
+            if zone is None:
+                # A zone the job pins that tzdata no longer has is skipped like an
+                # invalid cron; the user's own bad zone keeps its UTC fallback.
+                if job.timezone:
+                    logger.warning(
+                        "Skipping scheduled job '%s' for %s: its timezone %r does not load",
+                        job.name, user_id, job.timezone[:80],
+                    )
+                    continue
+                zone = ZoneInfo("UTC")
+
+            # Use naive wall-clock times for croniter to avoid DST bugs.
+            # croniter miscomputes next fire time when a tz-aware datetime
+            # crosses a DST boundary (e.g. PST→PDT), causing double-fires.
+            # The staleness check reads the same zone as `next_run`.
+            now_naive = now_utc.astimezone(zone).replace(tzinfo=None)
+
             if job.last_run_at:
                 last_run = datetime.fromisoformat(job.last_run_at)
                 if last_run.tzinfo is None:
                     # DB stores UTC via datetime('now')
                     last_run = last_run.replace(tzinfo=ZoneInfo("UTC"))
-                base = last_run.astimezone(user_tz).replace(tzinfo=None)
+                base = last_run.astimezone(zone).replace(tzinfo=None)
                 cron = croniter(job.cron_expression, base)
                 next_run = cron.get_next(datetime)
                 should_run = now_naive >= next_run
@@ -10397,7 +10420,7 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                     if base.tzinfo is None:
                         # DB stores UTC via datetime('now')
                         base = base.replace(tzinfo=ZoneInfo("UTC"))
-                    base = base.astimezone(user_tz).replace(tzinfo=None)
+                    base = base.astimezone(zone).replace(tzinfo=None)
                 else:
                     base = now_naive.replace(hour=0, minute=0, second=0, microsecond=0)
                 cron = croniter(job.cron_expression, base)

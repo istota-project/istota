@@ -2698,6 +2698,126 @@ class TestCheckScheduledJobs:
         assert len(result) == 1, "Job should fire at the correct wall-clock time"
 
 
+def _clock(mock_now, instant: datetime) -> None:
+    """Make the patched `_now` answer `instant` in whichever zone it is asked for, as the real one does."""
+    mock_now.side_effect = lambda tz=None: instant.astimezone(tz)
+
+
+def _utc(*args) -> datetime:
+    return datetime(*args, tzinfo=ZoneInfo("UTC"))
+
+
+def _insert_job(db_path, name, cron, *, last_run_at, timezone=None):
+    with db.get_db(db_path) as conn:
+        conn.execute(
+            """INSERT INTO scheduled_jobs
+               (user_id, name, cron_expression, prompt, conversation_token,
+                enabled, last_run_at, created_at, timezone)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("alice", name, cron, "Run", "room1", 1, last_run_at, last_run_at, timezone),
+        )
+
+
+class TestCheckScheduledJobsPerJobTimezone:
+    """A job's own `timezone` decides both the due check and the staleness check (#976).
+
+    `cron_max_staleness_minutes` stays at its default so the staleness path runs.
+    """
+
+    def _config(self, db_path, user_tz="Europe/Warsaw"):
+        return Config(db_path=db_path, users={"alice": UserConfig(timezone=user_tz)})
+
+    @patch("istota.scheduler._sync_cron_files")
+    @patch("istota.scheduler._now")
+    def test_incident_new_york_job_waits_for_new_york_not_warsaw(self, mock_now, mock_sync, db_path):
+        # 2026-11-20, a Friday: the user is in Warsaw, the job is for 13:20 in New York.
+        config = self._config(db_path)
+        _insert_job(
+            db_path, "market-watch", "20 13 * * 1-5",
+            last_run_at="2026-11-19 18:20:00", timezone="America/New_York",
+        )
+
+        _clock(mock_now, _utc(2026, 11, 20, 12, 20))  # 13:20 Warsaw, 07:20 New York
+        with db.get_db(db_path) as conn:
+            assert check_scheduled_jobs(conn, config) == []
+
+        _clock(mock_now, _utc(2026, 11, 20, 18, 20))  # 13:20 New York, 19:20 Warsaw
+        with db.get_db(db_path) as conn:
+            assert len(check_scheduled_jobs(conn, config)) == 1
+
+    @patch("istota.scheduler._sync_cron_files")
+    @patch("istota.scheduler._now")
+    def test_job_without_a_zone_follows_the_user(self, mock_now, mock_sync, db_path):
+        config = self._config(db_path)
+        _insert_job(db_path, "market-watch", "20 13 * * 1-5", last_run_at="2026-11-19 12:20:00")
+
+        _clock(mock_now, _utc(2026, 11, 20, 12, 20))  # 13:20 Warsaw
+        with db.get_db(db_path) as conn:
+            assert len(check_scheduled_jobs(conn, config)) == 1
+
+    @patch("istota.scheduler._sync_cron_files")
+    @patch("istota.scheduler._now")
+    def test_utc_job_of_a_warsaw_user_is_not_stale(self, mock_now, mock_sync, db_path, caplog):
+        import logging
+
+        config = self._config(db_path)
+        _insert_job(db_path, "utc-nine", "0 9 * * *", last_run_at="2026-11-19 09:00:00", timezone="UTC")
+
+        _clock(mock_now, _utc(2026, 11, 20, 9, 5))
+        with caplog.at_level(logging.WARNING, "istota.scheduler"), db.get_db(db_path) as conn:
+            result = check_scheduled_jobs(conn, config)
+
+        assert len(result) == 1
+        assert not any("Skipping stale fire" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize(
+        ("last_run_at", "slot_utc"),
+        [
+            # 13:30 EST, before the US change on 2026-03-08
+            ("2026-03-05 18:30:00", (2026, 3, 6, 18, 30)),
+            # across it: 13:30 EST on the 7th, then 13:30 EDT on the 8th
+            ("2026-03-07 18:30:00", (2026, 3, 8, 17, 30)),
+            # 13:30 EDT, after it
+            ("2026-03-08 17:30:00", (2026, 3, 9, 17, 30)),
+        ],
+    )
+    @patch("istota.scheduler._sync_cron_files")
+    @patch("istota.scheduler._now")
+    def test_pinned_job_follows_its_own_dst(self, mock_now, mock_sync, last_run_at, slot_utc, db_path):
+        config = self._config(db_path)
+        _insert_job(db_path, "ny-lunch", "30 13 * * *", last_run_at=last_run_at, timezone="America/New_York")
+        slot = _utc(*slot_utc)
+
+        _clock(mock_now, slot - timedelta(minutes=1))
+        with db.get_db(db_path) as conn:
+            assert check_scheduled_jobs(conn, config) == []
+
+        _clock(mock_now, slot)
+        with db.get_db(db_path) as conn:
+            assert len(check_scheduled_jobs(conn, config)) == 1
+
+    @patch("istota.scheduler._sync_cron_files")
+    @patch("istota.scheduler._now")
+    def test_unloadable_stored_zone_skips_only_that_job(self, mock_now, mock_sync, db_path, caplog):
+        import logging
+
+        config = self._config(db_path, user_tz="UTC")
+        _insert_job(db_path, "a-broken", "0 9 * * *", last_run_at="2026-11-19 09:00:00", timezone="Mars/Olympus")
+        _insert_job(db_path, "b-fine", "0 9 * * *", last_run_at="2026-11-19 09:00:00")
+
+        _clock(mock_now, _utc(2026, 11, 20, 9, 5))
+        with caplog.at_level(logging.WARNING, "istota.scheduler"), db.get_db(db_path) as conn:
+            result = check_scheduled_jobs(conn, config)
+            queued = [db.get_task(conn, task_id).scheduled_job_id for task_id in result]
+            fine_id = db.get_scheduled_job_by_name(conn, "alice", "b-fine").id
+
+        assert queued == [fine_id]
+        assert any(
+            "a-broken" in r.getMessage() and "Mars/Olympus" in r.getMessage()
+            for r in caplog.records if r.levelno == logging.WARNING
+        )
+
+
 class TestCheckBriefingsDST:
     """DST-related tests for check_briefings."""
 

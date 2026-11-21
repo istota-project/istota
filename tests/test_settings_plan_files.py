@@ -154,6 +154,26 @@ def test_invalid_desired_job_refuses_entire_plan(install, fields):
     assert user_profiles.get_profile(install[1].db_path, "alice").display_name == "alice"
 
 
+def test_a_job_timezone_lands_in_cron_md(install):
+    seed(install)
+    context, operations = preview(install, [{"name": "daily", "timezone": "America/New_York"}])
+    assert [(op.identity, op.action) for op in operations] == [("daily", "update")]
+    assert operations[0].changes == [{"path": ["timezone"], "before": "", "after": "America/New_York"}]
+    assert engine.execute_plan(operations, context).exit_code == 2
+    content = install[2].read_text()
+    assert 'cron = "0 9 * * *"\ntimezone = "America/New_York"\n' in content
+    doc = cron_loader.parse_cron_document(content, context.config, "alice")
+    assert {job.name: job.timezone for job in doc.jobs} == {"daily": "America/New_York", "other": ""}
+
+
+def test_an_unknown_job_timezone_refuses_the_plan(install):
+    seed(install)
+    before = install[2].read_bytes()
+    with pytest.raises(engine.ExecutionError, match="cron_file_invalid"):
+        preview(install, [{"name": "daily", "timezone": "America/NewYork"}])
+    assert install[2].read_bytes() == before
+
+
 @pytest.mark.parametrize("fields", [
     {"command": "echo hello"}, {"prompt": "Review", "brain": "native"},
     {"prompt": "Review", "publish_shared_kv": "daily"}, {"prompt": "Review", "provider": "openrouter"},

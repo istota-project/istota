@@ -26,6 +26,7 @@ from fastapi.responses import JSONResponse
 
 from istota import cron_loader, db
 from istota.lib.date_parse import iso_utc
+from istota.lib.timezones import is_valid_timezone
 from istota.notifications.resolvers import cron_job as cron_job_source
 from istota.notifications.resolvers import egress_refused
 from istota.rooms import egress
@@ -89,6 +90,7 @@ def _load_writable_doc(config, user_id: str):
 def _definition_from_file(job: cron_loader.CronJob) -> dict:
     return {
         "kind": "command" if job.command else "prompt",
+        "timezone": job.timezone,
         "prompt": job.prompt,
         "prompt_file": job.prompt_file,
         "command": job.command,
@@ -131,6 +133,7 @@ def _definition_from_row(row: db.ScheduledJob) -> dict:
     command = _row_command(row)
     return {
         "kind": "command" if command else "prompt",
+        "timezone": row.timezone or "",
         "prompt": row.prompt or "",
         "prompt_file": "",
         "command": command,
@@ -153,7 +156,20 @@ def _row_state(row: db.ScheduledJob) -> str:
     return egress.job_run_state({"enabled": row.enabled, "auto_disabled_at": row.auto_disabled_at})
 
 
-def _job_view(config, conn, user_id: str, row, file_job, *, readable: bool, ceiling: str) -> dict:
+def _next_run(row, state: str, user_tz: str) -> str | None:
+    if row is None or state != egress.JOB_RUNNING:
+        return None
+    # The scheduler reads the row, so the next run pairs the row's cron with the row's
+    # zone; a save the sync has not reached yet is not mixed into it.
+    if row.timezone is not None and not is_valid_timezone(row.timezone):
+        # The scheduler skips a job whose own zone does not load; `next_fire` would read it as UTC.
+        return None
+    return cron_loader.next_fire(row.cron_expression, cron_loader.job_timezone_name(row.timezone, user_tz))
+
+
+def _job_view(
+    config, conn, user_id: str, row, file_job, *, readable: bool, ceiling: str, user_tz: str,
+) -> dict:
     is_module = (row.name if row is not None else file_job.name).startswith(egress.MODULE_JOB_PREFIX)
     in_file = file_job is not None and not is_module
     dropped = (
@@ -166,20 +182,21 @@ def _job_view(config, conn, user_id: str, row, file_job, *, readable: bool, ceil
         state = egress.JOB_RUNNING if file_job.enabled else egress.JOB_DISABLED
     # No route can save a row with no id, so a dropped job is fixed in CRON.md.
     editable = in_file and readable and not dropped
+    stored_zone = cron_loader.stored_timezone(file_job) if in_file else row.timezone
+    zone = cron_loader.job_timezone_name(stored_zone, user_tz)
     view = {
         "id": row.id if row is not None else None,
         "pending": row is None and not dropped,
         "name": file_job.name if in_file else row.name,
         "cron": file_job.cron if in_file else row.cron_expression,
+        "schedule_timezone": zone,
+        "follows_user_clock": stored_zone is None,
         "enabled": file_job.enabled if in_file else bool(row.enabled),
         "once": file_job.once if in_file else bool(row.once),
         "state": state,
         "last_run_at": iso_utc(row.last_run_at) if row is not None else None,
         "last_success_at": iso_utc(row.last_success_at) if row is not None else None,
-        "next_run_at": (
-            cron_loader.next_fire(row.cron_expression, config.resolve_user_timezone(user_id))
-            if row is not None and state == egress.JOB_RUNNING else None
-        ),
+        "next_run_at": _next_run(row, state, user_tz),
         "consecutive_failures": row.consecutive_failures if row is not None else 0,
         "last_error": row.last_error if row is not None else None,
         "definition": _definition_from_file(file_job) if in_file else _definition_from_row(row),
@@ -213,6 +230,7 @@ def _listing(config, user_id: str) -> dict:
     errors = cron_loader.cron_document_errors(content, config, user_id) if content else []
     file_jobs = {job.name: job for job in (doc.jobs if doc is not None else [])}
     ceiling = config.security.scheduled_job_max_unapproved
+    user_tz = config.resolve_user_timezone(user_id)
     with db.get_db(Path(config.db_path)) as conn:
         readable = _file_readable(config, user_id, doc, _has_own_rows(conn, user_id))
         subjects = set(egress.list_subject_names(conn, user_id))
@@ -226,7 +244,7 @@ def _listing(config, user_id: str) -> dict:
         jobs = [
             _job_view(
                 config, conn, user_id, rows.get(name), file_jobs.get(name),
-                readable=readable, ceiling=ceiling,
+                readable=readable, ceiling=ceiling, user_tz=user_tz,
             )
             for name in sorted(names, key=str.casefold)
         ]
@@ -235,7 +253,7 @@ def _listing(config, user_id: str) -> dict:
         "file": {"readable": readable, "errors": errors},
         "options": _options(config, user_id),
         "external_skills": sorted(usable_external_skills(config, user_id)),
-        "timezone": config.resolve_user_timezone(user_id),
+        "timezone": user_tz,
     }
 
 

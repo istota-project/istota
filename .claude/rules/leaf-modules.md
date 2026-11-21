@@ -295,6 +295,10 @@ stdlib-only leaf, never raises.
 
 stdlib-only leaf, imports nothing from istota.
 
+## lib/timezones.py
+
+`is_valid_timezone(name)`: whether `name` is a non-empty string `ZoneInfo` loads, False for anything else, never raising. Two boolean copies existed, `config._is_valid_timezone` (WhatsApp Cloud's `business_timezone`) and `setup_wizard._is_valid_timezone` (the first admin's zone), and the CRON.md parser became a third caller with a job's `timezone` (#976); neither module is a fair import for `cron_loader`, so both copies went and all three import this. The config copy was the careful one and is the body: `OSError` is caught because `ZoneInfo` resolves the name as a path under the tzdata directories, so a 300-character value raises `ENAMETOOLONG`; the wizard's copy caught `Exception` and refused an empty name, and the explicit refusal of an empty or non-string name came from it. Abbreviations (`PST`, `EDT`) are not zones. Case is the filesystem's: `america/new_york` loads on a case-insensitive macOS volume and not on the Linux image, so tests use canonical spellings. Not converted: the callers that wrap `ZoneInfo` inline and return a zone or a fallback (`webui/app._resolve_tz`, `workspace/quick_notes`, `settings_plan/profiles`, `transport/whatsapp/outbound`), a different shape. stdlib-only leaf, imports nothing from istota, never raises.
+
 ## lib/llm_json.py
 
 Where a markdown code fence starts and ends in **model** output: `lib/toml_fence.py`'s question about a string the model wrote. The expressions it replaced had two different defects, each in its own file:

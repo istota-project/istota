@@ -7,7 +7,9 @@ cannot lose a job, and whoever may not set a restricted field is told so at save
 
 import dataclasses
 import sqlite3
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -280,6 +282,113 @@ class TestTheListing:
 
     async def test_a_shared_kv_writer_can_publish(self, admin_client):
         assert (await _listing(admin_client))["options"]["can_publish"] is True
+
+
+MARKET_JOB = (
+    '[[jobs]]\nname = "market"\ncron = "20 13 * * 1-5"\ntimezone = "America/New_York"\n'
+    'prompt = "after the close"\n'
+)
+
+
+class TestTimezones:
+    """A job reads its cron in its own zone or its owner's, and the page says which (#976)."""
+
+    @pytest.fixture(autouse=True)
+    def in_warsaw(self, config):  # noqa: F811
+        config.users["alice"].timezone = "Europe/Warsaw"
+
+    async def test_a_pinned_job_shows_its_zone_and_its_next_run_in_it(self, signed_client, config):  # noqa: F811
+        _cron_file(config, body=DIGEST_JOB + "\n" + MARKET_JOB)
+        data = await _listing(signed_client)
+        job = _named(data, "market")
+        assert job["definition"]["timezone"] == "America/New_York"
+        assert job["schedule_timezone"] == "America/New_York"
+        assert job["follows_user_clock"] is False
+        fire = datetime.fromisoformat(job["next_run_at"])
+        assert (fire.hour, fire.minute) == (13, 20)
+        assert fire.utcoffset() == ZoneInfo("America/New_York").utcoffset(fire.replace(tzinfo=None))
+
+    async def test_before_the_sync_the_next_run_is_the_rows_schedule_in_the_rows_zone(
+        self, signed_client, config,  # noqa: F811
+    ):
+        """The scheduler reads the row, so a save it has not synced is not half-applied to the next run."""
+        _cron_file(config, body=MARKET_JOB)
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "UPDATE scheduled_jobs SET cron_expression = '0 9 * * *', timezone = NULL"
+                " WHERE name = 'market'"
+            )
+            conn.commit()
+        job = _named(await _listing(signed_client), "market")
+        assert job["schedule_timezone"] == "America/New_York"
+        fire = datetime.fromisoformat(job["next_run_at"])
+        assert (fire.hour, fire.minute) == (9, 0)
+        assert fire.utcoffset() == ZoneInfo("Europe/Warsaw").utcoffset(fire.replace(tzinfo=None))
+
+    async def test_a_user_clock_job_follows_its_owner(self, signed_client, config):  # noqa: F811
+        _cron_file(config)
+        data = await _listing(signed_client)
+        job = _named(data)
+        assert data["timezone"] == "Europe/Warsaw"
+        assert job["definition"]["timezone"] == ""
+        assert job["schedule_timezone"] == "Europe/Warsaw"
+        assert job["follows_user_clock"] is True
+        fire = datetime.fromisoformat(job["next_run_at"])
+        assert (fire.hour, fire.minute) == (9, 0)
+        assert fire.utcoffset() == ZoneInfo("Europe/Warsaw").utcoffset(fire.replace(tzinfo=None))
+
+    async def test_user_spelled_out_is_the_user_clock(self, signed_client, config):  # noqa: F811
+        _cron_file(config, body=DIGEST_JOB + 'timezone = "user"\n')
+        job = _named(await _listing(signed_client))
+        assert job["definition"]["timezone"] == "user"
+        assert job["schedule_timezone"] == "Europe/Warsaw"
+        assert job["follows_user_clock"] is True
+
+    async def test_a_row_the_file_does_not_name_reads_its_own_zone(self, signed_client, config):  # noqa: F811
+        _cron_file(config, body="")
+        _insert_row(config, "gone")
+        with db.get_db(config.db_path) as conn:
+            conn.execute("UPDATE scheduled_jobs SET timezone = 'UTC' WHERE name = 'gone'")
+            conn.commit()
+        job = _named(await _listing(signed_client), "gone")
+        assert job["definition"]["timezone"] == "UTC"
+        assert job["schedule_timezone"] == "UTC"
+        assert job["follows_user_clock"] is False
+        assert datetime.fromisoformat(job["next_run_at"]).utcoffset() == timedelta(0)
+
+    async def test_a_stored_zone_that_does_not_load_has_no_next_run(self, signed_client, config):  # noqa: F811
+        """The scheduler skips such a row, so the page does not claim UTC for it."""
+        _cron_file(config, body="")
+        _insert_row(config, "gone")
+        with db.get_db(config.db_path) as conn:
+            conn.execute("UPDATE scheduled_jobs SET timezone = 'Mars/Olympus' WHERE name = 'gone'")
+            conn.commit()
+        job = _named(await _listing(signed_client), "gone")
+        assert job["schedule_timezone"] == "Mars/Olympus"
+        assert job["next_run_at"] is None
+
+    async def test_an_unknown_zone_is_a_field_error_and_writes_nothing(self, signed_client, config):  # noqa: F811
+        path = _cron_file(config)
+        before = path.read_text()
+        response = await _edit(signed_client, config, timezone="America/NewYork")
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_field"
+        assert response.json()["field"] == "timezone"
+        assert path.read_text() == before
+
+    async def test_a_real_zone_is_written_into_the_file(self, signed_client, config):  # noqa: F811
+        path = _cron_file(config)
+        response = await _edit(signed_client, config, timezone="America/New_York")
+        assert response.status_code == 200, response.text
+        assert 'timezone = "America/New_York"' in path.read_text()
+        _sync(config)
+        assert _row(config).timezone == "America/New_York"
+
+    async def test_a_cleared_zone_leaves_the_file(self, signed_client, config):  # noqa: F811
+        path = _cron_file(config, body=DIGEST_JOB + 'timezone = "UTC"\n')
+        response = await _edit(signed_client, config, timezone="")
+        assert response.status_code == 200, response.text
+        assert "timezone" not in path.read_text()
 
 
 class TestCreate:
