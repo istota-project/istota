@@ -90,7 +90,7 @@ def _personal_view(conn, config, briefing):
         "id": briefing.id, "user_id": briefing.user_id,
         "owner_label": _user(config, briefing.user_id)["display_name"],
         "name": briefing.name, "title": briefing.title, "cron": briefing.cron,
-        "timezone": profile.timezone if profile else None,
+        "timezone": (profile.timezone or "UTC") if profile else None,
         "output": briefing.output, "enabled": briefing.enabled,
         "held": user_briefings.hold_view(config, briefing.admin_hold_at, briefing.admin_hold_by),
         "last_run_at": iso_utc(db.get_briefing_last_run(conn, briefing.user_id, briefing.name)),

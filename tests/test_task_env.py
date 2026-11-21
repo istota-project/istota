@@ -1343,6 +1343,32 @@ class TestTheUsersTimezone:
             for r in caplog.records
         )
 
+    def test_a_user_who_never_chose_a_zone_gets_none_and_a_warning(
+        self, tmp_path, runtime_inputs, monkeypatch, caplog,
+    ):
+        """#978: a script told to stop when the variable is missing must not run
+        on a UTC nobody chose. The prompt's clock still reads UTC."""
+        from istota import db, user_profiles
+
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        config = _config(tmp_path)
+        db.init_db(config.db_path)
+        user_profiles.ensure_profile(config.db_path, "testuser")
+        task_env._UNSET_TZ_WARNED.discard("testuser")
+        with caplog.at_level("WARNING", logger="istota.sandbox.task_env"):
+            runtime = task_env.build_task_runtime(config, **runtime_inputs)
+            again = task_env.build_task_runtime(config, **runtime_inputs)
+        for built in (runtime, again):
+            assert "ISTOTA_USER_TZ" not in built.env
+            assert "ISTOTA_USER_TZ" not in built.proxy_ctx.base_env
+        warned = [
+            r for r in caplog.records
+            if "testuser" in r.getMessage() and "never chose" in r.getMessage()
+        ]
+        assert len(warned) == 1
+        _, prompt_zone = executor._resolve_user_tz(config, "testuser")
+        assert prompt_zone == "UTC"
+
     def test_the_callers_connection_is_used(self, tmp_path, runtime_inputs, monkeypatch):
         """A caller holding a write transaction sees its own uncommitted row."""
         from istota import db, user_profiles

@@ -1031,7 +1031,7 @@ class UserConfig:
     display_name: str = ""  # friendly name for prompts
     email_addresses: list[str] = field(default_factory=list)  # for email-to-user mapping
     sms_phone_number: str = ""  # operator-bound E.164 identity for the SMS surface
-    timezone: str = "UTC"  # user's timezone for briefing scheduling
+    timezone: str = ""  # IANA name; '' never chosen, read as UTC (#978)
     # Built from `briefing_configs` rows by `_apply_user_briefings`, never from TOML.
     briefings: list[BriefingConfig] = field(default_factory=list)
     # The retired `[users.X.briefings]` entries: the one-time import's input, and
@@ -3293,22 +3293,27 @@ class Config:
         user_id: str,
         *,
         conn: "sqlite3.Connection | None" = None,
+        default: str = "UTC",
     ) -> str:
-        """Return the user's timezone string (IANA name), never empty.
+        """Return the user's timezone string (IANA name), or ``default`` when
+        they never chose one.
 
         Prefers the live ``user_profiles`` DB row over the in-memory
         ``UserConfig`` so web-UI timezone edits take effect on the next task
-        without a scheduler restart (ISSUE-099). Falls back to the in-memory
-        config, then to ``"UTC"``. Mirrors ``is_module_enabled``'s DB-read
-        pattern, including the optional ``conn`` for hot loops that already
-        hold a framework-DB connection (avoids per-call FD churn on the
+        without a scheduler restart (ISSUE-099). A row is authoritative even
+        when it holds '', a zone never chosen (#978); only a user with no row
+        falls back to the in-memory config. Mirrors ``is_module_enabled``'s
+        DB-read pattern, including the optional ``conn`` for hot loops that
+        already hold a framework-DB connection (avoids per-call FD churn on the
         FUSE-backed mount).
+
+        ``default=""`` is how `ISTOTA_USER_TZ` tells never chosen from a chosen
+        ``UTC``; every clock keeps the ``"UTC"`` default.
 
         Does NOT validate the zone name — callers that need a ``tzinfo`` wrap
         the result in ``ZoneInfo`` and own the invalid-name fallback, so this
         helper stays usable by code that only needs the string.
         """
-        tz_str = ""
         if self.db_path is not None and Path(self.db_path).exists():
             try:
                 from . import user_profiles as _up
@@ -3317,12 +3322,10 @@ class Config:
                 logger.debug("resolve_user_timezone DB read failed: %s", e)
                 profile = None
             if profile is not None:
-                tz_str = profile.timezone or ""
+                return profile.timezone or default
 
-        if not tz_str:
-            uc = self.users.get(user_id)
-            tz_str = (uc.timezone if uc else "") or "UTC"
-        return tz_str
+        uc = self.users.get(user_id)
+        return (uc.timezone if uc else "") or default
 
     # ------------------------------------------------------------------
     # The credential vault's operator-set path
@@ -3724,7 +3727,7 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         display_name=user_data.get("display_name", user_id),
         email_addresses=user_data.get("email_addresses", []),
         sms_phone_number=sms_phone_number,
-        timezone=user_data.get("timezone", "UTC"),
+        timezone=user_data.get("timezone", ""),
         legacy_briefing_seeds=legacy_briefing_seeds,
         resources=resources,
         log_channel=user_data.get("log_channel", ""),

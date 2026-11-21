@@ -209,10 +209,14 @@ def task_timezone_name(
     *,
     conn: "sqlite3.Connection | None" = None,
     task: "db.Task | None" = None,
+    default: str = "UTC",
 ) -> str:
     """The zone name a task's clock reads in, unvalidated: the prompt header's
-    and ``ISTOTA_USER_TZ``'s one rule (#977)."""
-    return _research_task_timezone(config, task, conn) or config.resolve_user_timezone(user_id, conn=conn)
+    and ``ISTOTA_USER_TZ``'s one rule (#977). ``default`` is what a user who
+    never chose a zone gets (#978)."""
+    return _research_task_timezone(config, task, conn) or config.resolve_user_timezone(
+        user_id, conn=conn, default=default,
+    )
 
 
 def _resolve_user_tz(

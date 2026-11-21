@@ -3566,7 +3566,8 @@ class TestProfileEndpoints:
         assert resp.status_code == 200
         body = resp.json()
         assert body["profile"]["user_id"] == "alice"
-        assert body["profile"]["timezone"] == "UTC"
+        # Never chosen (#978); the settings page shows it as UTC.
+        assert body["profile"]["timezone"] == ""
         assert body["profile"]["briefing_email_html"] is True
 
     async def test_update_profile_briefing_email_html(self, tmp_path, client, app):

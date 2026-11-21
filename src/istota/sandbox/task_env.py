@@ -53,6 +53,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 USER_TZ_VAR = "ISTOTA_USER_TZ"
+# A zone never chosen is a default state, not a fault, so it is said once per
+# user per process rather than on every task.
+_UNSET_TZ_WARNED: set[str] = set()
 
 
 def user_timezone_env(
@@ -62,18 +65,26 @@ def user_timezone_env(
     conn: "db.sqlite3.Connection | None" = None,
 ) -> dict[str, str]:
     """``{USER_TZ_VAR: zone}`` for a task's env, or ``{}`` with a WARNING when
-    the zone does not load here. Callers pop the name first, so ``{}`` means
-    unset rather than whatever the env inherited.
+    the user never chose a zone or it does not load here. Callers pop the name
+    first, so ``{}`` means unset rather than whatever the env inherited.
 
     The zone the prompt header names (`executor.task_timezone_name`), read from
     the live profile on every call so a change between two runs reaches the
-    next (ISSUE-099). A user who never chose a zone gets ``UTC``, the zone
-    their cron jobs and briefings already run in; storage cannot tell that
-    apart from a chosen ``UTC`` (#977).
+    next (ISSUE-099). A user who never chose one is left unset rather than
+    handed ``UTC``, so a script that needs the user's day stops instead of
+    running on a zone nobody picked (#978); their prompt header, cron jobs and
+    briefings still read UTC.
     """
     from istota.executor import task_timezone_name
 
-    zone = task_timezone_name(config, task.user_id, conn=conn, task=task)
+    zone = task_timezone_name(config, task.user_id, conn=conn, task=task, default="")
+    if not zone:
+        if task.user_id not in _UNSET_TZ_WARNED:
+            _UNSET_TZ_WARNED.add(task.user_id)
+            logger.warning(
+                "user %r never chose a timezone; %s left unset", task.user_id, USER_TZ_VAR,
+            )
+        return {}
     if not is_valid_timezone(zone):
         logger.warning(
             "user %r has timezone %r, which this server cannot load; "

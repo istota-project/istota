@@ -497,7 +497,7 @@ class ContainerAnswers:
     bot_name: str = "Istota"
     user_id: str = ""
     display_name: str = ""
-    timezone: str = "UTC"
+    timezone: str = ""
     user_email: str = ""
     #: The public name the stack is reached by: nginx's server_name, the
     #: OAuth redirect, `[site] hostname`.
@@ -890,10 +890,10 @@ def container_config_document(a: ContainerAnswers, *, inline_credentials: bool) 
     if a.ingress == "local":
         doc["scheduler"] = {"cron_max_staleness_minutes": LOCAL_CRON_MAX_STALENESS_MINUTES}
 
-    user: dict = {
-        "display_name": a.display_name or a.user_id,
-        "timezone": a.timezone,
-    }
+    user: dict = {"display_name": a.display_name or a.user_id}
+    # Left out, not "UTC", when nobody chose one (#978).
+    if a.timezone:
+        user["timezone"] = a.timezone
     if a.user_email:
         user["email_addresses"] = [a.user_email]
     if a.disabled_modules:
@@ -1414,7 +1414,7 @@ def validate_container_answers(a: ContainerAnswers) -> list[FieldError]:
 
     if not a.user_id:
         refuse("user_id", "A user id is required for the first admin (--user).")
-    if not is_valid_timezone(a.timezone):
+    if a.timezone and not is_valid_timezone(a.timezone):
         refuse("timezone", f"'{a.timezone}' is not a valid IANA timezone.")
     if a.ingress not in INGRESS_HOPS:
         refuse("ingress", f"Unknown ingress {a.ingress!r}; use direct, proxied or local.")
@@ -1624,7 +1624,7 @@ def answers_from_payload(payload: dict, base: ContainerAnswers | None = None) ->
     a.bot_name = text("bot_name", "Istota")
     a.user_id = text("user_id")
     a.display_name = text("display_name", a.user_id)
-    a.timezone = text("timezone", "UTC")
+    a.timezone = text("timezone", "")
     a.user_email = text("user_email")
 
     a.hostname = text("hostname", "localhost")
@@ -1837,7 +1837,7 @@ def collect_container_answers(
 
     kept_user = bool(a.user_id) and flag("user") in (None, a.user_id)
     if kept_user:
-        out(f"  First admin: {a.user_id} ({a.display_name}, {a.timezone}"
+        out(f"  First admin: {a.user_id} ({a.display_name}, {a.timezone or 'no timezone set'}"
             f"{', ' + a.user_email if a.user_email else ''}).")
         out("  Their name, timezone, email and modules are changed in Settings, not here.")
         a.display_name = flag("display_name", a.display_name)
@@ -1847,8 +1847,8 @@ def collect_container_answers(
         a.user_id = text("user", "First admin's user id (their login name)", "")
         _refuse_on(a, "user_id")
         a.display_name = text("display_name", "Display name", a.user_id) or a.user_id
-        tz = text("timezone", "Timezone (IANA, e.g. Europe/Berlin)", "UTC")
-        if not is_valid_timezone(tz):
+        tz = text("timezone", "Timezone (IANA, e.g. Europe/Berlin; Enter to leave unset)", "")
+        if tz and not is_valid_timezone(tz):
             out(f"  '{tz}' is not a valid IANA timezone; using UTC.")
             tz = "UTC"
         a.timezone = tz

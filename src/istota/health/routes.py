@@ -3256,7 +3256,7 @@ def _user_tz(request: Request, user_id: str) -> str | None:
     if cfg is None:
         return None
     uc = cfg.get_user(user_id) if hasattr(cfg, "get_user") else None
-    return getattr(uc, "timezone", None) if uc else None
+    return (getattr(uc, "timezone", None) or None) if uc else None
 
 
 # Garmin auth (status / connect / mfa / disconnect) moved to the
