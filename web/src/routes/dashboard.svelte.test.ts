@@ -93,6 +93,18 @@ vi.mock('$lib/offline/lastUser', async (importOriginal) => {
   };
 });
 
+const greetingZones: string[] = [];
+vi.mock('$lib/greeting', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('$lib/greeting')>();
+  return {
+    ...actual,
+    buildGreeting: (...args: Parameters<typeof actual.buildGreeting>) => {
+      greetingZones.push(args[1]?.timeZone ?? '');
+      return actual.buildGreeting(...args);
+    },
+  };
+});
+
 // Imported after the mocks, so the components' own imports resolve to them.
 const DashboardInLayout = (await import('./dashboardInLayout.test.svelte')).default;
 
@@ -176,6 +188,23 @@ describe('the welcome card while the timezone is outstanding', () => {
     await waitFor(() => expect(card!.classList.contains('pending')).toBe(false));
     expect(container.querySelector('.welcome-card')).toBe(card);
     expect(container.querySelector('.welcome-note')!.textContent).toBe(note);
+  });
+});
+
+describe('the greeting for a user who never chose a timezone', () => {
+  it('reads the clock the bot runs on, UTC, rather than the browser', async () => {
+    // #978: the profile stores '' for a zone never chosen, and '' is also
+    // what a failed request yields, which falls back to the browser clock.
+    getMe.mockResolvedValue(person());
+    getProfile.mockResolvedValue({ profile: { timezone: '' } });
+    greetingZones.length = 0;
+
+    const { container } = render(DashboardInLayout);
+    await screen.findByText('Talk to Istota in the app');
+    const card = container.querySelector('.welcome-card')!;
+    await waitFor(() => expect(card.classList.contains('pending')).toBe(false));
+
+    expect(greetingZones.at(-1)).toBe('UTC');
   });
 });
 

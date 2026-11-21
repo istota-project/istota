@@ -1033,6 +1033,29 @@ class TestResolveUserTimezone:
         with db.get_db(cfg.db_path) as conn:
             assert cfg.resolve_user_timezone("alice", conn=conn) == "Europe/Lisbon"
 
+    def test_a_zone_never_chosen_reads_as_utc_unless_asked_otherwise(self, tmp_path):
+        """#978: the stored '' is a user who never chose a zone. Cron, briefings
+        and the prompt header run them on UTC; the row is still authoritative
+        over the in-memory value, as a chosen zone is."""
+        from istota import user_profiles
+        cfg = self._make_config(tmp_path, user_tz="America/New_York")
+        user_profiles.ensure_profile(cfg.db_path, "alice")
+        assert cfg.resolve_user_timezone("alice") == "UTC"
+        assert cfg.resolve_user_timezone("alice", default="") == ""
+
+    def test_a_chosen_utc_is_not_read_as_never_chosen(self, tmp_path):
+        from istota import user_profiles
+        cfg = self._make_config(tmp_path)
+        user_profiles.ensure_profile(cfg.db_path, "alice", timezone="UTC")
+        assert cfg.resolve_user_timezone("alice", default="") == "UTC"
+
+    def test_a_config_user_with_no_zone_has_none(self, tmp_path):
+        p = tmp_path / "config.toml"
+        p.write_text('[users.carol]\ndisplay_name = "Carol"\n')
+        cfg = load_config(p)
+        assert cfg.users["carol"].timezone == ""
+        assert Config(users=cfg.users).resolve_user_timezone("carol") == "UTC"
+
 
 class TestEmailReplyRoutingIsRetired:
     def test_a_toml_value_loads_with_a_warning(self, tmp_path, caplog):

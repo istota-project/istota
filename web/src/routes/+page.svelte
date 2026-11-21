@@ -59,13 +59,14 @@
   });
 
   /* The profile timezone is what the bot itself runs on, so the greeting should
-     agree with it rather than with wherever this browser happens to be. It is a
-     second request, so a failure just yields '' and `buildGreeting` falls back
-     to the browser clock. */
+     agree with it rather than with wherever this browser happens to be: a zone
+     never chosen is stored as '' and the bot runs on UTC then. It is a second
+     request, so a failure just yields '' and `buildGreeting` falls back to the
+     browser clock. */
   async function userTimezone(): Promise<string> {
     try {
       const { profile } = await getProfile();
-      return profile?.timezone ?? '';
+      return profile ? profile.timezone || 'UTC' : '';
     } catch {
       return '';
     }

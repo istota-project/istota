@@ -2574,7 +2574,7 @@ def _run_garmin_sync_inprocess(
         return False, f"garmin sync: {exc}"
 
     # Live DB timezone so the "yesterday" window tracks travel (ISSUE-099).
-    # None, for a zone that does not load, is the engine's UTC.
+    # None, for a zone never chosen or one that does not load, is the engine's UTC.
     from .sandbox.task_env import USER_TZ_VAR, user_timezone_env
     user_tz = user_timezone_env(config, task).get(USER_TZ_VAR)
 

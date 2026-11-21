@@ -31,10 +31,47 @@ class TestEnsureAndGet:
     def test_seed_defaults_when_unspecified(self, db_path):
         profile = user_profiles.ensure_profile(db_path, "alice")
         assert profile.display_name == "alice"
-        assert profile.timezone == "UTC"
+        assert profile.timezone == ""
         assert profile.email_addresses == []
         assert profile.disabled_skills == []
         assert profile.max_foreground_workers == 0
+
+
+class TestAZoneNeverChosen:
+    """#978: '' in the column is a user who never chose a zone, told apart from
+    one who chose UTC, so `ISTOTA_USER_TZ` can stay unset for the first."""
+
+    @staticmethod
+    def _stored(db_path, user_id):
+        with sqlite3.connect(db_path) as conn:
+            return conn.execute(
+                "SELECT timezone FROM user_profiles WHERE user_id = ?", (user_id,),
+            ).fetchone()[0]
+
+    def test_a_seeded_profile_with_no_zone_stores_empty(self, db_path):
+        user_profiles.ensure_profile(db_path, "alice")
+        assert self._stored(db_path, "alice") == ""
+
+    def test_a_seeded_utc_stores_utc(self, db_path):
+        user_profiles.ensure_profile(db_path, "alice", timezone="UTC")
+        assert self._stored(db_path, "alice") == "UTC"
+        assert user_profiles.get_profile(db_path, "alice").timezone == "UTC"
+
+    def test_the_config_import_stores_empty_for_a_user_with_no_zone(self, db_path):
+        user_profiles.import_from_user_configs(db_path, {"alice": UserConfig(display_name="Alice")})
+        assert self._stored(db_path, "alice") == ""
+
+    def test_the_overlay_still_hands_on_utc(self, db_path):
+        user_profiles.ensure_profile(db_path, "alice")
+        uc = UserConfig(display_name="Alice")
+        user_profiles.merge_into_user_config(user_profiles.get_profile(db_path, "alice"), uc)
+        assert uc.timezone == "UTC"
+
+    def test_a_native_web_identity_creates_a_profile_with_no_zone(self, db_path):
+        from istota.webui import auth
+
+        auth.upsert_identity(db_path, "alice", "alice@example.test", create_profile=True)
+        assert self._stored(db_path, "alice") == ""
 
 
 class TestUpdate:

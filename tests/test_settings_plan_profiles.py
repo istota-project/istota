@@ -221,14 +221,21 @@ def test_new_user_for_another_section_is_prospective_before_adapter(install):
     assert engine.execute_plan(operations, context).exit_code == 2
 
 
-def test_empty_timezone_uses_readers_default_without_perpetual_drift(install):
+def test_empty_timezone_is_stored_as_never_chosen_without_perpetual_drift(install):
+    """#978: '' clears the zone back to never chosen, and a second apply has
+    nothing to do. Readers still run the user on UTC."""
+    from istota.settings_plan.profiles import snapshot_profile
+
     _, database = install
     user_profiles.provision_user(database, "alice", {"timezone": "Europe/Lisbon"})
     desired = {"alice": {"profile": {"timezone": ""}}}
     for expected in (2, 0):
         context, operations = preview(install, desired)
         assert engine.execute_plan(operations, context).exit_code == expected
-    assert user_profiles.get_profile(database, "alice").timezone == "UTC"
+    profile = user_profiles.get_profile(database, "alice")
+    assert profile.timezone == ""
+    assert snapshot_profile(profile)["profile"]["timezone"] == ""
+    assert context.config.resolve_user_timezone("alice") == "UTC"
 
 
 def test_identity_claimed_after_preview_refuses_without_creating_user(install):

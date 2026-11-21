@@ -191,8 +191,6 @@ def plan_profile(plan, user, context, options):
     config = context.config
     sections = plan.users[user].sections
     fields = deepcopy(sections.get("profile", {}))
-    if fields.get("timezone") == "":
-        fields["timezone"] = "UTC"
     arguments = _enrollment_args(sections)
     path = ["users", user, "profile"]
     try:

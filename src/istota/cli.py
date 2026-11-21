@@ -2147,7 +2147,7 @@ def cmd_user_ensure(args):
 
     print(f"User {user_id!r} ensured.")
     print(f"  display_name: {profile.display_name}")
-    print(f"  timezone:     {profile.timezone}")
+    print(f"  timezone:     {profile.timezone or '(not set; UTC)'}")
     if profile.email_addresses:
         print(f"  emails:       {', '.join(profile.email_addresses)}")
     if profile.sms_phone_number:
@@ -5678,7 +5678,7 @@ def main():
     )
     setup_parser.add_argument("--user", help="The first admin's user id")
     setup_parser.add_argument("--display-name", help="Display name")
-    setup_parser.add_argument("--timezone", help="Timezone (default UTC)")
+    setup_parser.add_argument("--timezone", help="Timezone (default: unset, read as UTC)")
     setup_parser.add_argument("--email", action="store_true", help="Enable email surface")
     setup_parser.add_argument("--location", action="store_true", help="Enable GPS/location tracking")
     setup_parser.add_argument(

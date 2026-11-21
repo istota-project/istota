@@ -30,7 +30,7 @@ def test_plan_reads_without_creating_profile_binding_or_locks(db_path):
             whatsapp_op="set", whatsapp_number="+15551234567",
         )
         assert plan.profile.display_name == "Alice"
-        assert plan.profile.timezone == "UTC"
+        assert plan.profile.timezone == ""  # never chosen (#978)
         assert plan.asserted == {"display_name", "whatsapp_number"}
         assert user_profiles.get_profile(db_path, "alice", conn=conn) is None
         assert db.get_whatsapp_binding(conn, "alice") is None

@@ -78,7 +78,9 @@ class UserProfile:
     display_name: str = ""
     email_addresses: list[str] = field(default_factory=list)
     sms_phone_number: str = ""
-    timezone: str = "UTC"
+    # '' is a user who never chose a zone (#978). Readers that need a zone go
+    # through `Config.resolve_user_timezone`, which runs them on UTC.
+    timezone: str = ""
     log_channel: str = ""
     alerts_channel: str = ""
     max_foreground_workers: int = 0
@@ -516,7 +518,7 @@ def _row_to_profile(row: sqlite3.Row, *, strict: bool = False) -> UserProfile:
         display_name=row["display_name"] or "",
         email_addresses=_parse_json_list(row["email_addresses"]),
         sms_phone_number=str(_row_get(row, "sms_phone_number") or ""),
-        timezone=row["timezone"] or "UTC",
+        timezone=row["timezone"] or "",
         log_channel=row["log_channel"] or "",
         alerts_channel=row["alerts_channel"] or "",
         max_foreground_workers=int(row["max_foreground_workers"] or 0),
@@ -721,7 +723,7 @@ def _seeded_profile(
     return UserProfile(
         user_id=user_id,
         display_name=display_name or _attr(seed_from, "display_name") or user_id,
-        timezone=timezone or _attr(seed_from, "timezone") or "UTC",
+        timezone=timezone or _attr(seed_from, "timezone") or "",
         log_channel=_attr(seed_from, "log_channel") or "",
         alerts_channel=_attr(seed_from, "alerts_channel") or "",
         max_foreground_workers=int(_attr(seed_from, "max_foreground_workers") or 0),
@@ -1225,7 +1227,7 @@ def import_from_user_configs(
             display_name=getattr(user_config, "display_name", "") or user_id,
             email_addresses=list(getattr(user_config, "email_addresses", []) or []),
             sms_phone_number=str(getattr(user_config, "sms_phone_number", "") or ""),
-            timezone=getattr(user_config, "timezone", "") or "UTC",
+            timezone=getattr(user_config, "timezone", "") or "",
             log_channel=getattr(user_config, "log_channel", "") or "",
             alerts_channel=getattr(user_config, "alerts_channel", "") or "",
             max_foreground_workers=int(getattr(user_config, "max_foreground_workers", 0) or 0),

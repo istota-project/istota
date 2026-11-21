@@ -1109,6 +1109,26 @@ class TestOneValidatorForBothFrontEnds:
         assert a.timezone == "UTC"
         assert any("not a valid IANA timezone" in line for line in said)
 
+    def test_accepting_the_default_timezone_leaves_it_unchosen(
+        self, tmp_path, monkeypatch, _no_credentials_in_env,
+    ):
+        """#978: Enter at the timezone question is not choosing UTC. The config
+        names no zone, so the profile it seeds stores '' and the user's tasks
+        get no `ISTOTA_USER_TZ` until they pick one."""
+        monkeypatch.setenv("ISTOTA_BRAIN_NATIVE_API_KEY", "native-key")
+        said: list[str] = []
+        a = setup_wizard.collect_container_answers(
+            _args(tmp_path), input_fn=input, out=said.append, getpass_fn=None,
+        )
+        assert a.timezone == ""
+        assert not any("not a valid IANA timezone" in line for line in said)
+        assert setup_wizard.validate_container_answers(a) == []
+        document = tomllib.loads(render_container_config(a, inline_credentials=True))
+        assert "timezone" not in document["users"]["alice"]
+        path = tmp_path / "config.toml"
+        path.write_text(render_container_config(a, inline_credentials=True))
+        assert load_config(path).users["alice"].timezone == ""
+
     def test_a_calendar_without_its_password_is_dropped_on_the_terminal_and_refused_on_the_web(
         self, tmp_path, monkeypatch, _no_credentials_in_env,
     ):
@@ -1186,7 +1206,7 @@ class TestThePayload:
 
     def test_a_null_is_an_unanswered_question(self, _no_credentials_in_env):
         a = setup_wizard.answers_from_payload({**_WEB_BASE, "bot_name": None, "timezone": None})
-        assert (a.bot_name, a.timezone) == ("Istota", "UTC")
+        assert (a.bot_name, a.timezone) == ("Istota", "")
 
 
 #: (id, terminal flags, terminal environment, web payload): the same answers
