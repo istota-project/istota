@@ -156,14 +156,15 @@ def _row_state(row: db.ScheduledJob) -> str:
     return egress.job_run_state({"enabled": row.enabled, "auto_disabled_at": row.auto_disabled_at})
 
 
-def _next_run(row, state: str, stored_zone: str | None, zone: str) -> str | None:
+def _next_run(row, state: str, user_tz: str) -> str | None:
     if row is None or state != egress.JOB_RUNNING:
         return None
-    # The scheduler skips a job whose own zone does not load, so there is no next run
-    # to show; `next_fire` would read it as UTC.
-    if stored_zone is not None and not is_valid_timezone(stored_zone):
+    # The scheduler reads the row, so the next run pairs the row's cron with the row's
+    # zone; a save the sync has not reached yet is not mixed into it.
+    if row.timezone is not None and not is_valid_timezone(row.timezone):
+        # The scheduler skips a job whose own zone does not load; `next_fire` would read it as UTC.
         return None
-    return cron_loader.next_fire(row.cron_expression, zone)
+    return cron_loader.next_fire(row.cron_expression, cron_loader.job_timezone_name(row.timezone, user_tz))
 
 
 def _job_view(
@@ -195,7 +196,7 @@ def _job_view(
         "state": state,
         "last_run_at": iso_utc(row.last_run_at) if row is not None else None,
         "last_success_at": iso_utc(row.last_success_at) if row is not None else None,
-        "next_run_at": _next_run(row, state, stored_zone, zone),
+        "next_run_at": _next_run(row, state, user_tz),
         "consecutive_failures": row.consecutive_failures if row is not None else 0,
         "last_error": row.last_error if row is not None else None,
         "definition": _definition_from_file(file_job) if in_file else _definition_from_row(row),

@@ -1656,7 +1656,7 @@ See `examples/CRON.md` for all options and cron format reference.
 ```toml
 # [[jobs]]
 # name = "daily-report"
-# cron = "0 9 * * *"             # 9am daily (in your timezone)
+# cron = "0 9 * * *"             # 9am daily, in the timezone below
 # timezone = "America/New_York"  # omit to follow your own timezone
 # prompt = "Generate my daily report"
 # target = "talk"                 # "talk", "email", or omit

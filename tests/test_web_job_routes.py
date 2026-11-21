@@ -308,6 +308,23 @@ class TestTimezones:
         assert (fire.hour, fire.minute) == (13, 20)
         assert fire.utcoffset() == ZoneInfo("America/New_York").utcoffset(fire.replace(tzinfo=None))
 
+    async def test_before_the_sync_the_next_run_is_the_rows_schedule_in_the_rows_zone(
+        self, signed_client, config,  # noqa: F811
+    ):
+        """The scheduler reads the row, so a save it has not synced is not half-applied to the next run."""
+        _cron_file(config, body=MARKET_JOB)
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "UPDATE scheduled_jobs SET cron_expression = '0 9 * * *', timezone = NULL"
+                " WHERE name = 'market'"
+            )
+            conn.commit()
+        job = _named(await _listing(signed_client), "market")
+        assert job["schedule_timezone"] == "America/New_York"
+        fire = datetime.fromisoformat(job["next_run_at"])
+        assert (fire.hour, fire.minute) == (9, 0)
+        assert fire.utcoffset() == ZoneInfo("Europe/Warsaw").utcoffset(fire.replace(tzinfo=None))
+
     async def test_a_user_clock_job_follows_its_owner(self, signed_client, config):  # noqa: F811
         _cron_file(config)
         data = await _listing(signed_client)
