@@ -1306,3 +1306,93 @@ class TestTheGrantSnapshotJoinsTheCallersTransaction:
                 "SELECT credential_grants_initialized FROM tasks WHERE id=?", (task_id,)
             ).fetchone()
         assert row[0] == 1
+
+
+class TestTheUsersTimezone:
+    """#977: every task learns the user's zone under the name skill tasks
+    already used, read from the live profile so it follows travel (ISSUE-099).
+    A zone the server cannot load is left out rather than handed on."""
+
+    def _runtime(self, tmp_path, runtime_inputs, monkeypatch, zone, **kwargs):
+        from istota import db, user_profiles
+
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        config = _config(tmp_path)
+        db.init_db(config.db_path)
+        user_profiles.ensure_profile(config.db_path, "testuser", timezone=zone)
+        return task_env.build_task_runtime(config, **runtime_inputs, **kwargs)
+
+    def test_the_model_and_every_skill_cli_get_it(self, tmp_path, runtime_inputs, monkeypatch):
+        runtime = self._runtime(tmp_path, runtime_inputs, monkeypatch, "Europe/Warsaw")
+        assert runtime.env["ISTOTA_USER_TZ"] == "Europe/Warsaw"
+        assert runtime.proxy_ctx.base_env["ISTOTA_USER_TZ"] == "Europe/Warsaw"
+
+    def test_an_explicit_utc_is_handed_on(self, tmp_path, runtime_inputs, monkeypatch):
+        runtime = self._runtime(tmp_path, runtime_inputs, monkeypatch, "UTC")
+        assert runtime.env["ISTOTA_USER_TZ"] == "UTC"
+
+    def test_a_zone_the_server_cannot_load_is_left_out_and_logged(
+        self, tmp_path, runtime_inputs, monkeypatch, caplog,
+    ):
+        with caplog.at_level("WARNING", logger="istota.sandbox.task_env"):
+            runtime = self._runtime(tmp_path, runtime_inputs, monkeypatch, "Mars/Olympus")
+        assert "ISTOTA_USER_TZ" not in runtime.env
+        assert "ISTOTA_USER_TZ" not in runtime.proxy_ctx.base_env
+        assert any(
+            "testuser" in r.getMessage() and "Mars/Olympus" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_the_callers_connection_is_used(self, tmp_path, runtime_inputs, monkeypatch):
+        """A caller holding a write transaction sees its own uncommitted row."""
+        from istota import db, user_profiles
+
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        config = _config(tmp_path)
+        db.init_db(config.db_path)
+        user_profiles.ensure_profile(config.db_path, "testuser", timezone="UTC")
+        with db.get_db(config.db_path) as conn:
+            user_profiles.update_profile(
+                config.db_path, "testuser", conn=conn, timezone="Asia/Tokyo",
+            )
+            runtime = task_env.build_task_runtime(config, conn=conn, **runtime_inputs)
+            conn.rollback()
+        assert runtime.env["ISTOTA_USER_TZ"] == "Asia/Tokyo"
+
+    def test_a_research_task_gets_the_zone_its_prompt_names(
+        self, tmp_path, runtime_inputs, monkeypatch, make_task,
+    ):
+        """`__briefings__` has no profile; its prompt header reads
+        `shared_block_timezone`, and the variable has to say the same."""
+        from istota import db
+
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        config = _config(tmp_path)
+        config.briefings.shared_block_timezone = "Europe/Warsaw"
+        db.init_db(config.db_path)
+        runtime_inputs["task"] = make_task(
+            id=1, user_id="__briefings__", source_type="shared_block_research",
+        )
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+        assert runtime.env["ISTOTA_USER_TZ"] == "Europe/Warsaw"
+        _, prompt_zone = executor._resolve_user_tz(
+            config, "__briefings__", task=runtime_inputs["task"],
+        )
+        assert prompt_zone == "Europe/Warsaw"
+
+    def test_an_inherited_value_does_not_survive_a_bad_zone(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        """A passthrough copy of the daemon's own variable would otherwise be
+        what a script read when the user's zone is refused."""
+        monkeypatch.setenv("ISTOTA_USER_TZ", "Europe/Paris")
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        from istota import db, user_profiles
+
+        config = _config(tmp_path, passthrough_env_vars=["ISTOTA_USER_TZ"])
+        db.init_db(config.db_path)
+        user_profiles.ensure_profile(config.db_path, "testuser", timezone="Mars/Olympus")
+        assert executor.build_clean_env(config)["ISTOTA_USER_TZ"] == "Europe/Paris"
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+        assert "ISTOTA_USER_TZ" not in runtime.env
+        assert "ISTOTA_USER_TZ" not in runtime.proxy_ctx.base_env

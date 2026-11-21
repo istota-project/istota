@@ -2573,9 +2573,10 @@ def _run_garmin_sync_inprocess(
     except UserNotFoundError as exc:
         return False, f"garmin sync: {exc}"
 
-    # Live DB timezone so the "yesterday" window tracks travel (ISSUE-099);
-    # "UTC" is the engine's effective default, same as the old None.
-    user_tz = config.resolve_user_timezone(task.user_id)
+    # Live DB timezone so the "yesterday" window tracks travel (ISSUE-099).
+    # None, for a zone that does not load, is the engine's UTC.
+    from .sandbox.task_env import USER_TZ_VAR, user_timezone_env
+    user_tz = user_timezone_env(config, task).get(USER_TZ_VAR)
 
     try:
         res = gs.sync_garmin(
@@ -2765,11 +2766,10 @@ def _execute_skill_task(
     # safe.
     env.update(dispatch_setup_env_hooks(list(skill_index), skill_index, ctx))
 
-    # Per-user timezone (used by sync engines like Garmin that need to
-    # compute the user's "yesterday" in their local TZ rather than UTC).
-    # Resolved from the live user_profiles DB row so it tracks travel
-    # without a daemon restart (ISSUE-099).
-    env["ISTOTA_USER_TZ"] = config.resolve_user_timezone(task.user_id)
+    # Same helper as `build_task_runtime`, so every task type agrees (#977).
+    from .sandbox.task_env import USER_TZ_VAR, user_timezone_env
+    env.pop(USER_TZ_VAR, None)
+    env.update(user_timezone_env(config, task))
 
     # A skill task runs a trusted CLI, not a model, so it carries no model
     # credential: after the last merge every model credential name goes, then
