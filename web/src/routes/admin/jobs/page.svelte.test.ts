@@ -78,7 +78,7 @@ it('splits user jobs from module pollers and labels the three states', async () 
   expect(within(await moduleTable()).getByRole('row', { name: /_module\.feeds/ })).toBeTruthy();
 });
 
-it("names the zone of a job pinned to one, and nothing for one on its owner's clock", async () => {
+it("gives the timezone its own column: a pinned zone, or User for one on its owner's clock", async () => {
   api.getAdminScheduledJobs.mockResolvedValue({
     jobs_total: 2,
     jobs_active: 2,
@@ -88,10 +88,10 @@ it("names the zone of a job pinned to one, and nothing for one on its owner's cl
   render(Page);
   const users = await userTable();
   const market = within(users).getByRole('row', { name: /market/ });
-  expect(within(market).getByText('America/New_York')).toHaveClass('caption');
+  expect(within(market).getByText('America/New_York')).toHaveClass('col-zone');
   const weekly = within(users).getByRole('row', { name: /weekly/ });
+  expect(within(weekly).getByText('User')).toHaveClass('col-zone');
   expect(within(weekly).queryByText(/\//)).toBeNull();
-  expect(weekly.querySelector('.col-schedule .caption')).toBeNull();
 });
 
 it('filters by user or job name', async () => {

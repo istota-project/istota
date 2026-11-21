@@ -200,7 +200,8 @@
 
 <Card {title}>
   {#snippet status()}
-    <Badge size="sm" variant={stateBadge.variant}>{stateBadge.label}</Badge>
+    <Badge size="sm" variant={stateBadge.variant} title={stateBadge.title}>{stateBadge.label}</Badge
+    >
   {/snippet}
 
   {#if subject.by_default === 'public'}

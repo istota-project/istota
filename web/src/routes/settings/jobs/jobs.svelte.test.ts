@@ -181,16 +181,31 @@ it('lists a job with its schedule, state, access, failures and last run', async 
   expect((await row('open')).getByText('Full access')).toBeInTheDocument();
 });
 
-it('names the zone under a pinned schedule, and nothing under one on your clock', async () => {
+it('gives the timezone its own column: a pinned zone, or User for one on your clock', async () => {
   open(
     LIST,
     job({ schedule_timezone: 'America/New_York', follows_user_clock: false }),
     job({ id: 2, name: 'weekly', schedule_timezone: 'Europe/Warsaw' }),
   );
-  const pinned = await row();
-  expect(pinned.getByText('America/New_York')).toHaveClass('caption');
-  const mine = await row('weekly');
-  expect(mine.queryByText(/Europe\/Warsaw/)).toBeNull();
+  const pinned = (await row()).getByText('America/New_York');
+  expect(pinned).toHaveClass('col-zone');
+  const header = screen.getAllByRole('columnheader').map((cell) => cell.textContent?.trim());
+  expect(header.indexOf('Timezone')).toBe(header.indexOf('Schedule') + 1);
+  const mine = (await row('weekly')).getByText('User');
+  expect(mine).toHaveClass('col-zone');
+  expect(mine).toHaveAttribute('title', 'Your timezone (Europe/Warsaw)');
+});
+
+it('names the access a job runs with, and says only in the tooltip that it is the default', async () => {
+  open(
+    LIST,
+    job({ network: network('digest', { state: 'limited', by_default: 'open' }) }),
+    job({ id: 2, name: 'weekly', network: network('weekly', { state: 'open' }) }),
+  );
+  const byDefault = (await row()).getByText('Full access');
+  expect(byDefault).toHaveAttribute('title', expect.stringMatching(/operator's default/));
+  const approved = (await row('weekly')).getByText('Full access');
+  expect(approved).not.toHaveAttribute('title');
 });
 
 describe('the Summary card', () => {
