@@ -2085,11 +2085,27 @@ class TestDestroyPurge:
     def made(self, mac):
         assert _create(mac).returncode == 0
         mac.calls_path.unlink()
+        # What Lima leaves for the VM being purged: its own lima.yaml names
+        # the folder, and the purge must not count it as another owner.
+        self.lima_yaml(mac.home / ".lima" / "istota", mac.home / "Istota")
         return mac
 
     @staticmethod
     def state_file(mac: Mac, instance: str = "istota") -> Path:
         return mac.home / ".config" / "istota-stack" / f"{instance}.env"
+
+    @staticmethod
+    def lima_yaml(instance_dir: Path, workspace: Path) -> Path:
+        yaml = instance_dir / "lima.yaml"
+        yaml.parent.mkdir(parents=True, exist_ok=True)
+        yaml.write_text(
+            "param:\n"
+            "  ISTOTA_TAG: \"v1.2.0\"\n"
+            f"  WORKSPACE: \"{_resolved(workspace)}\"\n"
+            "mounts:\n"
+            "- location: \"{{.Param.WORKSPACE}}\"\n"
+        )
+        return yaml
 
     def test_it_removes_the_vm_the_folder_the_key_and_the_state(self, made):
         (made.home / "Istota" / "Users" / "alice").mkdir(parents=True)
@@ -2187,6 +2203,143 @@ class TestDestroyPurge:
         assert result.returncode == 0, result.stdout + result.stderr
         assert (made.home / "Istota" / ".istota-workspace").is_file()
         assert "other" in result.stdout + result.stderr
+
+    @staticmethod
+    def app_dir(mac: Mac) -> Path:
+        return mac.home / "Library" / "Application Support" / "Istota"
+
+    def test_a_folder_the_mac_app_records_is_kept(self, made):
+        """ISSUE-975: after a move into the app, the app's state names the
+        same folder and its VM the same Keychain item. The command-line
+        install's purge must keep both."""
+        app_state = self.app_dir(made) / "config" / "istota-stack" / "istota.env"
+        app_state.parent.mkdir(parents=True)
+        app_state.write_text(f"WORKSPACE={_resolved(made.home / 'Istota')}\nPORT=8080\n")
+        result = made.run("destroy", "--purge", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (made.home / "Istota" / ".istota-workspace").is_file()
+        assert made.state()["keychain"] == {"istota.local/secret-key-istota": KEY}
+        assert str(app_state) in result.stderr
+        assert not self.state_file(made).exists()
+
+    def test_a_folder_the_mac_apps_vm_mounts_is_kept(self, made):
+        """The app's Lima directory is the other record: a VM whose state
+        file is gone still mounts the folder it was made with."""
+        yaml = self.lima_yaml(self.app_dir(made) / "lima" / "istota", made.home / "Istota")
+        result = made.run("destroy", "--purge", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (made.home / "Istota" / ".istota-workspace").is_file()
+        assert made.state()["keychain"] == {"istota.local/secret-key-istota": KEY}
+        assert str(yaml.parent.parent) in result.stderr
+
+    def test_the_keychain_item_another_lima_instance_shares_is_kept(self, made):
+        """An app VM with its state file gone still holds this key, whatever
+        folder it mounts: the folder may go, the item stays."""
+        elsewhere = made.home / "Elsewhere"
+        elsewhere.mkdir()
+        self.lima_yaml(self.app_dir(made) / "lima" / "istota", elsewhere)
+        result = made.run("destroy", "--purge", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not (made.home / "Istota").exists()
+        assert made.state()["keychain"] == {"istota.local/secret-key-istota": KEY}
+        assert str(self.app_dir(made) / "lima") in result.stderr
+
+    def test_a_legacy_command_line_state_file_is_seen_from_the_app(self, made):
+        """A command-line install whose state is still in ~/.config/istota/
+        is another owner to the app's purge too."""
+        app = self.app_dir(made)
+        (app / "lima").mkdir(parents=True)
+        app_state = app / "config" / "istota-stack" / "istota.env"
+        app_state.parent.mkdir(parents=True)
+        app_state.write_text(self.state_file(made).read_text())
+        legacy = made.home / ".config" / "istota" / "istota.env"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text(f"WORKSPACE={_resolved(made.home / 'Istota')}\nPORT=8080\n")
+        self.state_file(made).unlink()
+        (made.home / ".lima" / "istota" / "lima.yaml").unlink()
+        result = made.run("destroy", "--purge", stdin="istota\n",
+                          XDG_CONFIG_HOME=str(app / "config"), LIMA_HOME=str(app / "lima"))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (made.home / "Istota" / ".istota-workspace").is_file()
+        assert made.state()["keychain"] == {"istota.local/secret-key-istota": KEY}
+        assert str(legacy) in result.stderr
+
+    def test_no_keychain_item_is_not_reported_as_kept(self, made):
+        made.set(keychain={})
+        elsewhere = made.home / "Elsewhere"
+        elsewhere.mkdir()
+        app_state = self.app_dir(made) / "config" / "istota-stack" / "istota.env"
+        app_state.parent.mkdir(parents=True)
+        app_state.write_text(f"WORKSPACE={_resolved(elsewhere)}\n")
+        result = made.run("destroy", "--purge", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "keeps the master key" not in result.stderr
+        assert "kept the Keychain key" not in result.stdout + result.stderr
+
+    def test_the_keychain_item_another_install_shares_is_kept(self, made):
+        """The Keychain item is named by the instance alone, so an install of
+        the same name elsewhere uses this key whatever folder it has."""
+        elsewhere = made.home / "Elsewhere"
+        elsewhere.mkdir()
+        app_state = self.app_dir(made) / "config" / "istota-stack" / "istota.env"
+        app_state.parent.mkdir(parents=True)
+        app_state.write_text(f"WORKSPACE={_resolved(elsewhere)}\n")
+        result = made.run("destroy", "--purge", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not (made.home / "Istota").exists()
+        assert made.state()["keychain"] == {"istota.local/secret-key-istota": KEY}
+        assert "secret-key-istota" in result.stderr
+        assert str(app_state) in result.stderr
+
+    def test_the_apps_purge_keeps_what_the_command_line_install_uses(self, made):
+        """The other direction: the app runs this script with its own
+        XDG_CONFIG_HOME and LIMA_HOME, and the command-line install's state
+        in ~/.config/istota-stack is then the other owner."""
+        app = self.app_dir(made)
+        (app / "lima").mkdir(parents=True)
+        app_state = app / "config" / "istota-stack" / "istota.env"
+        app_state.parent.mkdir(parents=True)
+        app_state.write_text(self.state_file(made).read_text())
+        # Only the state here: the command-line VM is gone.
+        (made.home / ".lima" / "istota" / "lima.yaml").unlink()
+        (made.home / ".lima" / "istota").rmdir()
+        result = made.run("destroy", "--purge", stdin="istota\n",
+                          XDG_CONFIG_HOME=str(app / "config"), LIMA_HOME=str(app / "lima"))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (made.home / "Istota" / ".istota-workspace").is_file()
+        assert made.state()["keychain"] == {"istota.local/secret-key-istota": KEY}
+        assert not app_state.exists()
+        assert self.state_file(made).exists()
+        assert str(self.state_file(made)) in result.stderr
+
+    def test_the_apps_purge_keeps_what_the_command_line_vm_mounts(self, made):
+        app = self.app_dir(made)
+        (app / "lima").mkdir(parents=True)
+        app_state = app / "config" / "istota-stack" / "istota.env"
+        app_state.parent.mkdir(parents=True)
+        app_state.write_text(self.state_file(made).read_text())
+        # Only the VM here: its state file was removed by hand.
+        self.state_file(made).unlink()
+        result = made.run("destroy", "--purge", stdin="istota\n",
+                          XDG_CONFIG_HOME=str(app / "config"), LIMA_HOME=str(app / "lima"))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (made.home / "Istota" / ".istota-workspace").is_file()
+        assert made.state()["keychain"] == {"istota.local/secret-key-istota": KEY}
+        assert str(made.home / ".lima") in result.stderr
+
+    @pytest.mark.requires_dac
+    def test_an_unreadable_lima_yaml_keeps_the_folder(self, made):
+        yaml = self.app_dir(made) / "lima" / "istota" / "lima.yaml"
+        yaml.parent.mkdir(parents=True)
+        yaml.write_text("param:\n  WORKSPACE: \"/nowhere\"\n")
+        yaml.chmod(0)
+        try:
+            result = made.run("destroy", "--purge", stdin="istota\n")
+        finally:
+            yaml.chmod(0o600)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (made.home / "Istota" / ".istota-workspace").is_file()
+        assert made.state()["keychain"] == {"istota.local/secret-key-istota": KEY}
 
     def test_a_linked_folder_is_not_followed(self, made):
         real = made.home / "Elsewhere"

@@ -17,9 +17,16 @@
 #   scripts/test-stack-negative-control.sh setup-no-lock
 #   scripts/test-stack-negative-control.sh setup-no-restore
 #   scripts/test-stack-negative-control.sh setup-server-in-foreground
-#   scripts/test-stack-negative-control.sh mac-purge  # the two destroy --purge folder guards
+#   scripts/test-stack-negative-control.sh mac-purge  # the nine destroy --purge guards
 #   scripts/test-stack-negative-control.sh mac-purge-unmarked
 #   scripts/test-stack-negative-control.sh mac-purge-default-folder
+#   scripts/test-stack-negative-control.sh mac-purge-app-state
+#   scripts/test-stack-negative-control.sh mac-purge-cli-state
+#   scripts/test-stack-negative-control.sh mac-purge-own-lima-folder
+#   scripts/test-stack-negative-control.sh mac-purge-own-lima-key
+#   scripts/test-stack-negative-control.sh mac-purge-lima-key
+#   scripts/test-stack-negative-control.sh mac-purge-legacy-state
+#   scripts/test-stack-negative-control.sh mac-purge-cli-lima
 #
 # Row 13 (release integrity) runs in the default suite against a fixture
 # repository: tests/test_istota_stack.py. The broken copy is handed over in
@@ -323,14 +330,104 @@ mac_purge_default_folder() {
     # The folder comes from workspace_or_default, so an instance with no state
     # of its own takes ~/Istota, which another instance may be using.
     local copy
-    copy="$(mutate mac-purge-default-folder '    local status="$1" folder refusal="" key="" state="" old="" answer=""
+    copy="$(mutate mac-purge-default-folder '    local status="$1" folder refusal="" key="" key_refusal="" state="" old="" answer=""
     folder="$(state_get WORKSPACE)"
 =>
-    local status="$1" folder refusal="" key="" state="" old="" answer=""
+    local status="$1" folder refusal="" key="" key_refusal="" state="" old="" answer=""
     folder="$(workspace_or_default)"
 ' "$MAC_SCRIPT")"
     run_mac_purge mac-purge-default-folder "$copy" \
         "${MAC_PURGE}::test_an_instance_with_no_recorded_folder_deletes_no_folder"
+}
+
+mac_purge_app_state() {
+    # The guard looks only at the command-line install's state, so a purge
+    # after a move into the Mac app deletes the folder and key the app uses.
+    local copy
+    copy="$(mutate mac-purge-app-state 'APP_STATE_DIR="${ISTOTA_DESKTOP_STATE_DIR:-${HOME}/Library/Application Support/Istota}"
+=>
+APP_STATE_DIR=/nonexistent
+' "$MAC_SCRIPT")"
+    run_mac_purge mac-purge-app-state "$copy" \
+        "${MAC_PURGE}::test_a_folder_the_mac_app_records_is_kept" \
+        "${MAC_PURGE}::test_a_folder_the_mac_apps_vm_mounts_is_kept" \
+        "${MAC_PURGE}::test_the_keychain_item_another_install_shares_is_kept" \
+        "${MAC_PURGE}::test_the_keychain_item_another_lima_instance_shares_is_kept" \
+        "${MAC_PURGE}::test_an_unreadable_lima_yaml_keeps_the_folder"
+}
+
+mac_purge_cli_lima() {
+    # The app's purge, with LIMA_HOME moved, no longer sees the command-line
+    # install's VM in ~/.lima.
+    local copy
+    copy="$(mutate mac-purge-cli-lima '"${LIMA_HOME:-${HOME}/.lima}"/*/lima.yaml "${HOME}/.lima"/*/lima.yaml \
+=>
+"${LIMA_HOME:-${HOME}/.lima}"/*/lima.yaml \' "$MAC_SCRIPT")"
+    run_mac_purge mac-purge-cli-lima "$copy" \
+        "${MAC_PURGE}::test_the_apps_purge_keeps_what_the_command_line_vm_mounts"
+}
+
+mac_purge_legacy_state() {
+    # The app's purge no longer reads a command-line install's state that is
+    # still in ~/.config/istota/.
+    local copy
+    copy="$(mutate mac-purge-legacy-state '"${old_dir}"/*.env "${HOME}/.config/istota"/*.env; do
+=>
+"${old_dir}"/*.env; do' "$MAC_SCRIPT")"
+    run_mac_purge mac-purge-legacy-state "$copy" \
+        "${MAC_PURGE}::test_a_legacy_command_line_state_file_is_seen_from_the_app"
+}
+
+mac_purge_cli_state() {
+    # The app's own purge, with XDG_CONFIG_HOME moved, no longer sees the
+    # command-line install's state in ~/.config/istota-stack.
+    local copy
+    copy="$(mutate mac-purge-cli-state '    for file in "${STATE_DIR}"/*.env "${HOME}/.config/istota-stack"/*.env \
+=>
+    for file in "${STATE_DIR}"/*.env \' "$MAC_SCRIPT")"
+    run_mac_purge mac-purge-cli-state "$copy" \
+        "${MAC_PURGE}::test_the_apps_purge_keeps_what_the_command_line_install_uses"
+}
+
+mac_purge_own_lima_folder() {
+    # The VM being purged counts as another owner of its own folder, so a
+    # real purge never deletes it: its own lima.yaml names the folder.
+    local copy
+    copy="$(mutate mac-purge-own-lima-folder '        if [ "$(dirname "$file")" -ef "${LIMA_HOME:-${HOME}/.lima}/${INSTANCE}" ]; then continue; fi
+=>
+' "$MAC_SCRIPT")"
+    run_mac_purge mac-purge-own-lima-folder "$copy" \
+        "${MAC_PURGE}::test_it_removes_the_vm_the_folder_the_key_and_the_state" \
+        "${MAC_PURGE}::test_an_old_location_state_file_is_named_and_left" \
+        "${MAC_PURGE}::test_after_a_plain_destroy_it_removes_the_leftovers" \
+        "${MAC_PURGE}::test_a_folder_the_mac_apps_vm_mounts_is_kept" \
+        "${MAC_PURGE}::test_the_keychain_item_another_install_shares_is_kept" \
+        "${MAC_PURGE}::test_the_keychain_item_another_lima_instance_shares_is_kept" \
+        "${MAC_PURGE}::test_a_keychain_key_that_is_not_this_vms_does_not_stop_it"
+}
+
+mac_purge_own_lima_key() {
+    # The same for the Keychain item: the VM's own Lima directory keeps it.
+    local copy
+    copy="$(mutate mac-purge-own-lima-key '        if [ "$file" -ef "${LIMA_HOME:-${HOME}/.lima}/${INSTANCE}" ]; then continue; fi
+=>
+' "$MAC_SCRIPT")"
+    run_mac_purge mac-purge-own-lima-key "$copy" \
+        "${MAC_PURGE}::test_it_removes_the_vm_the_folder_the_key_and_the_state" \
+        "${MAC_PURGE}::test_after_a_plain_destroy_it_removes_the_leftovers" \
+        "${MAC_PURGE}::test_the_keychain_item_another_lima_instance_shares_is_kept" \
+        "${MAC_PURGE}::test_a_keychain_key_that_is_not_this_vms_does_not_stop_it"
+}
+
+mac_purge_lima_key() {
+    # Another install's VM with no state file left no longer holds the key.
+    local copy
+    copy="$(mutate mac-purge-lima-key '    for file in "${HOME}/.lima/${INSTANCE}" "${APP_STATE_DIR}/lima/${INSTANCE}"; do
+=>
+    for file in ; do
+' "$MAC_SCRIPT")"
+    run_mac_purge mac-purge-lima-key "$copy" \
+        "${MAC_PURGE}::test_the_keychain_item_another_lima_instance_shares_is_kept"
 }
 
 no_drop() {
@@ -378,8 +475,16 @@ case "$mode" in
     setup-no-lock) setup_no_lock ;;
     setup-no-restore) setup_no_restore ;;
     setup-server-in-foreground) setup_server_in_foreground ;;
-    mac-purge) mac_purge_unmarked; mac_purge_default_folder ;;
+    mac-purge) mac_purge_unmarked; mac_purge_default_folder; mac_purge_app_state; mac_purge_cli_state
+        mac_purge_own_lima_folder; mac_purge_own_lima_key; mac_purge_lima_key; mac_purge_legacy_state; mac_purge_cli_lima ;;
     mac-purge-unmarked) mac_purge_unmarked ;;
     mac-purge-default-folder) mac_purge_default_folder ;;
+    mac-purge-app-state) mac_purge_app_state ;;
+    mac-purge-cli-state) mac_purge_cli_state ;;
+    mac-purge-own-lima-folder) mac_purge_own_lima_folder ;;
+    mac-purge-own-lima-key) mac_purge_own_lima_key ;;
+    mac-purge-lima-key) mac_purge_lima_key ;;
+    mac-purge-legacy-state) mac_purge_legacy_state ;;
+    mac-purge-cli-lima) mac_purge_cli_lima ;;
     *) echo "unknown control: $mode" >&2; exit 64 ;;
 esac

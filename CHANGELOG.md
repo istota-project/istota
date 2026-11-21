@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Web chat marks messages read as you scroll through All, Unread and Starred**, and the Unread view opens at its oldest message. A room is never marked read past a message you have not reached. It is on by default; turn it off in Settings → Preferences.
 - **A scheduled job can keep its own timezone.** Add `timezone = "America/New_York"` (or `"UTC"`) to a CRON.md job, or pick a zone in Settings, Scheduled jobs, and it runs at that zone's wall-clock time, daylight saving included, instead of moving when your own timezone changes or you travel. Jobs without the field follow your timezone as before. See docs/features/scheduling.md.
 
+### Fixed
+
+- **`istota-stack destroy --purge` on a Mac no longer deletes what the Mac app uses.** After a move into the app, the command-line install's purge deleted the shared folder, its backups and the Keychain key the app's snapshots need. It now keeps the folder when the app's settings or VM name it, and keeps the key while another install of the same name exists.
+- A message that waited behind a running turn no longer shows twice in web chat when the transcript reloads while it is being sent, as it could on a phone coming back to the app. The second copy sat under the live turn as "Waiting to send" with a Send button. A message the app was closed on mid-send no longer comes back as unsent beside the copy the server already has.
+
 ## [0.51.0] - 2026-11-15
 
 On a Mac you can now resize the Istota VM after it is made: `istota-stack set-size` changes its CPUs, memory and disk, and `istota-stack size` shows what the VM has and what the Mac can give it.
