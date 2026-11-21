@@ -150,6 +150,7 @@
                 ><th scope="col" class="col-user">User</th>
                 <th scope="col" class="col-job">Job</th>
                 <th scope="col" class="col-schedule">Schedule</th>
+                <th scope="col" class="col-zone">Timezone</th>
                 <th scope="col" class="col-state">State</th>
                 <th scope="col" class="col-last">Last run</th>
                 <th scope="col" class="num col-failures">Failures</th>
@@ -171,9 +172,9 @@
                   </td>
                   <td class="col-schedule">
                     <code>{job.cron}</code>
-                    {#if job.timezone}
-                      <p class="caption zone">{job.timezone}</p>
-                    {/if}
+                  </td>
+                  <td class="col-zone truncate" title={job.timezone || "The user's own timezone"}>
+                    {job.timezone || 'User'}
                   </td>
                   <td class="col-state">
                     <Badge size="sm" variant={STATE_VARIANT[state]}>{STATE_LABEL[state]}</Badge>
@@ -274,14 +275,10 @@
   .failing {
     color: var(--status-danger-fg);
   }
-  .zone {
-    margin: 0;
-    overflow-wrap: anywhere;
-  }
   /* Job is the unsized column: the min-width reserves it 12rem past the sized
      ones, and adminTables.test.ts holds the sum. */
   .jobs-grid {
-    min-width: 49rem;
+    min-width: 57.5rem;
   }
   .col-user {
     width: 8rem;
@@ -289,8 +286,11 @@
   .col-schedule {
     width: 8rem;
   }
+  .col-zone {
+    width: 9rem;
+  }
   .col-state {
-    width: 7rem;
+    width: 6.5rem;
   }
   .col-last {
     width: 6.5rem;
@@ -299,16 +299,19 @@
     width: 5rem;
   }
   /* Narrow: keep every column and scroll sideways; the min-width tightens
-     with User and Schedule. */
+     with User, Schedule and Timezone. */
   @container settings (max-width: 40rem) {
     .jobs-grid {
-      min-width: 46.5rem;
+      min-width: 54rem;
     }
     .col-user {
       width: 6.5rem;
     }
     .col-schedule {
       width: 7rem;
+    }
+    .col-zone {
+      width: 8rem;
     }
   }
 </style>

@@ -426,6 +426,7 @@
               <tr>
                 <th scope="col" class="col-job">Job</th>
                 <th scope="col" class="col-schedule">Schedule</th>
+                <th scope="col" class="col-zone">Timezone</th>
                 <th scope="col" class="col-state">State</th>
                 <th scope="col" class="col-access">Access</th>
                 <th scope="col" class="col-last">Last run</th>
@@ -451,9 +452,14 @@
                   </td>
                   <td class="col-schedule">
                     <code>{job.cron}</code>
-                    {#if !job.follows_user_clock}
-                      <p class="caption zone">{job.schedule_timezone}</p>
-                    {/if}
+                  </td>
+                  <td
+                    class="col-zone truncate"
+                    title={job.follows_user_clock
+                      ? `Your timezone (${job.schedule_timezone})`
+                      : job.schedule_timezone}
+                  >
+                    {job.follows_user_clock ? 'User' : job.schedule_timezone}
                   </td>
                   <td class="col-state">
                     {#if job.pending}
@@ -469,7 +475,9 @@
                   <td class="col-access">
                     {#if job.network}
                       {@const access = accessBadge(job.network)}
-                      <Badge size="sm" variant={access.variant}>{access.label}</Badge>
+                      <Badge size="sm" variant={access.variant} title={access.title}
+                        >{access.label}</Badge
+                      >
                     {/if}
                   </td>
                   <td class="col-last truncate">
@@ -525,23 +533,22 @@
   .schedule {
     --hstack-gap: var(--space-1);
   }
-  .zone {
-    margin: 0;
-    overflow-wrap: anywhere;
-  }
   /* Job is the unsized column: the min-width reserves it 12rem past the sized
      ones, and adminTables.test.ts holds the sum. */
   .jobs-grid {
-    min-width: 49.5rem;
+    min-width: 56.5rem;
   }
   .col-schedule {
     width: 8rem;
   }
+  .col-zone {
+    width: 9rem;
+  }
   .col-state {
-    width: 7.5rem;
+    width: 6.5rem;
   }
   .col-access {
-    width: 8rem;
+    width: 7rem;
   }
   .col-last {
     width: 6.5rem;
@@ -550,13 +557,16 @@
     width: 5rem;
   }
   /* Narrow: keep every column and scroll sideways, as the admin jobs table
-     does; the min-width tightens with Schedule. */
+     does; the min-width tightens with Schedule and Timezone. */
   @container settings (max-width: 40rem) {
     .jobs-grid {
-      min-width: 48.5rem;
+      min-width: 54.5rem;
     }
     .col-schedule {
       width: 7rem;
+    }
+    .col-zone {
+      width: 8rem;
     }
   }
 </style>

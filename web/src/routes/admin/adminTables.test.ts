@@ -226,6 +226,7 @@ const TABLES: Table[] = [
     sized: [
       '.col-user',
       '.col-schedule',
+      '.col-zone',
       '.col-state',
       '.col-last',
       '.col-failures',
@@ -241,6 +242,7 @@ const TABLES: Table[] = [
     unsized: '.col-job',
     sized: [
       '.col-schedule',
+      '.col-zone',
       '.col-state',
       '.col-access',
       '.col-last',

@@ -344,13 +344,15 @@ it('says what a waiting one-time job needs, a dismissed request included', async
 
 it('says a job runs on full access where the deployment needs no approval', async () => {
   show(subject({ by_default: 'open' }));
-  expect(await screen.findByText('Full access by default')).toBeTruthy();
+  const badge = await screen.findByTitle(/operator's default/);
+  expect(badge).toHaveTextContent(/^Full access$/);
   expect(screen.getByText(/your browser profile, every skill/)).toBeTruthy();
 });
 
 it('says a public job runs with no approval and its text was not reviewed', async () => {
   show(subject({ by_default: 'public', job: { ...job, reach: 'public' } }));
-  expect(await screen.findByText('Public by default')).toBeTruthy();
+  const badge = await screen.findByTitle(/operator's default/);
+  expect(badge).toHaveTextContent(/^Public$/);
   expect(screen.getByText(/Its text is not reviewed/)).toBeTruthy();
 });
 
