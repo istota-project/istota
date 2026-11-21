@@ -7,17 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A scheduled job can now keep its own timezone: give a CRON.md job a `timezone`, or pick one in Settings, Scheduled jobs, and it runs at that zone's wall-clock time wherever you travel. Web chat marks messages read as you scroll through All, Unread and Starred.
+
+Scripts run by `command` jobs and model tasks now see your timezone as `ISTOTA_USER_TZ`, and on a Mac `istota-stack destroy --purge` keeps what the Mac app uses. This release has 28 commits, against 8 in 0.51.0 and 69 in 0.50.0; the rest are fixes to the Scheduled jobs list and to messages showing twice in web chat.
+
 ### Added
 
-- **Web chat marks messages read as you scroll through All, Unread and Starred**, and the Unread view opens at its oldest message. A room is never marked read past a message you have not reached. It is on by default; turn it off in Settings → Preferences.
-- **A scheduled job can keep its own timezone.** Add `timezone = "America/New_York"` (or `"UTC"`) to a CRON.md job, or pick a zone in Settings, Scheduled jobs, and it runs at that zone's wall-clock time, daylight saving included, instead of moving when your own timezone changes or you travel. Jobs without the field follow your timezone as before. See docs/features/scheduling.md.
+- **Web chat marks messages read as you scroll through All, Unread and Starred**, and Unread opens at its oldest message. A room is never marked read past a message you have not reached. Turn it off in Settings → Preferences.
+- **A scheduled job can keep its own timezone.** Set `timezone` on a CRON.md job, or pick one in Settings, Scheduled jobs, and it runs at that zone's wall-clock time, daylight saving included. Jobs without one follow your timezone as before. See docs/features/scheduling.md.
 
 ### Fixed
 
-- **CRON.md `command` jobs and model tasks now get your timezone as `ISTOTA_USER_TZ`**, which only skill jobs had before, so a script can cut a day in your local time without hardcoding a zone. It is read from your profile on each run and follows you when you travel. It is left unset, with a warning in the log, when you never chose a timezone or the stored one does not load, so a script can stop rather than run on UTC.
-- The Scheduled jobs list no longer runs a job's access badge into the next column. A job on the operator's default access now reads "Full access" or "Public" like any other, with the difference in its tooltip and on the job's page, and a job's timezone has its own column, "User" for one that follows yours.
-- **`istota-stack destroy --purge` on a Mac no longer deletes what the Mac app uses.** After a move into the app, the command-line install's purge deleted the shared folder, its backups and the Keychain key the app's snapshots need. It now keeps the folder when the app's settings or VM name it, and keeps the key while another install of the same name exists.
-- A message that waited behind a running turn no longer shows twice in web chat when the transcript reloads while it is being sent, as it could on a phone coming back to the app. The second copy sat under the live turn as "Waiting to send" with a Send button. A message the app was closed on mid-send no longer comes back as unsent beside the copy the server already has.
+- CRON.md `command` jobs and model tasks get your timezone as `ISTOTA_USER_TZ`, which only skill jobs had before. It is read from your profile on each run, and left unset with a warning in the log when you never chose a timezone or the stored one does not load.
+- The Scheduled jobs list no longer runs a job's access badge into the next column. A job on the operator's default access reads "Full access" or "Public" like any other, and a job's timezone has its own column.
+- `istota-stack destroy --purge` on a Mac no longer deletes what the Mac app uses: the shared folder, its backups and the Keychain key the app's snapshots need.
+- A message that waited behind a running turn no longer shows twice in web chat when the transcript reloads mid-send, and a message the app was closed on mid-send no longer comes back as unsent beside the server's copy.
 
 ## [0.51.0] - 2026-11-15
 
