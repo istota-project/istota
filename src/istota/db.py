@@ -200,6 +200,22 @@ class Task:
     transcribed_audio: dict[str, str] = field(default_factory=dict)
 
 
+def answered_by_model(task: Task) -> bool:
+    """Whether a task's result is a model's answer (ISSUE-987).
+
+    A skill or command task runs a program, and its result is that program's
+    output, which has no recall value. Every writer that turns a completed task
+    into memory asks this, or `answered_by_model_sql` where it reads rows.
+    """
+    return not (task.skill or task.command)
+
+
+def answered_by_model_sql(table: str = "") -> str:
+    """`answered_by_model` as a WHERE clause, columns qualified by ``table``."""
+    prefix = f"{table}." if table else ""
+    return f"(COALESCE({prefix}skill, '') = '' AND COALESCE({prefix}command, '') = '')"
+
+
 @dataclass
 class UserResource:
     id: int
@@ -13413,6 +13429,8 @@ def get_completed_channel_tasks_since(
     nobody's memory, and `CHANNEL.md` is read by every later task in the room.
     Excludes an incognito room's turns (ISSUE-892): its `CHANNEL.md` is the
     user's to write, by hand or by asking, and nothing extracts into it.
+    Excludes a skill or command task (ISSUE-987): its result is a program's
+    output, not an exchange.
     Excludes ``withheld_from_room`` (ISSUE-255): the channel sleep cycle distils
     what it collects into ``CHANNEL.md``, which is durable and reaches every
     later prompt in the room — so an exchange deliberately kept out of the room
@@ -13430,6 +13448,7 @@ def get_completed_channel_tasks_since(
         AND COALESCE(withheld_from_room, 0) = 0
         AND guest_participant_id IS NULL
         AND incognito = 0
+        AND {answered_by_model_sql()}
     """
     params: list = [*refs, since_datetime]
 
@@ -13462,7 +13481,7 @@ def get_active_channel_tokens(
     keeps arriving.
     """
     cursor = conn.execute(
-        """
+        f"""
         SELECT DISTINCT conversation_token
         FROM tasks
         WHERE status = 'completed'
@@ -13472,6 +13491,7 @@ def get_active_channel_tokens(
         AND COALESCE(withheld_from_room, 0) = 0
         AND guest_participant_id IS NULL
         AND incognito = 0
+        AND {answered_by_model_sql()}
         ORDER BY conversation_token
         """,
         (since_datetime,),
@@ -13494,7 +13514,8 @@ def get_completed_tasks_since(
     A guest's turn run as this user (multiplayer D2) is not theirs to learn
     from: it is extracted into nobody's memory, so it is excluded here. So is a
     turn in an incognito room (ISSUE-892), which the playbook distiller reads
-    through the same gather.
+    through the same gather, and a skill or command task (ISSUE-987), whose
+    result is a program's output rather than anything the user said or was told.
 
     Args:
         since_datetime: ISO format datetime string (UTC)
@@ -13511,6 +13532,7 @@ def get_completed_tasks_since(
         AND completed_at >= ?
         AND guest_participant_id IS NULL
         AND incognito = 0
+        AND {answered_by_model_sql()}
     """
     params: list = [user_id, since_datetime]
 

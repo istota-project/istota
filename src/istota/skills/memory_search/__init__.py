@@ -96,7 +96,7 @@ def cmd_search(args) -> dict:
 
 def cmd_index_conversation(args) -> dict:
     """Index a specific conversation by task ID."""
-    from istota.db import get_task
+    from istota.db import answered_by_model, get_task
     from istota.memory.search import index_conversation
     from istota.rooms.scopes import turn_author
 
@@ -118,6 +118,14 @@ def cmd_index_conversation(args) -> dict:
             "status": "error",
             "reason": INCOGNITO_REFUSAL,
             "error": f"Task {args.task_id} is in an incognito room, so it stays out of memory",
+        }
+
+    if not answered_by_model(get_task(conn, args.task_id)):
+        conn.close()
+        return {
+            "status": "error",
+            "reason": "program_output",
+            "error": f"Task {args.task_id} ran a skill or a command, so its output stays out of memory",
         }
 
     # With no config the address fallback can only misread own mail as someone
