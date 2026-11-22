@@ -98,7 +98,10 @@ class TestAnEditTheSyncHasRead:
         _write(config, extra=extra)
         _sync(config)
         with db.get_db(config.db_path) as conn:
-            egress.approve_job(conn, USER, SUBJECT, "public", None, decided_via="cli")
+            egress.approve_job(
+                conn, USER, SUBJECT, "public",
+                egress.job_digest(egress.job_row_by_subject(conn, USER, SUBJECT)), decided_via="cli",
+            )
         _queue(config)
         _write(config, prompt=NEW, extra=extra)
         _sync(config)
@@ -157,7 +160,10 @@ class TestAnEditNoSyncHasRead:
         _write(config, extra=extra)
         _sync(config)
         with db.get_db(config.db_path) as conn:
-            egress.approve_job(conn, USER, SUBJECT, "public", None, decided_via="cli")
+            egress.approve_job(
+                conn, USER, SUBJECT, "public",
+                egress.job_digest(egress.job_row_by_subject(conn, USER, SUBJECT)), decided_via="cli",
+            )
         _queue(config)
 
         def save_on_the_page():

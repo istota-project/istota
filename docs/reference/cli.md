@@ -46,11 +46,11 @@ istota job run <user> <name> [--briefing]    # Queue a scheduled job (or briefin
 istota egress list USER [--json]                       # Each subject's state, entries, requests and refusals
 istota egress grant USER SUBJECT HOST                  # Approve one exact host
 istota egress grant USER SUBJECT skill:NAME            # Approve one external skill
-istota egress grant USER SUBJECT open|public [--digest D]   # Approve the job's current text
+istota egress grant USER SUBJECT open|public --digest D     # Approve the job's text you read
 istota egress revoke USER SUBJECT ENTRY                # Remove a stored entry
 ```
 
-The operator's side of the Network access card on a job's or an assignment's page, and the one place another user's approvals can be changed. `SUBJECT` is `cron:<job>` or `assignment:<id>`. `open` and `public` approve the job's text as it is now and print the job's row; `--digest` refuses unless that text still has the digest you read, and `public` is refused for a job whose `reach` is not `"public"`. Granting an entry clears its refused row. `revoke` takes the entry as `list --json` prints it, `open:<digest>` included, and leaves a dismissed row so the job does not ask again. Exit 1 when the user has no such subject or the entry is refused. See [Network access](../features/scheduling.md#network-access) and [Where a task may send bytes](../architecture/egress.md).
+The operator's side of the Network access card on a job's or an assignment's page, and the one place another user's approvals can be changed. `SUBJECT` is `cron:<job>` or `assignment:<id>`. `list` prints each job's text with its digest, any character a browser or terminal would not draw spelled out as `\u{…}`, in the text and in the job's name. `open` and `public` require that digest as `--digest` and approve only that text: a grant without one, or with a digest the job's text no longer has, is refused, and `public` is refused for a job whose `reach` is not `"public"`. A granted `open` or `public` prints the job's row. `--digest` beside a host or skill is refused. Granting an entry clears its refused row. `revoke` takes the entry as `list --json` prints it, `open:<digest>` included, and leaves a dismissed row so the job does not ask again. Exit 1 when the user has no such subject or the entry is refused. See [Network access](../features/scheduling.md#network-access) and [Where a task may send bytes](../architecture/egress.md).
 
 ### Usage and cost
 

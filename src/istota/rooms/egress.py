@@ -97,8 +97,8 @@ _UNDRAWN_RANGES = (
     (0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
     (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFFA0, 0xFFA0), (0xE0100, 0xE01EF),
 )
-#: The text fields `describe_subject` shows, all of them digested.
-_SHOWN_COLUMNS = ("prompt", "command", "skill", "skill_args", "publish_shared_kv")
+#: The text fields `describe_subject` shows, all digested, in the order `istota egress list` prints them.
+SHOWN_COLUMNS = ("prompt", "command", "skill", "skill_args", "publish_shared_kv")
 
 _LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 _SKILL_RE = re.compile(r"[a-z0-9_-]{1,64}")
@@ -267,13 +267,14 @@ def job_text_changes(approved: Mapping, current: "Mapping | sqlite3.Row") -> lis
         if before == after:
             continue
         diff = difflib.unified_diff(before.split("\n"), after.split("\n"), n=2, lineterm="")
-        changes.append({"field": column, "lines": [_visible(line) for line in list(diff)[2:]]})
+        changes.append({"field": column, "lines": [visible_line(line) for line in list(diff)[2:]]})
     return changes
 
 
-def _visible(line: str) -> str:
-    """A line with what a browser would not draw spelled out. A model reads a
-    zero-width or tag character and the owner approving the text does not see it."""
+def visible_line(line: str) -> str:
+    """A line with what a browser or a terminal would not draw spelled out, a line
+    break included. A model reads a zero-width or tag character and the owner approving
+    the text does not see it, and an escape sequence can redraw what a terminal shows."""
     return "".join(f"\\u{{{ord(char):04x}}}" if _undrawn(char) else char for char in line)
 
 
@@ -287,8 +288,8 @@ def _undrawn(char: str) -> bool:
 
 
 def visible_text(text: str) -> str:
-    """`_visible` over text of several lines, keeping its line breaks."""
-    return "\n".join(_visible(line) for line in text.split("\n"))
+    """`visible_line` over text of several lines, keeping its line breaks."""
+    return "\n".join(visible_line(line) for line in text.split("\n"))
 
 
 def cron_subject(job_name: str) -> str:
@@ -683,28 +684,25 @@ def approve_job(
     user_id: str,
     subject: str,
     kind: str,
-    digest: str | None,
+    digest: str,
     *,
     decided_via: str,
 ) -> Entry:
     """Approve a job's exact text for `open` or `public`, on the caller's transaction.
 
     A writer, held to the same short list as `add_grant`. `digest` is the text the
-    person was shown, and a row that has moved since refuses with `StaleJob`, so an
-    approval can never reach text nobody read. `None` is for the operator CLI, which
-    prints the row's text as it approves it.
+    person was shown, on the page or by `istota egress list`, and a row that has moved
+    since refuses with `StaleJob`, so an approval can never reach text nobody read.
     """
     if kind not in JOB_REQUESTS:
         raise EntryRefused("Unknown kind of approval.")
     row = job_row_by_subject(conn, user_id, subject)
     if row is None:
         raise EntryRefused("There is no such job.")
-    current = job_digest(row)
-    if digest is not None:
-        check_job_text(row, digest)
+    check_job_text(row, digest)
     if kind == "public" and row["reach"] != "public":
         raise EntryRefused('This job does not ask for public access: its reach is not "public".')
-    parsed = add_grant(conn, user_id, subject, f"{kind}:{current}", decided_via=decided_via)
+    parsed = add_grant(conn, user_id, subject, f"{kind}:{digest}", decided_via=decided_via)
     clear_refused(conn, user_id, subject, kind)
     return parsed
 
@@ -1128,7 +1126,7 @@ def describe_subject(
         )
     if row is not None:
         # The Access dialog approves this text, so nothing in it may be invisible (#982).
-        shown = {column: visible_text(row[column] or "") for column in _SHOWN_COLUMNS}
+        shown = {column: visible_text(row[column] or "") for column in SHOWN_COLUMNS}
         run_state = job_run_state(row)
         waiting = run_state == JOB_RUNNING and once_job_waiting(
             conn, user_id, row["name"], ceiling=ceiling,
