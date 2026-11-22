@@ -54,6 +54,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import sys
 import tempfile
 import time
@@ -106,6 +107,14 @@ _MANIFEST_FORMAT = 1
 _STAGING_DIRNAME = ".backup-staging"
 # A run directory older than this was left by a process that died mid-run.
 _STALE_STAGING_SECONDS = 24 * 3600
+# An upload's staging name in a dated dir: ``atomic_writer`` puts a dot and the
+# target's name before ``mkstemp``'s eight characters.
+_UPLOAD_STAGING_RE = re.compile(
+    r"^\.(?:[^/]+\.db(?:\.suspect)?|" + re.escape(MANIFEST_NAME) + r")\.[a-z0-9_]{8}$"
+)
+# A writer renames straight after its last write, so a staging file untouched
+# this long has none.
+_STALE_UPLOAD_SECONDS = 3600
 
 
 def _data_row_count(path: Path) -> int:
@@ -503,10 +512,57 @@ def _copied_row_count(snapshot: Path, scratch: Path) -> int:
 
 
 def _upload(staged: Path, dest: Path) -> None:
-    """Copy ``staged`` to ``dest`` under a temporary name, then rename it in."""
+    """Copy ``staged`` to ``dest`` under a temporary name, then rename it in.
+
+    On the rclone mount a rename once found no staging file to move while the
+    bytes went on to upload under the staging name (#986), so a
+    ``FileNotFoundError`` is retried once under a fresh name. The lost file may
+    only appear once its upload ends; ``_sweep_upload_leftovers`` takes it on a
+    later run.
+    """
     _secure_mkdir(dest.parent)
+    try:
+        _copy_to(staged, dest)
+    except FileNotFoundError as exc:
+        logger.warning("db_backup_upload_retry dest=%s err=%s", dest, exc)
+        _copy_to(staged, dest)
+
+
+def _copy_to(staged: Path, dest: Path) -> None:
     with open(staged, "rb") as source, atomic_writer(dest, mode=_FILE_MODE) as target:
         shutil.copyfileobj(source, target, 1024 * 1024)
+
+
+def _sweep_upload_leftovers(root: Path) -> None:
+    """Remove staging files an upload left in the dated dirs: a run killed
+    mid-copy, or a rename that lost its file (#986). Regular files only, named
+    as ``atomic_writer`` names them, and untouched for ``_STALE_UPLOAD_SECONDS``,
+    so a run beside this one keeps the file it is writing."""
+    cutoff = time.time() - _STALE_UPLOAD_SECONDS
+    for dated in _dated_dirs(root):
+        dirs = [dated]
+        try:
+            dirs += [p for p in dated.iterdir() if p.is_dir() and not p.is_symlink()]
+        except OSError as exc:
+            logger.warning("db_backup_leftover_scan_failed dir=%s err=%s", dated, exc)
+            continue
+        for directory in dirs:
+            try:
+                entries = list(directory.iterdir())
+            except OSError as exc:
+                logger.warning("db_backup_leftover_scan_failed dir=%s err=%s", directory, exc)
+                continue
+            for entry in entries:
+                if not _UPLOAD_STAGING_RE.match(entry.name):
+                    continue
+                try:
+                    st = entry.lstat()
+                    if not stat.S_ISREG(st.st_mode) or st.st_mtime >= cutoff:
+                        continue
+                    entry.unlink()
+                    logger.info("db_backup_leftover_removed path=%s", entry)
+                except OSError as exc:
+                    logger.warning("db_backup_leftover_unlink_failed path=%s err=%s", entry, exc)
 
 
 def _guard_and_upload(
@@ -688,6 +744,7 @@ def backup_databases(
         _write_manifest(dated_root, manifest_rows)
 
     _prune_old_snapshots(root, getattr(config.scheduler, "db_backup_retention", 7))
+    _sweep_upload_leftovers(root)
     copy_config_files(config, date_str)
 
     ok = sum(1 for r in results if r["status"] == "ok")

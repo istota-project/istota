@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **One user's task can no longer redirect Istota's reads and writes of their config folder into another user's.** Swapping the folder for a link at the right moment could write your scheduled jobs and tasks into someone else's CRON.md and TASKS.md, or put their USER.md into your prompt, on workspaces that allow symlinks. The folder is now opened once and used through that handle, and a symlinked config folder, even one pointing inside your own workspace, is no longer read.
 - **A scheduled job can only run in, and post into, a room you are in.** A CRON.md `room` that was not a room token could open another user's files, or the whole workspace, to the job, and another user's room token let a job read that room's notes and post into it. Such a job is now dropped from your schedule, with the reason in the file's errors, and a job whose room you have since left stops running. HEARTBEAT.md alerts are held to the same rule.
 
+### Fixed
+
+- **A database backup no longer loses a snapshot when renaming it into place fails.** On the Nextcloud mount the final rename of a snapshot could find no file to move, which skipped that database for the day and left a full-size copy under a hidden staging name. The rename is now retried once, and hidden copies left by earlier runs are removed.
+
 ## [0.52.0] - 2026-11-21
 
 A scheduled job can now keep its own timezone: give a CRON.md job a `timezone`, or pick one in Settings, Scheduled jobs, and it runs at that zone's wall-clock time wherever you travel. Web chat marks messages read as you scroll through All, Unread and Starred.
