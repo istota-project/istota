@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -688,6 +689,25 @@ def get_user_temp_dir(config: Config, user_id: str) -> Path:
 
 EMISSARY_DIR_PREFIX = "emissary-task-"
 RESTRICTED_DIR_PREFIX = "room-task-"
+#: The daemon-only parent of restricted and guest temp dirs, beside `.control`.
+RESTRICTED_TEMP_DIR_NAME = ".restricted"
+
+
+def _restricted_task_dir(config: Config, task: "db.Task") -> Path | None:
+    """``{temp_dir}/.restricted/{user_id}/{room,emissary}-task-<id>``, or ``None``
+    for a user id that does not name one child of that root."""
+    prefix = EMISSARY_DIR_PREFIX if task.guest_participant_id is not None else RESTRICTED_DIR_PREFIX
+    return _task_dir_under(
+        config, RESTRICTED_TEMP_DIR_NAME, task.user_id, task.id,
+        what="restricted task temp dir", leaf=f"{prefix}{int(task.id)}",
+    )
+
+
+def _is_real_dir(path: Path) -> bool:
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
 
 
 def task_temp_dir(
@@ -698,31 +718,66 @@ def task_temp_dir(
     The per-user directory for every task nothing is withheld from. That
     directory is shared by all of the user's tasks in every room, so it holds
     what their private tasks left: downloads, staged attachments, deferred-op
-    files. A task with anything withheld (``restricted``) gets a directory of
-    its own inside it, bound instead of it (multiplayer Stage 13). Since
-    ISSUE-576 that is a task in a shared room no member asked there (a guest's
-    turn takes the branch below), and the arm also answers for a task an
-    earlier release ran restricted, so a retry across the upgrade writes where
-    the scheduler reads.
+    files. A task with anything withheld (``restricted``), and every guest's
+    turn, gets a directory of its own instead (multiplayer Stage 13), because
+    the scheduler replays op files from the per-user one with the user's full
+    authority, keyed by a task id the model can guess.
 
-    A guest's turn always gets one, under its own prefix. It runs as the host (multiplayer D2) with less authority than
-    the host, and the per-user directory is where the host's other tasks leave
-    deferred-op files the scheduler replays with the host's full authority,
-    keyed by a task id the model can guess.
+    **That directory is under ``{temp_dir}/.restricted/{user_id}/``, a sibling
+    of the per-user directories, not a child of one** (ISSUE-980). Inside the
+    per-user directory it was bound by name seconds after its check, in a
+    parent every ordinary task of the same user binds read-write, so one of
+    them could swap it for a link to another user's temp dir in between. No
+    namespace binds the new parent, so nothing a task runs can rename the leaf.
+    Raises ``ValueError`` for a restricted task whose user id names no
+    directory there; :func:`ensure_task_temp_dir` is the one that creates it.
 
     `task_deferred_dir` is the reader's half: it finds the directory a run
     chose without recomputing what the room withheld then.
     """
     base = get_user_temp_dir(config, task.user_id)
-    if task.guest_participant_id is not None:
-        return base / f"{EMISSARY_DIR_PREFIX}{int(task.id)}"
-    own = base / f"{RESTRICTED_DIR_PREFIX}{int(task.id)}"
+    own = _restricted_task_dir(config, task)
     # An earlier attempt that ran restricted made it, and `task_deferred_dir`
     # reads it from then on, so a later unrestricted attempt writes there too.
     # It is the narrower of the two, so keeping it widens nothing.
-    if restricted or own.is_dir():
+    if task.guest_participant_id is not None or restricted or (
+        own is not None and _is_real_dir(own)
+    ):
+        if own is None:
+            raise ValueError(
+                f"cannot name a restricted temp directory for user {task.user_id!r}"
+            )
         return own
     return base
+
+
+def ensure_task_temp_dir(
+    config: Config, task: "db.Task", *, restricted: bool = False,
+) -> Path:
+    """Create the directory :func:`task_temp_dir` names and return it.
+
+    A restricted one is made the way the control dir is: 0700 at every level,
+    each opened ``O_NOFOLLOW | O_DIRECTORY`` and required to be the daemon's
+    (:func:`_ensure_task_dir`). The per-user one keeps its plain ``mkdir``:
+    its parent is the shared temp root, which no namespace binds either.
+    Raises ``RuntimeError``; ``execute_task`` turns it into a returned failure.
+    """
+    try:
+        path = task_temp_dir(config, task, restricted=restricted)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    if path != get_user_temp_dir(config, task.user_id):
+        return _ensure_task_dir(
+            path, config, RESTRICTED_TEMP_DIR_NAME, task.user_id, task.id,
+            noun="restricted task temp directory",
+        )
+    try:
+        if path.is_symlink():
+            raise OSError("is a symlink")
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError(f"task temp directory {path} is unusable: {exc}") from exc
+    return path
 
 
 def task_deferred_dir(config: Config, task: "db.Task") -> Path:
@@ -732,14 +787,21 @@ def task_deferred_dir(config: Config, task: "db.Task") -> Path:
     when the run made one, else the per-user directory. Read from disk rather
     than recomputed, because what a room withholds can change between the run
     and the scheduler reading its files (a grant, a guest leaving). Only the
-    user's own tasks can create a directory of that name, so finding one grants
-    nothing the user did not already have.
+    daemon creates a directory under ``.restricted``, so finding one grants
+    nothing; a ``room-task-<id>`` inside the per-user directory, where releases
+    before ISSUE-980 made them and any task of the user can, is not looked at.
     """
     base = get_user_temp_dir(config, task.user_id)
-    if task.guest_participant_id is not None:
-        return base / f"{EMISSARY_DIR_PREFIX}{int(task.id)}"
-    own = base / f"{RESTRICTED_DIR_PREFIX}{int(task.id)}"
-    if own.is_dir() and not own.is_symlink():
+    own = _restricted_task_dir(config, task)
+    if own is None:
+        if task.guest_participant_id is not None:
+            # Never the host's per-user dir for a guest. A name under the
+            # root, unresolved: the deferred readers walk it with no link
+            # followed, so a root gone bad reads as nothing.
+            return (Path(config.temp_dir) / RESTRICTED_TEMP_DIR_NAME / str(task.user_id)
+                    / f"{EMISSARY_DIR_PREFIX}{int(task.id)}")
+        return base
+    if task.guest_participant_id is not None or _is_real_dir(own):
         return own
     return base
 
@@ -834,7 +896,7 @@ def attachments_dir(control_dir: Path) -> Path:
 
 #: The CLI tool harness's per-task directories, beside `.control`; never bound.
 HARNESS_DIR_NAME = ".harness"
-_DAEMON_TEMP_ROOTS = (CONTROL_DIR_NAME, HARNESS_DIR_NAME)
+_DAEMON_TEMP_ROOTS = (CONTROL_DIR_NAME, HARNESS_DIR_NAME, RESTRICTED_TEMP_DIR_NAME)
 
 
 def get_task_control_dir(
@@ -925,11 +987,13 @@ def get_task_control_dir(
 
 def _task_dir_under(
     config: Config, root_name: str, user_id: str, task_id: int, *, what: str,
+    leaf: str | None = None,
 ) -> Path | None:
     """``{temp_dir}/{root_name}/{user_id}/task_{task_id}``, or ``None``.
 
     The body of :func:`get_task_control_dir`, shared with
-    :func:`get_task_harness_dir`; the reasoning is in the former's docstring.
+    :func:`get_task_harness_dir` and :func:`task_temp_dir`, which names its own
+    ``leaf``; the reasoning is in the first one's docstring.
     A user id that casefolds to *any* daemon-owned root under ``temp_dir`` is
     refused, since that user's temp dir would be that root.
     """
@@ -951,7 +1015,8 @@ def _task_dir_under(
         # the control root itself, which is a different fault and is reported
         # as one below.
         contained = candidate.parent == root and candidate.resolve() == root / user_id
-        leaf = f"task_{int(task_id)}"
+        if leaf is None:
+            leaf = f"task_{int(task_id)}"
     except (OSError, ValueError, TypeError):
         logger.warning(
             "%s: cannot name a directory under %s for user id "
@@ -1467,7 +1532,8 @@ def build_daemon_sandbox(
     ``cleanup_old_temp_files``, which walks every directory under
     ``temp_dir``, dotted ones included. Withholding scopes never moves the
     namespace to a ``room-task-<id>`` directory: that choice is
-    ``task_temp_dir``'s, made only in ``execute_task``.
+    ``task_temp_dir``'s, made by ``ensure_task_temp_dir`` in ``execute_task``
+    and ``confined_command``.
 
     ``withheld_scopes`` as a bare ``str`` is refused: it would iterate to a
     set of single characters, non-empty (so some binds drop) and missing
@@ -8848,18 +8914,13 @@ def execute_task(
         if refusal is not None:
             return False, refusal, None, None
 
-    # Ensure the task's temp directory exists: the per-user one, or a
-    # restricted task's own directory inside it.
-    user_temp_dir = task_temp_dir(config, task, restricted=_reach.restricted)
-    # Bound read-write into the sandbox under this name: a link planted here
-    # would put wherever it points in front of the room. Checked before the
-    # mkdir, which raises on a dangling one; failed by return, not by raise.
+    # The task's temp directory: the per-user one, or a restricted task's own
+    # under the daemon-only `.restricted` root. Bound read-write by name, so it
+    # must sit where no task can swap it (ISSUE-980); failed by return.
     try:
-        if user_temp_dir.is_symlink():
-            raise OSError("is a symlink")
-        user_temp_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        msg = f"task temp directory {user_temp_dir} is unusable: {exc}"
+        user_temp_dir = ensure_task_temp_dir(config, task, restricted=_reach.restricted)
+    except RuntimeError as exc:
+        msg = str(exc)
         logger.error("Task %s: %s", task.id, msg)
         return False, msg, None, None
 

@@ -2832,7 +2832,7 @@ def check_task_control_dir(config: "Config", probe: bool) -> CheckResult:
             "no users are configured, so nothing names a task control directory",
         )
 
-    from .executor import CONTROL_DIR_NAME  # noqa: PLC0415 - executor pulls in most of the package
+    from .executor import _DAEMON_TEMP_ROOTS, CONTROL_DIR_NAME  # noqa: PLC0415 - executor pulls in most of the package
 
     temp_dir = getattr(config, "temp_dir", None)
     if not temp_dir:
@@ -2911,7 +2911,8 @@ def check_task_control_dir(config: "Config", probe: bool) -> CheckResult:
             + ", so every task of those users fails at start-up",
             "Rename the user, or clear whatever is standing at "
             f"{root}; the id must be a plain path component and must not be "
-            f"{CONTROL_DIR_NAME!r}.",
+            "one of the daemon's own temp roots ("
+            + ", ".join(repr(n) for n in _DAEMON_TEMP_ROOTS) + ").",
         ))
 
     for triple in _control_overlap_findings(config, users, root):

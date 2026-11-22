@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A guest's, a correspondent's or another restricted task's temp directory can no longer be swapped for another user's.** It sat inside your per-user temp directory, where another of your tasks could replace it with a link to someone else's temp directory before it was mounted, and the restricted task then read and wrote that user's files and pending operations. It now lives beside the per-user directories, where no task can reach it.
 - **A scheduled job can only run in, and post into, a room you are in.** A CRON.md `room` that was not a room token could open another user's files, or the whole workspace, to the job, and another user's room token let a job read that room's notes and post into it. Such a job is now dropped from your schedule, with the reason in the file's errors, and a job whose room you have since left stops running. HEARTBEAT.md alerts are held to the same rule.
 
 ## [0.52.0] - 2026-11-21

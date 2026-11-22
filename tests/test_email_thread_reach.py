@@ -183,9 +183,10 @@ class TestACorrespondentsTurn:
     def test_the_temp_dir_is_its_own(self, config):
         argv = _run(config, _thread_turn)["argv"]
         host_dir = str((config.temp_dir / "alice").resolve())
+        own_root = str((config.temp_dir / ".restricted" / "alice").resolve())
         rw = [argv[i + 1] for i, tok in enumerate(argv) if tok == "--bind"]
         assert host_dir not in rw
-        assert len([p for p in rw if p.startswith(host_dir + "/room-task-")]) == 1
+        assert len([p for p in rw if p.startswith(own_root + "/room-task-")]) == 1
 
     def test_user_md_and_an_overlay_load(self, config):
         _user_md(config)

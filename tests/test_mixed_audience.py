@@ -254,9 +254,10 @@ class TestAGuestsTurnHasItsOwnDirectories:
         _guest(config, token)
         seen = _run(config, token, guest=True)
         user_dir = str((config.temp_dir / "alice").resolve())
+        own_root = str((config.temp_dir / ".restricted" / "alice").resolve())
         rw = _rw(seen["argv"])
         assert user_dir not in rw
-        own = [p for p in rw if p.startswith(user_dir + "/emissary-task-")]
+        own = [p for p in rw if p.startswith(own_root + "/emissary-task-")]
         assert len(own) == 1
         assert seen["model_env"]["ISTOTA_DEFERRED_DIR"] == own[0]
 
@@ -315,21 +316,19 @@ class TestAGuestsTurnHasItsOwnDirectories:
                     / "room-attachments").exists()
         assert str(own) in seen["prompt"]
 
-    def test_a_retry_of_a_task_an_earlier_release_restricted_writes_where_it_did(
-        self, config,
-    ):
-        # Before ISSUE-576 a member's shared-room turn ran restricted in
-        # `room-task-<id>`. A retry after the upgrade is unrestricted and must
-        # still write where `task_deferred_dir` reads.
-        from istota.executor import task_deferred_dir, task_temp_dir
+    def test_a_room_task_dir_in_the_per_user_dir_is_not_followed(self, config):
+        # Releases before ISSUE-980 made `room-task-<id>` inside the per-user
+        # dir, where any task of the user can make one too. An unrestricted
+        # attempt neither binds it nor drains from it.
+        from istota.executor import get_user_temp_dir, task_deferred_dir, task_temp_dir
 
         token = _room(config, shared=True)
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, _running(conn, "alice", token))
-        legacy = config.temp_dir / "alice" / f"room-task-{task.id}"
-        legacy.mkdir(parents=True)
-        assert task_temp_dir(config, task, restricted=False) == legacy
-        assert task_deferred_dir(config, task) == legacy
+        base = get_user_temp_dir(config, "alice")
+        (base / f"room-task-{task.id}").mkdir(parents=True)
+        assert task_temp_dir(config, task, restricted=False) == base
+        assert task_deferred_dir(config, task) == base
 
     def test_a_skill_cli_host_path_refuses_the_talk_dir_restricted_or_not(
         self, tmp_path, monkeypatch,

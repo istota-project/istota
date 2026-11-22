@@ -6654,8 +6654,8 @@ def cleanup_old_temp_files(config: Config, retention_days: int) -> int:
     All permanent storage should be in Nextcloud, so temp files
     are safe to clean up periodically.
 
-    Dotted roots are walked too: ``.control`` and the CLI tool harness's
-    ``.harness`` (the CLI's config dir, session JSONL and its link to the
+    Dotted roots are walked too: ``.control``, ``.restricted`` (a restricted
+    task's own temp dir) and the CLI tool harness's ``.harness`` (the CLI's config dir, session JSONL and its link to the
     credentials file, unlinked as a link and never followed).
 
     Returns:
