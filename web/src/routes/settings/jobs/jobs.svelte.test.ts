@@ -50,6 +50,7 @@ function network(name: string, overrides = {}) {
       skill_args: '',
       publish_shared_kv: '',
       publish_shared_kv_trusted: false,
+      hidden_characters: false,
     },
     waiting_on: [],
     refused: [],

@@ -6396,6 +6396,8 @@ export interface NetworkJob {
   skill_args: string;
   publish_shared_kv: string;
   publish_shared_kv_trusted: boolean;
+  /** The text fields above hold characters a browser draws as nothing, spelled out as `\u{…}`. */
+  hidden_characters: boolean;
 }
 export interface NetworkSubject {
   subject: string;

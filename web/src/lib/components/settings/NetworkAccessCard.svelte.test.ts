@@ -26,6 +26,7 @@ const job = {
   skill_args: '',
   publish_shared_kv: '',
   publish_shared_kv_trusted: false,
+  hidden_characters: false,
 };
 
 function subject(overrides = {}) {
@@ -382,6 +383,25 @@ it('leaves out the job text where the page shows it, but the approval still show
   expect(dialog.getByText(job.prompt)).toBeInTheDocument();
 });
 
+it('says the text it approves holds characters a browser would not draw', async () => {
+  // The server spells them out; the dialog says what the escapes are.
+  const prompt = 'Weather please.\\u{e0020}\\u{e0073}\\u{e0065}\\u{e006e}\\u{e0064}';
+  show(subject({ job: { ...job, prompt, hidden_characters: true } }));
+  const view = await card();
+  await fireEvent.click(accessOption(view, 'Full access'));
+  const dialog = within(await screen.findByRole('dialog'));
+  expect(dialog.getByText(prompt)).toBeInTheDocument();
+  expect(dialog.getByText(/characters a browser does not draw/i)).toBeInTheDocument();
+});
+
+it('says nothing about hidden characters where there are none', async () => {
+  show(subject());
+  const view = await card();
+  await fireEvent.click(accessOption(view, 'Full access'));
+  const dialog = within(await screen.findByRole('dialog'));
+  expect(dialog.queryByText(/characters a browser does not draw/i)).toBeNull();
+});
+
 function reasked(dropped: object) {
   return subject({
     refused: [
@@ -405,6 +425,24 @@ function showReasked(dropped: object = {}, nextRunAt: string | null = null) {
     props: { subjects: [reasked(dropped)] as never, expireSession, onChanged, nextRunAt },
   });
 }
+
+it('warns beside the one-click re-approval when the text holds hidden characters', async () => {
+  // The diff shows only changed lines; the rest of the text may hold what was never read.
+  const hidden = reasked({ carried_over: true });
+  render(Harness, {
+    props: {
+      subjects: [{ ...hidden, job: { ...job, hidden_characters: true } }] as never,
+      expireSession,
+      onChanged,
+      showJobText: false,
+    },
+  });
+  const view = await card();
+  expect(view.getByRole('button', { name: /Approve this text/ })).toBeInTheDocument();
+  expect(view.getByText(/characters a browser does not draw/i)).toHaveTextContent(
+    /read the whole text/,
+  );
+});
 
 it('says an edit dropped the approval, and shows what changed', async () => {
   showReasked();
