@@ -2434,6 +2434,23 @@ class TestRestore:
         mac.calls_path.unlink()
         return mac
 
+    def test_a_compressed_framework_snapshot_is_a_backup(self, made):
+        """#988: db_backup writes `istota.db.gz`; a folder holding only that
+        form is still one a restore can use."""
+        framework = made.home / "Istota" / "Backups" / "db" / "snapshots" / BACKUP_DATE / "framework"
+        (framework / "istota.db").rename(framework / "istota.db.gz")
+        result = made.run("restore", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert ["restore"] in made.stack_calls()
+
+    def test_a_folder_with_no_framework_snapshot_is_refused(self, made):
+        framework = made.home / "Istota" / "Backups" / "db" / "snapshots" / BACKUP_DATE / "framework"
+        (framework / "istota.db").rename(framework / "istota.db.gz.suspect")
+        result = made.run("restore", stdin="istota\n")
+        assert result.returncode != 0
+        assert "nothing to restore" in result.stderr
+        assert ["restore"] not in made.stack_calls()
+
     def test_the_new_vm_takes_the_old_ones_size(self, made):
         made.set(ncpu=24, memory_gib=128, free_gib=2000)
         result = made.run("restore", stdin="istota\n")

@@ -1,11 +1,14 @@
 """Restore cold DB snapshots produced by ``db_backup`` back to local disk.
 
 Counterpart to ``db_backup``: pick a dated snapshot (newest good copy by
-default, or an explicit ``--date``), copy the cold file back over the live
-local path, and let ``init_db`` re-flip it to WAL on the next service start —
-exactly what ``db_relocate`` does. A row-count sanity check refuses to restore
-an empty snapshot over a live path unless ``--force`` is given, so a restore
-drill can't quietly wipe data with a bad backup.
+default, or an explicit ``--date``), decompress it (``<rel>.gz``) or copy it (a
+plain ``<rel>`` from before #988) into a new file beside the live local path,
+count its rows there, rename it over the live path, and let ``init_db``
+re-flip it to WAL on the next service start — exactly what ``db_relocate``
+does. A row-count sanity check refuses to restore an empty snapshot over a
+live path unless ``--force`` is given, so a restore drill can't quietly wipe
+data with a bad backup, and a snapshot that does not decompress leaves the
+live path as it was.
 
 Restore the whole set after a disaster::
 
@@ -16,17 +19,18 @@ Or a single DB / point in time::
     python -m istota.maintenance.db_restore --user alice --module location --date 2026-07-11
     python -m istota.maintenance.db_restore --framework
 
-Run with the services stopped (the live files are being overwritten), the web
-unit included: the copy keeps the file's inode, so a process left running keeps
-the money store's once-per-file init memo and never re-initialises the
-restored file.
+Run with the services stopped (the live files are being replaced), the web
+unit included: a process left running keeps the replaced file open and goes on
+reading and writing it, not the restored one. The restore needs free space for
+a second copy of each database beside the live one while it runs; a restore
+killed partway leaves that copy as a ``.snapshot-*`` file there.
 """
 
 from __future__ import annotations
 
 import fcntl
 import logging
-import shutil
+import os
 import sys
 from pathlib import Path
 
@@ -34,7 +38,10 @@ from .db_backup import (
     MODULES,
     _dated_dirs,
     _data_row_count,
+    _staging_parent,
     backup_destination,
+    plain_copy,
+    snapshot_file,
 )
 
 logger = logging.getLogger(__name__)
@@ -88,11 +95,11 @@ def _newest_snapshot(root: Path, rel: str, date: str | None) -> tuple[str, Path]
     else the newest dated dir that holds a non-suspect copy. Returns
     ``(date_str, path)`` or None."""
     if date is not None:
-        candidate = root / date / rel
-        return (date, candidate) if candidate.exists() else None
+        candidate = snapshot_file(root / date, rel)
+        return (date, candidate) if candidate is not None else None
     for d in _dated_dirs(root):  # newest first
-        candidate = d / rel
-        if candidate.exists():
+        candidate = snapshot_file(d, rel)
+        if candidate is not None:
             return (d.name, candidate)
     return None
 
@@ -129,33 +136,43 @@ def restore_database(
     if found is None:
         return {**result, "status": "no_snapshot"}
     snap_date, src = found
-    rows = _data_row_count(src)
-    result = {**result, "date": snap_date, "src": str(src), "rows": rows}
+    result = {**result, "date": snap_date, "src": str(src)}
 
-    if rows <= 0 and not force:
-        # An empty (or unreadable) snapshot over a live path is almost certainly
-        # a mistake; make the operator opt in.
-        return {**result, "status": "refused_empty"}
-
-    if dry_run:
-        return {**result, "status": "would_restore"}
-
-    # Never overwrite a DB the scheduler has open in WAL — copying the main file
-    # under a live connection corrupts it once the next checkpoint replays -wal.
-    if _daemon_running():
+    # Never overwrite a DB the scheduler has open in WAL — replacing the main
+    # file under a live connection corrupts it once the next checkpoint replays
+    # -wal. Asked before the snapshot is read, which can be a large download.
+    if not dry_run and _daemon_running():
         logger.error(
             "db_restore refused label=%s — scheduler daemon is running; stop it first",
             resolved_label,
         )
         return {**result, "status": "daemon_running"}
 
+    # Beside the live path so the rename is on one filesystem; a dry run
+    # writes nothing there, and counts in the backup's own staging instead.
+    work_dir = _staging_parent(config) if dry_run else dest.parent
+    local = None
     try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, dest)
+        work_dir.mkdir(parents=True, exist_ok=True)
+        local = plain_copy(src, work_dir)
+        rows = _data_row_count(local)
+        result = {**result, "rows": rows}
+        if rows <= 0 and not force:
+            # An empty (or unreadable) snapshot over a live path is almost
+            # certainly a mistake; make the operator opt in.
+            return {**result, "status": "refused_empty"}
+        if dry_run:
+            return {**result, "status": "would_restore"}
+        os.replace(local, dest)
+        local = None
         _clear_wal_sidecars(dest)
     except OSError as exc:  # noqa: BLE001
         logger.error("db_restore_failed label=%s err=%s", resolved_label, exc)
         return {**result, "status": "error", "error": str(exc)}
+    finally:
+        if local is not None:
+            local.unlink(missing_ok=True)
+    rows = result["rows"]
     logger.info(
         "db_restore restored label=%s date=%s rows=%d dest=%s",
         resolved_label, snap_date, rows, dest,

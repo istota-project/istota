@@ -63,7 +63,9 @@ is still running, so it is refused unless ``--rehearsal`` is given.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
+import dataclasses
 import json
 import os
 import shutil
@@ -466,6 +468,9 @@ class Source:
     env: dict[str, str]
     snapshot: Path
     snapshot_dbs: list[str]
+    #: The framework snapshot, ``istota.db.gz`` or plain; ``with_plain_framework``
+    #: points it at a plain file before anything opens it.
+    framework_db: Path
 
     @property
     def export_id(self) -> str:
@@ -498,18 +503,42 @@ def read_source(root: Path) -> Source:
         path = root / "secrets" / name
         if path.exists():
             env.update(parse_env_file(_read_text(path, f"secrets/{name}"), name))
-    from istota.maintenance.db_backup import _dated_dirs
-
-    dated = _dated_dirs(root / "db")
-    if not dated:
-        raise Refusal("the export holds no database snapshot under db/<YYYY-MM-DD>/")
-    snapshot = dated[0]
-    dbs = sorted(str(p.relative_to(snapshot)) for p in snapshot.rglob("*.db"))
-    if "framework/istota.db" not in dbs:
-        raise Refusal(f"{snapshot} has no framework/istota.db")
+    snapshot, dbs, framework_db = find_snapshot(root / "db", "export")
     admins_path = root / "config" / "admins"
     admins = admins_path.read_text(encoding="utf-8") if admins_path.exists() else ""
-    return Source(root, manifest, config, admins, env, snapshot, dbs)
+    return Source(root, manifest, config, admins, env, snapshot, dbs, framework_db)
+
+
+def find_snapshot(db_root: Path, what: str) -> tuple[Path, list[str], Path]:
+    """The newest dated directory under ``db_root``, the databases it holds
+    (by relpath, whichever form each is in), and its framework snapshot.
+    Shared with the standalone import, whose staging takes the same layout."""
+    from istota.maintenance.db_backup import _dated_dirs, _good_db_relpaths, snapshot_file
+
+    dated = _dated_dirs(db_root)
+    if not dated:
+        raise Refusal(f"the {what} holds no database snapshot under db/<YYYY-MM-DD>/")
+    snapshot = dated[0]
+    dbs = sorted(_good_db_relpaths(snapshot))
+    framework_db = snapshot_file(snapshot, "framework/istota.db")
+    if framework_db is None:
+        raise Refusal(f"{snapshot} has no framework/istota.db")
+    return snapshot, dbs, framework_db
+
+
+def with_plain_framework(source, data_dir: Path, scratch: contextlib.ExitStack):
+    """``source`` with ``framework_db`` a file SQLite can open: the export's
+    own when it is plain, else a copy decompressed into ``data_dir`` and
+    removed when ``scratch`` closes. Not ``/tmp``, a tmpfs in the one-shot
+    container, and not the source, mounted read-only."""
+    from istota.maintenance.db_backup import plain_snapshot
+
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        local = scratch.enter_context(plain_snapshot(source.framework_db, data_dir))
+    except OSError as exc:
+        raise Refusal(f"the framework database snapshot cannot be read: {exc}") from None
+    return dataclasses.replace(source, framework_db=local)
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +765,8 @@ def _quick_check(path: Path) -> list[str]:
     conn = sqlite_util.connect_read_only(path)
     try:
         return quick_check(conn)
+    except sqlite3.DatabaseError as exc:
+        return [f"not a readable database ({exc})"]
     finally:
         conn.close()
 
@@ -902,7 +933,7 @@ def _preflight(source: Source, target: Target) -> bool:
     # container. A one-shot container is covered by istota-stack's own refusal.
     if _daemon_running():
         raise Refusal("the scheduler daemon is running; stop the stack first")
-    problems = _quick_check(source.snapshot / "framework" / "istota.db")
+    problems = _quick_check(source.framework_db)
     if problems:
         raise Refusal("the exported framework database fails quick_check: " + "; ".join(problems[:5]))
     return resuming
@@ -1021,6 +1052,11 @@ def _finish_database(source, target, rewrite, rehearsal: bool) -> DbReport:
 
 
 def run(args, out, err) -> int:
+    with contextlib.ExitStack() as scratch:
+        return _run(args, out, err, scratch)
+
+
+def _run(args, out, err, scratch: contextlib.ExitStack) -> int:
     source_root = Path(args.source)
     target = Target(Path(args.config), Path(args.secrets_dir), Path(args.data_dir))
     try:
@@ -1057,11 +1093,12 @@ def run(args, out, err) -> int:
         if record is not None:
             out(f"already imported from {record.get('source_host')}; nothing else to do")
             return EXIT_OK
+        source = with_plain_framework(source, target.data_dir, scratch)
         section = _plan_config(rewrite, target)
         if args.dry_run:
             _print_rewrite(rewrite, section, out)
             _print_secrets(secrets, out)
-            conn = sqlite_util.connect_read_only(source.snapshot / "framework" / "istota.db")
+            conn = sqlite_util.connect_read_only(source.framework_db)
             try:
                 report = rebase_database(
                     conn, rewrite.prefixes, write=False, rehearsal=args.rehearsal,

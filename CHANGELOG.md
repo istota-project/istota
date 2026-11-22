@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Database backups are compressed.** Each daily snapshot is now written as a gzip file (`istota.db.gz`, `<module>.db.gz`), about a third of its old size. Restore, `istota-stack restore` and the bare-metal and standalone imports read both these and the plain snapshots kept from before. See docs/architecture/database.md. **Upgrade note:** an older release cannot read the new files, so after a rollback to one, or in a Mac app pinned to one, a restore picks the newest snapshot taken before the upgrade.
+
 ### Security
 
 - **Approving a job's network access shows every character of its text.** Zero-width, bidi, Unicode tag characters and variation selectors draw as nothing in a browser but are read by the model, so a job's text could carry instructions the owner approved without seeing; the Access dialog now spells them out as `\u{…}` with a warning. Keeping access across an edit on the job's page is also refused when CRON.md changed since you approved it, so a model's edit cannot ride along unseen.
@@ -19,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The feeds poll and other skill and command jobs no longer go into memory.** Their output was indexed as conversation memory every few minutes, turning up in recall and search and read by the nightly sleep cycle; on one install it had grown to about a third of the memory index. It is no longer indexed or read, and `istota memory purge-program-output` counts the feeds poll's output already there, and other jobs' output from the last week, then removes it with `--apply`.
 - **A database backup no longer loses a snapshot when renaming it into place fails.** On the Nextcloud mount the final rename of a snapshot could find no file to move, which skipped that database for the day and left a full-size copy under a hidden staging name. The rename is now retried once, and hidden copies left by earlier runs are removed.
+- The bare-metal and standalone imports refuse an export whose framework database cannot be opened, instead of stopping with a traceback, and no longer restore the `._` files a macOS tar adds as if they were databases.
 
 ## [0.52.0] - 2026-11-21
 

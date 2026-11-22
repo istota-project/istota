@@ -529,11 +529,18 @@ class TestTheMacCliExecsAsTheDaemon:
 
 
 def _newest_task(vm: lima.Vm, db_file: str, *, task_id: int | None = None) -> str:
-    """`<id>|<created_at>` of the newest task in a database file, or of `task_id`."""
+    """`<id>|<created_at>` of the newest task in a database file, or of `task_id`.
+    A `.gz` snapshot (#988) is decompressed into a temporary file first."""
     where = f"WHERE id = {int(task_id)}" if task_id is not None else "ORDER BY id DESC LIMIT 1"
     script = (
-        "import sqlite3, sys\n"
-        "row = sqlite3.connect(sys.argv[1]).execute("
+        "import gzip, shutil, sqlite3, sys, tempfile\n"
+        "path = sys.argv[1]\n"
+        "if path.endswith('.gz'):\n"
+        "    out = tempfile.NamedTemporaryFile(suffix='.db', delete=False)\n"
+        "    with gzip.open(path, 'rb') as src, out:\n"
+        "        shutil.copyfileobj(src, out)\n"
+        "    path = out.name\n"
+        "row = sqlite3.connect(path).execute("
         f"'SELECT id, created_at FROM tasks {where}').fetchone()\n"
         "print('|'.join(map(str, row)) if row else '')\n"
     )
@@ -565,7 +572,7 @@ class TestARestoreFromTheFolder:
         lima.stack_exec(stack, "python3 -m istota.maintenance.db_backup")
         snapshot = lima.stack_exec(
             stack, "ls -1d /mnt/shared/Backups/db/snapshots/*/ | tail -1").stdout.strip()
-        newest = _newest_task(stack, f"{snapshot}framework/istota.db")
+        newest = _newest_task(stack, f"{snapshot}framework/istota.db.gz")
         assert newest, "the snapshot holds no task to look for afterwards"
         saved = f"{lima.SCRATCH}/restore-config"
         stack.run(

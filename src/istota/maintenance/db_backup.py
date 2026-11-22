@@ -29,6 +29,16 @@ several times over from an rclone mount; that read is now only the fallback
 for a DB no manifest records whose fresh snapshot is empty, and it copies the
 file to staging in one sequential read before counting (ISSUE-937).
 
+**The uploaded file is gzip-compressed** (#988): ``<rel>.gz``, compressed in
+staging after the guard has counted the plain copy, so the manifest and the
+guard count real rows. gzip rather than zstd because the standard library has
+it and the image's Python is 3.12. A quarantined copy is ``<rel>.gz.suspect``.
+Snapshots from before the change are plain ``<rel>`` files, and every reader
+here and in ``db_restore`` and the importers takes both through
+``snapshot_file`` and ``plain_copy``; where one dated dir holds both forms (a
+rollback the same day), the later write wins. The manifest stays keyed by
+``rel``.
+
 Each run writes to its own dated directory (``<root>/<YYYY-MM-DD>/…``) so the
 history isn't a single overwritten slot: a corrupted or emptied live DB can't
 destroy the last good copy on the next run. Retention keeps the N newest dated
@@ -42,12 +52,14 @@ treated as latest-good — the same empty-shadow signal that protects relocation
 none): the framework ``tasks`` table legitimately shrinks under retention
 cleanup, so a fractional-drop guard would false-positive there.
 
-Restore is a plain file copy back to the local path (see ``db_restore``); then
-``init_db`` re-flips it to WAL on next start.
+Restore decompresses back beside the local path and renames it in (see
+``db_restore``); then ``init_db`` re-flips it to WAL on next start.
 """
 
 from __future__ import annotations
 
+import contextlib
+import gzip
 import json
 import logging
 import os
@@ -58,6 +70,7 @@ import stat
 import sys
 import tempfile
 import time
+import zlib
 from datetime import date as _date
 from datetime import timedelta
 from pathlib import Path
@@ -110,11 +123,77 @@ _STALE_STAGING_SECONDS = 24 * 3600
 # An upload's staging name in a dated dir: ``atomic_writer`` puts a dot and the
 # target's name before ``mkstemp``'s eight characters.
 _UPLOAD_STAGING_RE = re.compile(
-    r"^\.(?:[^/]+\.db(?:\.suspect)?|" + re.escape(MANIFEST_NAME) + r")\.[a-z0-9_]{8}$"
+    r"^\.(?:[^/]+\.db(?:\.gz)?(?:\.suspect)?|" + re.escape(MANIFEST_NAME) + r")\.[a-z0-9_]{8}$"
 )
 # A writer renames straight after its last write, so a staging file untouched
 # this long has none.
 _STALE_UPLOAD_SECONDS = 3600
+
+#: What an uploaded snapshot carries after its relpath (#988).
+COMPRESSED_SUFFIX = ".gz"
+SUSPECT_SUFFIX = ".suspect"
+# gzip -6 took 14 s on a 708 MB framework file; -9 buys little for much more.
+_GZIP_LEVEL = 6
+_CHUNK = 1024 * 1024
+_PLAIN_COPY_PREFIX = ".snapshot-"
+
+
+def snapshot_file(dated_dir: Path, rel: str) -> Path | None:
+    """The good snapshot of ``rel`` in ``dated_dir``, or None: ``<rel>.gz``,
+    or a plain ``<rel>`` from before #988. With both there (an older and a
+    newer release ran the same day) the later write is the snapshot."""
+    plain = dated_dir / rel
+    packed = plain.with_name(plain.name + COMPRESSED_SUFFIX)
+    found = [p for p in (packed, plain) if p.is_file()]
+    if len(found) < 2:
+        return found[0] if found else None
+    return max(found, key=lambda p: p.stat().st_mtime)
+
+
+def _compress(plain: Path, packed: Path) -> None:
+    with open(plain, "rb") as source, open(packed, "wb") as raw:
+        with gzip.GzipFile(filename="", mode="wb", compresslevel=_GZIP_LEVEL, fileobj=raw, mtime=0) as target:
+            shutil.copyfileobj(source, target, _CHUNK)
+
+
+def plain_copy(snapshot: Path, directory: Path, *, suffix: str = ".db") -> Path:
+    """A plain copy of ``snapshot`` in either form, in a new file in ``directory``.
+
+    One sequential read of the snapshot (ISSUE-937's reason). The caller
+    removes the file. A failed read, a truncated or corrupt gzip stream
+    included, raises ``OSError`` with nothing left behind.
+    """
+    fd, name = tempfile.mkstemp(dir=directory, prefix=_PLAIN_COPY_PREFIX, suffix=suffix)
+    local = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as target:
+            if snapshot.name.endswith(COMPRESSED_SUFFIX):
+                with gzip.open(snapshot, "rb") as source:
+                    shutil.copyfileobj(source, target, _CHUNK)
+            else:
+                with open(snapshot, "rb") as source:
+                    shutil.copyfileobj(source, target, _CHUNK)
+    except (EOFError, zlib.error) as exc:
+        local.unlink(missing_ok=True)
+        raise OSError(f"{snapshot} does not decompress: {exc}") from exc
+    except BaseException:
+        local.unlink(missing_ok=True)
+        raise
+    return local
+
+
+@contextlib.contextmanager
+def plain_snapshot(snapshot: Path, directory: Path):
+    """``snapshot`` as a plain file SQLite can open: itself when it is plain,
+    else a decompressed copy in ``directory`` removed on exit."""
+    if not snapshot.name.endswith(COMPRESSED_SUFFIX):
+        yield snapshot
+        return
+    local = plain_copy(snapshot, directory)
+    try:
+        yield local
+    finally:
+        local.unlink(missing_ok=True)
 
 
 def _data_row_count(path: Path) -> int:
@@ -386,7 +465,7 @@ def _prior_good_dir(root: Path, date_str: str, rel: str) -> Path | None:
     for d in _dated_dirs(root):
         if d.name >= date_str:
             continue
-        if (d / rel).exists():
+        if snapshot_file(d, rel) is not None:
             return d
     return None
 
@@ -408,12 +487,12 @@ def _was_recently_covered(root: Path, date_str: str, rel: str) -> bool:
     # `python -m istota.maintenance.db_backup` after a scheduled run) the copy that proves
     # coverage is the one this morning's run wrote. Nothing writes it *this*
     # run — the source is missing, which is why we're here.
-    if (root / date_str / rel).exists():
+    if snapshot_file(root / date_str, rel) is not None:
         return True
     for d in _dated_dirs(root):
         if d.name >= date_str or d.name < floor:
             continue
-        if (d / rel).exists():
+        if snapshot_file(d, rel) is not None:
             return True
     return False
 
@@ -501,11 +580,8 @@ def _copied_row_count(snapshot: Path, scratch: Path) -> int:
     production; one sequential copy downloads it once. A failed copy raises,
     so the DB errors and is retried next run rather than passing the guard.
     """
-    fd, name = tempfile.mkstemp(dir=scratch, suffix=".prior")
-    os.close(fd)
-    local = Path(name)
+    local = plain_copy(snapshot, scratch, suffix=".prior")
     try:
-        shutil.copyfile(snapshot, local)
         return _data_row_count(local)
     finally:
         local.unlink(missing_ok=True)
@@ -581,27 +657,43 @@ def _guard_and_upload(
     only when the staged snapshot is empty: the guard acts on nothing else.
     Skipping such a dir for an older manifest would compare against a count
     from before it, which can be 0.
+
+    The counting is on the plain ``staged`` file; what is uploaded is its
+    compressed copy, and a plain copy an older release left in today's dir
+    goes with the upload.
     """
     dest = Path(result["dest"])
+    old_form = root / date_str / rel
     new_rows = _data_row_count(staged)
+    packed = staged.with_name(staged.name + COMPRESSED_SUFFIX)
+    _compress(staged, packed)
+
+    def _upload_good() -> None:
+        _upload(packed, dest)
+        try:
+            old_form.unlink(missing_ok=True)
+        except OSError as exc:  # the newer .gz is what snapshot_file picks anyway
+            logger.warning("db_backup_old_form_unlink_failed path=%s err=%s", old_form, exc)
+
     dated_dir = _prior_good_dir(root, date_str, rel)
     if dated_dir is None:
-        _upload(staged, dest)  # first-ever snapshot — nothing to compare against
+        _upload_good()  # first-ever snapshot — nothing to compare against
         return result, new_rows
     prior_rows = _recorded_row_count(dated_dir, rel, manifests)
     if prior_rows is None:
         if new_rows > 0:
-            _upload(staged, dest)
+            _upload_good()
             return result, new_rows
-        prior_rows = _copied_row_count(dated_dir / rel, scratch)
+        prior_rows = _copied_row_count(snapshot_file(dated_dir, rel), scratch)
     result = {**result, "prior_rows": prior_rows, "new_rows": new_rows}
     if prior_rows > 0 and new_rows <= 0:
-        suspect = dest.with_name(dest.name + ".suspect")
+        suspect = dest.with_name(dest.name + SUSPECT_SUFFIX)
         try:
-            # A good copy from earlier today is replaced by the quarantine,
-            # as when the fresh file was renamed over it.
-            _upload(staged, suspect)
+            # A good copy from earlier today, in either form, is replaced by
+            # the quarantine, as when the fresh file was renamed over it.
+            _upload(packed, suspect)
             dest.unlink(missing_ok=True)
+            old_form.unlink(missing_ok=True)
         except OSError as exc:  # noqa: BLE001
             logger.error("db_backup_quarantine_failed label=%s err=%s", result["label"], exc)
         logger.error(
@@ -609,7 +701,7 @@ def _guard_and_upload(
             result["label"], prior_rows, new_rows,
         )
         return {**result, "status": "suspect"}, new_rows
-    _upload(staged, dest)
+    _upload_good()
     return result, new_rows
 
 
@@ -621,7 +713,8 @@ def _staging_parent(config) -> Path:
 
 
 def _sweep_stale_staging(parent: Path) -> None:
-    """Remove run dirs a killed process left; a live run's dir is younger."""
+    """Remove run dirs a killed process left, and the ``plain_copy`` files a
+    killed restore or dry run left; a live one's is younger."""
     cutoff = time.time() - _STALE_STAGING_SECONDS
     try:
         entries = list(parent.iterdir())
@@ -629,19 +722,33 @@ def _sweep_stale_staging(parent: Path) -> None:
         return
     for entry in entries:
         try:
-            if entry.is_symlink() or not entry.is_dir() or entry.stat().st_mtime >= cutoff:
+            st = entry.lstat()
+            if st.st_mtime >= cutoff:
                 continue
-            shutil.rmtree(entry)
+            if stat.S_ISDIR(st.st_mode):
+                shutil.rmtree(entry)
+            elif stat.S_ISREG(st.st_mode) and entry.name.startswith(_PLAIN_COPY_PREFIX):
+                entry.unlink()
         except OSError as exc:
             logger.warning("db_backup_staging_sweep_failed dir=%s err=%s", entry, exc)
 
 
 def _good_db_relpaths(dated_dir: Path) -> set[str]:
-    """Relative paths (POSIX) of non-suspect ``*.db`` snapshots under a dated dir."""
+    """Relative paths (POSIX) of the non-suspect snapshots under a dated dir,
+    ``<rel>.gz`` and a plain ``<rel>`` both named ``rel``. No snapshot's name
+    starts with a dot: those are upload staging files, and the ``._`` files a
+    macOS tar adds beside each member."""
     out: set[str] = set()
-    for p in dated_dir.rglob("*.db"):
+    for p in dated_dir.rglob("*"):
+        if p.name.startswith("."):
+            continue
+        rel = p.relative_to(dated_dir).as_posix()
+        if rel.endswith(".db" + COMPRESSED_SUFFIX):
+            rel = rel.removesuffix(COMPRESSED_SUFFIX)
+        elif not rel.endswith(".db"):
+            continue
         if p.is_file():
-            out.add(p.relative_to(dated_dir).as_posix())
+            out.add(rel)
     return out
 
 
@@ -783,7 +890,7 @@ def _snapshot_all(
     manifests: dict[Path, dict[str, int] | None] = {}
 
     def _run(src: Path, rel: str, label: str) -> None:
-        dest = dated_root / rel
+        dest = dated_root / (rel + COMPRESSED_SUFFIX)
         staged = run_dir / rel
         try:
             res = _snapshot_one(src, staged, label)
@@ -811,7 +918,11 @@ def _snapshot_all(
             results.append({"label": label, "status": "error", "error": str(exc)})
         finally:
             # Local disk holds one staged DB at a time, the largest at most.
-            for leftover in (staged, staged.with_name(staged.name + "-journal")):
+            for leftover in (
+                staged,
+                staged.with_name(staged.name + "-journal"),
+                staged.with_name(staged.name + COMPRESSED_SUFFIX),
+            ):
                 try:
                     leftover.unlink(missing_ok=True)
                 except OSError as exc:
