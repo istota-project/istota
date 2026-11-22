@@ -28,6 +28,7 @@ from istota import db, user_profiles
 from istota.config import load_config
 from istota.maintenance import standalone_import as si
 from istota.setup_wizard import SECRET_NAMES
+from tests.support import snapshots
 
 MAC_HOME = "/Users/alice"
 ROOT = f"{MAC_HOME}/.istota"
@@ -591,6 +592,42 @@ class TestADryRun:
         assert "tasks.attachments" in out
         assert target.snapshot() == before
         assert not target.config.exists()
+
+
+class TestACompressedSnapshot:
+    """#988: the Mac stages plain `sqlite3 .backup` copies, but the importer
+    reads db_backup's layout, which now holds `<rel>.gz` as well."""
+
+    @pytest.fixture
+    def compressed_source(self, source):
+        snapshots.compress_tree(source / "db" / DATE)
+        return source
+
+    def test_it_imports(self, target, compressed_source):
+        code, out, err = _run(target, compressed_source)
+        assert code == 0, out + err
+        assert target.rows("SELECT user_id FROM user_profiles") == [("alice",)]
+        conn = sqlite3.connect(target.data / "db" / "modules" / "alice" / "feeds.db")
+        try:
+            assert conn.execute("SELECT url FROM feeds").fetchall() == [("https://example.test/feed.xml",)]
+        finally:
+            conn.close()
+        attachments = json.loads(target.rows("SELECT attachments FROM tasks WHERE id = 1")[0][0])
+        assert attachments[0].startswith(si.WORKSPACE)
+
+    def test_a_dry_run_leaves_nothing(self, target, compressed_source):
+        before = {str(p) for p in target.data.rglob("*")}
+        code, out, err = _run(target, compressed_source, "--dry-run")
+        assert code == 0, out + err
+        assert "tasks.attachments" in out
+        assert {str(p) for p in target.data.rglob("*")} == before
+
+    def test_encrypted_rows_in_a_compressed_database_are_still_counted(self, target, source):
+        _encrypted_row(source, "secrets")
+        snapshots.compress_tree(source / "db" / DATE)
+        code, out, err = _run(target, source, env=ENV_WITHOUT_KEY)
+        assert code == 1, out + err
+        assert "secrets (1 row)" in err
 
 
 def test_the_profile_case_rule_is_the_one_the_config_applies():

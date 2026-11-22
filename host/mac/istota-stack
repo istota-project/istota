@@ -2031,13 +2031,17 @@ purge_instance() {
 # What a restore reads from the folder, looked for before anything is deleted:
 # a config copy and a framework snapshot, of the date given or of any date.
 # The layout is db_backup's default; the VM's restore reads the config's own.
+# A snapshot is istota.db.gz, or a plain istota.db from before #988.
 require_backups() {
-    local folder="$1" date="$2" pattern="${2:-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]}" found what path
+    local folder="$1" date="$2" pattern="${2:-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]}" found what path suffix
     for what in "Backups/config/%s/config.toml" "Backups/db/snapshots/%s/framework/istota.db"; do
         found=""
-        # shellcheck disable=SC2059
-        for path in "${folder}"/$(printf "$what" "$pattern"); do
-            if [ -f "$path" ]; then found=1; break; fi
+        for suffix in "" ".gz"; do
+            [ -n "$suffix" ] && [ "${what%.db}" = "$what" ] && continue
+            # shellcheck disable=SC2059
+            for path in "${folder}"/$(printf "$what" "$pattern")$suffix; do
+                if [ -f "$path" ]; then found=1; break 2; fi
+            done
         done
         if [ -z "$found" ]; then
             # shellcheck disable=SC2059

@@ -209,7 +209,7 @@ class TestTheStoppedExport:
                      "secrets/web-secrets.env", "repos/alice/acme/README",
                      "whatsapp-baileys-session/creds.json"):
             assert name in members, name
-        assert any(n.startswith("db/") and n.endswith("framework/istota.db") for n in members)
+        assert any(n.startswith("db/") and n.endswith("framework/istota.db.gz") for n in members)
         assert not any(n.startswith("browser-profile") for n in members)
         assert _manifest(result.stdout)["mode"] == "stopped"
         assert host.leftovers() == []

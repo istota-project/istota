@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
+import shutil
 import sqlite3
 import stat
 import sys
@@ -17,6 +19,7 @@ import pytest
 
 from istota import db
 from istota.maintenance import db_backup
+from tests.support import snapshots
 from istota.config import (
     Config,
     EmailConfig,
@@ -110,8 +113,8 @@ class TestBackupDatabases:
         assert by_label["money:alice"] == "skip_missing"
 
         dated = _root(tmp_path) / FIXED_DAY
-        assert (dated / "framework" / "istota.db").exists()
-        assert (dated / "alice" / "location.db").exists()
+        assert (dated / "framework" / "istota.db.gz").exists()
+        assert (dated / "alice" / "location.db.gz").exists()
 
     def test_snapshot_is_readable_and_has_data(self, tmp_path):
         cfg = _config(tmp_path)
@@ -121,8 +124,8 @@ class TestBackupDatabases:
 
         db_backup.backup_databases(cfg, today=FIXED_DAY)
 
-        snap = _root(tmp_path) / FIXED_DAY / "framework" / "istota.db"
-        conn = sqlite3.connect(snap)
+        snap = _root(tmp_path) / FIXED_DAY / "framework" / "istota.db.gz"
+        conn = sqlite3.connect(snapshots.read_copy(snap, tmp_path / "copy.db"))
         try:
             assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
         finally:
@@ -147,7 +150,7 @@ class TestBackupDatabases:
         # Exactly one dated dir was created (today's real date).
         dated = [p for p in _root(tmp_path).iterdir() if p.is_dir()]
         assert len(dated) == 1
-        assert (dated[0] / "framework" / "istota.db").exists()
+        assert (dated[0] / "framework" / "istota.db.gz").exists()
 
 
 class TestBackupClockPersistence:
@@ -264,8 +267,8 @@ class TestCollapseGuard:
 
         dated = _root(tmp_path) / "2026-07-12" / "alice"
         # The fresh empty snapshot is quarantined, not treated as latest-good.
-        assert (dated / "location.db.suspect").exists()
-        assert not (dated / "location.db").exists()
+        assert (dated / "location.db.gz.suspect").exists()
+        assert not (dated / "location.db.gz").exists()
 
     def test_prior_good_snapshot_survives_collapse(self, tmp_path):
         cfg = _config(tmp_path)
@@ -280,9 +283,9 @@ class TestCollapseGuard:
         conn.close()
         db_backup.backup_databases(cfg, today="2026-07-12")
 
-        good = _root(tmp_path) / "2026-07-11" / "alice" / "location.db"
+        good = _root(tmp_path) / "2026-07-11" / "alice" / "location.db.gz"
         assert good.exists()
-        conn = sqlite3.connect(good)
+        conn = sqlite3.connect(snapshots.read_copy(good, tmp_path / "copy.db"))
         try:
             assert conn.execute("SELECT COUNT(*) FROM places").fetchone()[0] == 1
         finally:
@@ -332,7 +335,7 @@ class TestStagedSnapshotAndManifest:
         db_backup.backup_databases(cfg, today="2026-07-11")
         # A prior snapshot that cannot be read counts -1, which a file-reading
         # guard takes as "no data" and lets an empty snapshot through.
-        (_root(tmp_path) / "2026-07-11" / "alice" / "location.db").write_bytes(b"not a database")
+        (_root(tmp_path) / "2026-07-11" / "alice" / "location.db.gz").write_bytes(b"not a database")
         _empty_places(path)
 
         results = db_backup.backup_databases(cfg, today="2026-07-12")
@@ -341,8 +344,8 @@ class TestStagedSnapshotAndManifest:
         assert loc["prior_rows"] == 1
         assert loc["new_rows"] == 0
         dated = _root(tmp_path) / "2026-07-12" / "alice"
-        assert (dated / "location.db.suspect").exists()
-        assert not (dated / "location.db").exists()
+        assert (dated / "location.db.gz.suspect").exists()
+        assert not (dated / "location.db.gz").exists()
 
     def test_no_snapshot_under_the_backup_root_is_opened(self, tmp_path, monkeypatch):
         cfg, path = self._seeded(tmp_path)
@@ -369,23 +372,23 @@ class TestStagedSnapshotAndManifest:
         opened: list[Path] = []
         copied: list[Path] = []
         real_count = db_backup._data_row_count
-        real_copy = db_backup.shutil.copyfile
+        real_copy = db_backup.plain_copy
         real_upload = db_backup._upload
 
         def _count(p):
             opened.append(Path(p).resolve())
             return real_count(p)
 
-        def _copy(src, dst, *a, **kw):
-            copied.append(Path(src).resolve())
-            return real_copy(src, dst, *a, **kw)
+        def _copy(snapshot, directory, **kw):
+            copied.append(Path(snapshot).resolve())
+            return real_copy(snapshot, directory, **kw)
 
         def _upload(staged, dest):
             assert not list(db_backup._staging_parent(cfg).rglob("*.prior"))
             return real_upload(staged, dest)
 
         monkeypatch.setattr(db_backup, "_data_row_count", _count)
-        monkeypatch.setattr(db_backup.shutil, "copyfile", _copy)
+        monkeypatch.setattr(db_backup, "plain_copy", _copy)
         monkeypatch.setattr(db_backup, "_upload", _upload)
         return opened, copied
 
@@ -425,7 +428,7 @@ class TestStagedSnapshotAndManifest:
         loc = next(r for r in results if r["label"] == "location:alice")
         assert loc["status"] == "suspect"
         assert loc["prior_rows"] == 1
-        assert copied == [root / "2026-07-11" / "alice" / "location.db"]
+        assert copied == [root / "2026-07-11" / "alice" / "location.db.gz"]
         assert not [p for p in opened if p.is_relative_to(root)]
 
     def test_a_user_named_like_the_copy_does_not_collide(self, tmp_path, monkeypatch):
@@ -455,13 +458,28 @@ class TestStagedSnapshotAndManifest:
         def _fail(*_a, **_kw):
             raise OSError("no space left on device")
 
-        monkeypatch.setattr(db_backup.shutil, "copyfile", _fail)
+        monkeypatch.setattr(db_backup, "plain_copy", _fail)
         results = db_backup.backup_databases(cfg, today="2026-07-12")
         loc = next(r for r in results if r["label"] == "location:alice")
         assert loc["status"] == "error"
         dated = _root(tmp_path) / "2026-07-12"
-        assert not (dated / "alice" / "location.db").exists()
+        assert not (dated / "alice" / "location.db.gz").exists()
         assert "alice/location.db" not in (db_backup._read_manifest(dated) or {})
+
+    def test_a_prior_that_will_not_decompress_fails_closed(self, tmp_path):
+        """A truncated upload of the prior is not counted as empty."""
+        cfg, path = self._seeded(tmp_path)
+        db_backup.backup_databases(cfg, today="2026-07-11")
+        earlier = _root(tmp_path) / "2026-07-11"
+        (earlier / "manifest.json").unlink()
+        packed = snapshots.compressed(earlier, "alice/location.db")
+        packed.write_bytes(packed.read_bytes()[: packed.stat().st_size // 2])
+        _empty_places(path)
+
+        results = db_backup.backup_databases(cfg, today="2026-07-12")
+        loc = next(r for r in results if r["label"] == "location:alice")
+        assert loc["status"] == "error"
+        assert not (_root(tmp_path) / "2026-07-12" / "alice" / "location.db.gz").exists()
 
     def test_a_newer_copy_without_a_manifest_entry_is_not_skipped(self, tmp_path):
         """A dir whose manifest write failed still holds the newest good copy.
@@ -499,7 +517,7 @@ class TestStagedSnapshotAndManifest:
         assert loc["status"] == "suspect"
         assert not (_root(tmp_path) / "2026-07-12" / "alice").exists() or not any(
             (_root(tmp_path) / "2026-07-12" / "alice").iterdir())
-        assert (_root(tmp_path) / "2026-07-11" / "alice" / "location.db").exists()
+        assert (_root(tmp_path) / "2026-07-11" / "alice" / "location.db.gz").exists()
 
     def test_a_same_day_collapse_replaces_the_mornings_copy(self, tmp_path):
         cfg, path = self._seeded(tmp_path)
@@ -511,8 +529,8 @@ class TestStagedSnapshotAndManifest:
         loc = next(r for r in results if r["label"] == "location:alice")
         assert loc["status"] == "suspect"
         dated = _root(tmp_path) / "2026-07-12"
-        assert (dated / "alice" / "location.db.suspect").exists()
-        assert not (dated / "alice" / "location.db").exists()
+        assert (dated / "alice" / "location.db.gz.suspect").exists()
+        assert not (dated / "alice" / "location.db.gz").exists()
         counts = json.loads((dated / "manifest.json").read_text())["rows"]
         assert "alice/location.db" not in counts
 
@@ -529,10 +547,10 @@ class TestStagedSnapshotAndManifest:
         counts = json.loads(manifest.read_text())["rows"]
         assert counts["alice/location.db"] == 1
         assert counts["framework/istota.db"] == db_backup._data_row_count(
-            dated / "framework" / "istota.db")
+            snapshots.read_copy(dated / "framework" / "istota.db.gz", tmp_path / "copy.db"))
         assert "alice/money.db" not in counts
         names = {p.name for p in dated.rglob("*")}
-        assert names == {"manifest.json", "framework", "istota.db", "alice", "location.db"}
+        assert names == {"manifest.json", "framework", "istota.db.gz", "alice", "location.db.gz"}
         staging = cfg.db_path.parent / ".backup-staging"
         assert not staging.exists() or not any(staging.rglob("*"))
 
@@ -615,7 +633,7 @@ class TestALostRename:
 
         def _lost_once(src, dst, *a, **kw):
             calls.append(Path(dst).name)
-            if Path(dst).name == "istota.db" and calls.count("istota.db") == 1:
+            if Path(dst).name == "istota.db.gz" and calls.count("istota.db.gz") == 1:
                 raise FileNotFoundError(2, "No such file or directory", str(src))
             return real_replace(src, dst, *a, **kw)
 
@@ -624,9 +642,9 @@ class TestALostRename:
 
         framework = next(r for r in results if r["label"] == "framework")
         assert framework["status"] == "ok"
-        assert calls.count("istota.db") == 2
+        assert calls.count("istota.db.gz") == 2
         dated = _root(tmp_path) / FIXED_DAY
-        assert (dated / "framework" / "istota.db").is_file()
+        assert (dated / "framework" / "istota.db.gz").is_file()
         counts = json.loads((dated / "manifest.json").read_text())["rows"]
         assert "framework/istota.db" in counts
 
@@ -637,7 +655,7 @@ class TestALostRename:
         real_replace = atomic_write.os.replace
 
         def _always_lost(src, dst, *a, **kw):
-            if Path(dst).name == "istota.db":
+            if Path(dst).name == "istota.db.gz":
                 raise FileNotFoundError(2, "No such file or directory", str(src))
             return real_replace(src, dst, *a, **kw)
 
@@ -681,8 +699,8 @@ class TestALostRename:
         assert [p for p in leftovers if p.exists()] == []
         assert all(p.exists() for p in kept)
         assert link.is_symlink() and target.read_bytes() == b"keep me"
-        assert (earlier / "framework" / "istota.db").exists()
-        assert (earlier / "alice" / "location.db").exists()
+        assert (earlier / "framework" / "istota.db.gz").exists()
+        assert (earlier / "alice" / "location.db.gz").exists()
         assert (earlier / "manifest.json").exists()
 
 
@@ -703,7 +721,7 @@ class TestRetentionProtectsNewestGood:
         db_backup.backup_databases(cfg, today="2026-07-12")  # collapse -> suspect
 
         # The 07-11 dir holds the newest *good* location copy; keep it.
-        assert (_root(tmp_path) / "2026-07-11" / "alice" / "location.db").exists()
+        assert (_root(tmp_path) / "2026-07-11" / "alice" / "location.db.gz").exists()
 
 
 class TestBackupPermissions:
@@ -713,7 +731,7 @@ class TestBackupPermissions:
         db_backup.backup_databases(cfg, today=FIXED_DAY)
 
         dated = _root(tmp_path) / FIXED_DAY
-        snap = dated / "framework" / "istota.db"
+        snap = dated / "framework" / "istota.db.gz"
         # Dir 0700, file 0600 -> no group/other bits.
         assert stat.S_IMODE(dated.stat().st_mode) == 0o700
         assert stat.S_IMODE(snap.stat().st_mode) == 0o600
@@ -934,7 +952,7 @@ class TestMountLiveness:
             / "snapshots"
             / FIXED_DAY
             / "framework"
-            / "istota.db"
+            / "istota.db.gz"
         ).exists()
 
     def test_explicit_dir_outside_mount_is_trusted_without_ismount(self, tmp_path, monkeypatch):
@@ -973,7 +991,7 @@ class TestMountLiveness:
 
         results = db_backup.backup_databases(cfg, today=FIXED_DAY)
         assert any(r["status"] == "ok" for r in results)
-        snap = tmp_path / "mount" / "Backups" / "snapshots" / FIXED_DAY / "framework" / "istota.db"
+        snap = tmp_path / "mount" / "Backups" / "snapshots" / FIXED_DAY / "framework" / "istota.db.gz"
         assert snap.exists()
 
     def test_symlinked_explicit_dir_into_mount_is_gated(self, tmp_path, monkeypatch):
@@ -1026,7 +1044,7 @@ class TestMountLiveness:
 
         results = db_backup.backup_databases(cfg, today=FIXED_DAY)
         assert any(r["status"] == "ok" for r in results)
-        assert (real_mount / "Backups" / FIXED_DAY / "framework" / "istota.db").exists()
+        assert (real_mount / "Backups" / FIXED_DAY / "framework" / "istota.db.gz").exists()
 
     def test_unresolvable_destination_keeps_the_gate(self, tmp_path, monkeypatch):
         # "Can't tell" has to mean "still check the mount": the alternative is a
@@ -1107,7 +1125,7 @@ class TestALocalWorkspaceIsNotGated:
 
         results = db_backup.backup_databases(cfg, today=FIXED_DAY)
         assert any(r["status"] == "ok" for r in results)
-        assert (tmp_path / "mount" / "db-backups" / FIXED_DAY / "framework" / "istota.db").exists()
+        assert (tmp_path / "mount" / "db-backups" / FIXED_DAY / "framework" / "istota.db.gz").exists()
 
     def test_derived_destination_runs_without_ismount(self, tmp_path, monkeypatch):
         cfg = _config(tmp_path, db_backup_dir="", mount_configured=False)
@@ -1219,7 +1237,7 @@ class TestVanishedModuleDb:
         db_backup.backup_databases(cfg, today="2026-07-11")  # -> suspect
 
         # Drop the one good copy, leaving only the quarantined one behind.
-        (_root(tmp_path) / "2026-07-10" / "alice" / "location.db").unlink()
+        (_root(tmp_path) / "2026-07-10" / "alice" / "location.db.gz").unlink()
         path.unlink()
 
         results = db_backup.backup_databases(cfg, today="2026-07-12")
@@ -1248,4 +1266,206 @@ class TestVanishedModuleDb:
         loc = next(r for r in results if r["label"] == "location:alice")
         assert loc["status"] == "skip_missing"
         # The evidence is still there; it is the flag that ages out, not the copy.
-        assert (_root(tmp_path) / "2026-07-10" / "alice" / "location.db").exists()
+        assert (_root(tmp_path) / "2026-07-10" / "alice" / "location.db.gz").exists()
+
+
+def _gunzip_to(packed: Path, out: Path) -> Path:
+    with gzip.open(packed, "rb") as src, open(out, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    return out
+
+
+class TestCompressedSnapshots:
+    """#988: each snapshot is uploaded gzip-compressed as ``<rel>.gz``.
+    Retention keeps about a week of plain snapshots from before the change,
+    so every reader of the layout takes both forms."""
+
+    def _seeded(self, tmp_path, **sched):
+        cfg = _config(tmp_path, **sched)
+        db.init_db(cfg.db_path)
+        with db.get_db(cfg.db_path) as conn:
+            db.create_task(conn, prompt="hi", user_id="alice")
+        path = _seed_module_db(cfg, "alice", "location")
+        _add_place(path)
+        return cfg, path
+
+    def test_a_run_uploads_each_database_compressed(self, tmp_path):
+        cfg, _path = self._seeded(tmp_path)
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY)
+
+        dated = _root(tmp_path) / FIXED_DAY
+        assert (dated / "framework" / "istota.db.gz").is_file()
+        assert (dated / "alice" / "location.db.gz").is_file()
+        assert not (dated / "framework" / "istota.db").exists()
+        assert not (dated / "alice" / "location.db").exists()
+        assert stat.S_IMODE((dated / "framework" / "istota.db.gz").stat().st_mode) == 0o600
+        framework = next(r for r in results if r["label"] == "framework")
+        assert framework["dest"].endswith("framework/istota.db.gz")
+
+        plain = _gunzip_to(dated / "framework" / "istota.db.gz", tmp_path / "out.db")
+        conn = sqlite3.connect(plain)
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "delete"
+        finally:
+            conn.close()
+
+    def test_the_manifest_keys_stay_the_relpaths(self, tmp_path):
+        cfg, _path = self._seeded(tmp_path)
+        db_backup.backup_databases(cfg, today=FIXED_DAY)
+        counts = json.loads((_root(tmp_path) / FIXED_DAY / "manifest.json").read_text())["rows"]
+        assert set(counts) == {"framework/istota.db", "alice/location.db"}
+        assert counts["alice/location.db"] == 1
+
+    def test_a_plain_copy_an_older_release_left_today_is_replaced(self, tmp_path):
+        cfg, _path = self._seeded(tmp_path)
+        db_backup.backup_databases(cfg, today=FIXED_DAY)
+        dated = _root(tmp_path) / FIXED_DAY
+        snapshots.plain(dated, "alice/location.db")
+
+        db_backup.backup_databases(cfg, today=FIXED_DAY)
+        assert (dated / "alice" / "location.db.gz").is_file()
+        assert not (dated / "alice" / "location.db").exists()
+
+    def test_the_guard_reads_a_compressed_prior_snapshot(self, tmp_path):
+        """No manifest records the prior, so the guard counts the snapshot
+        itself, which is now compressed."""
+        cfg, path = self._seeded(tmp_path)
+        db_backup.backup_databases(cfg, today="2026-07-11")
+        earlier = _root(tmp_path) / "2026-07-11"
+        snapshots.compressed(earlier, "alice/location.db")
+        (earlier / "manifest.json").unlink()
+        _empty_places(path)
+
+        results = db_backup.backup_databases(cfg, today="2026-07-12")
+        loc = next(r for r in results if r["label"] == "location:alice")
+        assert loc["status"] == "suspect"
+        assert loc["prior_rows"] == 1
+        assert loc["new_rows"] == 0
+
+    def test_the_guard_reads_a_plain_prior_snapshot(self, tmp_path):
+        cfg, path = self._seeded(tmp_path)
+        db_backup.backup_databases(cfg, today="2026-07-11")
+        earlier = _root(tmp_path) / "2026-07-11"
+        snapshots.plain(earlier, "alice/location.db")
+        (earlier / "manifest.json").unlink()
+        _empty_places(path)
+
+        results = db_backup.backup_databases(cfg, today="2026-07-12")
+        loc = next(r for r in results if r["label"] == "location:alice")
+        assert loc["status"] == "suspect"
+        assert loc["prior_rows"] == 1
+
+    def test_a_quarantined_snapshot_is_named_gz_suspect(self, tmp_path):
+        cfg, path = self._seeded(tmp_path)
+        db_backup.backup_databases(cfg, today="2026-07-11")
+        _empty_places(path)
+        db_backup.backup_databases(cfg, today="2026-07-12")
+
+        dated = _root(tmp_path) / "2026-07-12" / "alice"
+        assert sorted(p.name for p in dated.iterdir()) == ["location.db.gz.suspect"]
+        quarantined = _gunzip_to(dated / "location.db.gz.suspect", tmp_path / "q.db")
+        conn = sqlite3.connect(quarantined)
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM places").fetchone()[0] == 0
+        finally:
+            conn.close()
+
+    def test_a_same_day_quarantine_removes_both_forms_of_the_mornings_copy(self, tmp_path):
+        cfg, path = self._seeded(tmp_path)
+        db_backup.backup_databases(cfg, today="2026-07-11")
+        db_backup.backup_databases(cfg, today="2026-07-12")
+        dated = _root(tmp_path) / "2026-07-12"
+        # The morning's run was an older release's, which wrote the plain form.
+        snapshots.plain(dated, "alice/location.db")
+        _empty_places(path)
+
+        db_backup.backup_databases(cfg, today="2026-07-12")
+        assert sorted(p.name for p in (dated / "alice").iterdir()) == ["location.db.gz.suspect"]
+
+    def test_the_leftover_sweep_takes_the_compressed_staging_names(self, tmp_path):
+        cfg, _path = self._seeded(tmp_path)
+        db_backup.backup_databases(cfg, today="2026-07-11")
+        earlier = _root(tmp_path) / "2026-07-11"
+        old = time.time() - 2 * 3600
+        leftovers = [
+            earlier / "framework" / ".istota.db.gz.k3x9q2a_",
+            earlier / "alice" / ".location.db.gz.suspect.ab12cd34",
+        ]
+        kept = [earlier / "alice" / ".location.db.gz.toolongsuffix"]
+        for path in leftovers + kept:
+            path.write_bytes(b"partial")
+            os.utime(path, (old, old))
+
+        db_backup.backup_databases(cfg, today=FIXED_DAY)
+
+        assert [p for p in leftovers if p.exists()] == []
+        assert all(p.exists() for p in kept)
+        assert snapshots.compressed(earlier, "alice/location.db").is_file()
+
+    def test_good_relpaths_are_one_name_whichever_form(self, tmp_path):
+        dated = tmp_path / "2026-07-12"
+        for name in (
+            "framework/istota.db.gz", "alice/location.db", "alice/feeds.db.gz.suspect",
+            "alice/money.db.suspect", "alice/.health.db.gz.ab12cd34",
+            # What a macOS tar adds beside each member of an export.
+            "framework/._istota.db.gz", "alice/._location.db",
+        ):
+            (dated / name).parent.mkdir(parents=True, exist_ok=True)
+            (dated / name).write_bytes(b"x")
+        assert db_backup._good_db_relpaths(dated) == {"framework/istota.db", "alice/location.db"}
+
+    def test_retention_keeps_the_newest_good_copy_whichever_form(self, tmp_path):
+        """The only good copy of location is plain, in a dir past the keep
+        count; every newer dir holds a compressed framework copy alone."""
+        root = tmp_path / "backups"
+
+        def _put(day: str, name: str) -> None:
+            path = root / day / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"x")
+
+        _put("2026-07-08", "alice/location.db")
+        _put("2026-07-08", "framework/istota.db")
+        _put("2026-07-09", "framework/istota.db")
+        _put("2026-07-09", "alice/location.db.gz.suspect")
+        _put("2026-07-10", "framework/istota.db.gz")
+        _put("2026-07-11", "framework/istota.db.gz")
+
+        db_backup._prune_old_snapshots(root, keep=2)
+
+        assert sorted(p.name for p in root.iterdir()) == ["2026-07-08", "2026-07-10", "2026-07-11"]
+
+    def test_a_compressed_dir_is_counted_on_the_admin_page(self, tmp_path):
+        cfg, _path = self._seeded(tmp_path)
+        db_backup.backup_databases(cfg, today="2026-07-11")
+        db_backup.backup_databases(cfg, today="2026-07-12")
+        snapshots.compress_tree(_root(tmp_path) / "2026-07-11")
+        assert db_backup.snapshot_count(cfg) == 2
+
+    def test_a_killed_dry_runs_copy_is_swept_from_staging(self, tmp_path):
+        cfg, _path = self._seeded(tmp_path)
+        staging = cfg.db_path.parent / ".backup-staging"
+        staging.mkdir()
+        old = time.time() - 2 * 24 * 3600
+        stale = staging / ".snapshot-abc123.db"
+        fresh = staging / ".snapshot-def456.db"
+        other = staging / "notes.txt"
+        for path in (stale, fresh, other):
+            path.write_bytes(b"x")
+        for path in (stale, other):
+            os.utime(path, (old, old))
+
+        db_backup.backup_databases(cfg, today=FIXED_DAY)
+        assert not stale.exists()
+        assert fresh.exists() and other.exists()
+
+    def test_a_vanished_database_is_seen_through_a_compressed_snapshot(self, tmp_path):
+        cfg, path = self._seeded(tmp_path)
+        db_backup.backup_databases(cfg, today="2026-07-10")
+        snapshots.compressed(_root(tmp_path) / "2026-07-10", "alice/location.db")
+        path.unlink()
+
+        results = db_backup.backup_databases(cfg, today="2026-07-11")
+        loc = next(r for r in results if r["label"] == "location:alice")
+        assert loc["status"] == "vanished"

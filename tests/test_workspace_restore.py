@@ -20,6 +20,7 @@ import pytest
 from istota import db
 from istota.config import load_config
 from istota.maintenance import db_backup, db_restore, workspace_restore
+from tests.support import snapshots
 
 KEY = "5e" * 32
 DATE = "2026-10-10"
@@ -126,6 +127,34 @@ class TestARestoreOntoANewVm:
         assert (world.config_dir / "admins").read_text() == world.admins_text
         assert (world.config_dir / "config.toml").stat().st_mode & 0o777 == 0o600
         assert world.tasks() == 2
+
+    @pytest.mark.parametrize("form", ["plain", "compressed"])
+    def test_either_form_of_snapshot_comes_back(self, world, form):
+        """#988: the snapshots are `<rel>.gz`; a week of plain ones from
+        before the change are still there."""
+        world.back_up(places=2)
+        dated = world.workspace / "Backups" / "db" / "snapshots" / DATE
+        change = snapshots.plain if form == "plain" else snapshots.compressed
+        for rel in ("framework/istota.db", "alice/location.db"):
+            change(dated, rel)
+        world.lose_the_vm()
+        rc, out, err = world.restore()
+        assert rc == 0, out + err
+        assert world.tasks() == 2
+        config = load_config(world.config_dir / "config.toml")
+        conn = sqlite3.connect(config.module_db_path("alice", "location"))
+        assert conn.execute("SELECT count(*) FROM places").fetchone()[0] == 2
+        conn.close()
+
+    def test_a_framework_snapshot_that_will_not_decompress_is_named(self, world):
+        world.back_up()
+        world.lose_the_vm()
+        dated = world.workspace / "Backups" / "db" / "snapshots" / DATE
+        packed = snapshots.compressed(dated, "framework/istota.db")
+        packed.write_bytes(packed.read_bytes()[: packed.stat().st_size // 2])
+        rc, _, err = world.restore()
+        assert rc == 1
+        assert f"the framework snapshot of {DATE} cannot be read" in err
 
     def test_a_user_known_only_to_the_database_gets_their_module_databases(self, world):
         """config.toml names no user; the restored framework database does, so the
@@ -238,17 +267,20 @@ class TestRefusalsWriteNothing:
         assert (world.config_dir / "config.toml").read_text() == "# someone's\n"
         assert not (world.data / ".secret_key").exists()
 
-    def test_a_snapshot_a_newer_release_stamped(self, world):
+    @pytest.mark.parametrize("form", ["plain", "compressed"])
+    def test_a_snapshot_a_newer_release_stamped(self, world, form):
         """A move into the Mac app restores onto the release the app carries,
         which may be older than the install the backups came from: its image
         cannot open the database, so nothing is restored at all."""
         world.back_up()
         world.lose_the_vm()
-        snapshot = world.workspace / "Backups" / "db" / "snapshots" / DATE / "framework" / "istota.db"
-        conn = sqlite3.connect(snapshot)
+        dated = world.workspace / "Backups" / "db" / "snapshots" / DATE
+        conn = sqlite3.connect(snapshots.plain(dated, "framework/istota.db"))
         conn.execute(f"PRAGMA user_version = {db.SCHEMA_VERSION + 1}")
         conn.commit()
         conn.close()
+        if form == "compressed":
+            snapshots.compressed(dated, "framework/istota.db")
         rc, _, err = world.restore()
         assert rc == 1, err
         assert f"schema {db.SCHEMA_VERSION + 1}" in err

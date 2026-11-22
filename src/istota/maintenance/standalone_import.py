@@ -58,6 +58,7 @@ resumes.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import json
 import os
@@ -136,6 +137,8 @@ class Source:
     snapshot: Path
     snapshot_dbs: list[str]
     workspace_users: list[str]
+    #: As on `bare_metal_import.Source`: plain once `with_plain_framework` ran.
+    framework_db: Path
 
     @property
     def standalone_root(self) -> str:
@@ -160,20 +163,12 @@ def read_source(root: Path) -> Source:
         config = tomllib.loads(bmi._read_text(root / "config.toml", "config.toml"))
     except tomllib.TOMLDecodeError as exc:
         raise Refusal(f"config.toml does not parse: {exc}") from None
-    from istota.maintenance.db_backup import _dated_dirs
-
-    dated = _dated_dirs(root / "db")
-    if not dated:
-        raise Refusal("the staging directory holds no database under db/<YYYY-MM-DD>/")
-    snapshot = dated[0]
-    dbs = sorted(str(p.relative_to(snapshot)) for p in snapshot.rglob("*.db"))
-    if "framework/istota.db" not in dbs:
-        raise Refusal(f"{snapshot} has no framework/istota.db")
+    snapshot, dbs, framework_db = bmi.find_snapshot(root / "db", "staging directory")
     admins_path = root / "admins"
     admins = admins_path.read_text(encoding="utf-8") if admins_path.exists() else ""
     users_path = root / "workspace-users"
     users = users_path.read_text(encoding="utf-8").split("\n") if users_path.exists() else []
-    return Source(root, manifest, config, admins, snapshot, dbs, [u for u in users if u])
+    return Source(root, manifest, config, admins, snapshot, dbs, [u for u in users if u], framework_db)
 
 
 def _expand(value: str, home: str) -> str:
@@ -512,7 +507,7 @@ def settle_master_key(source: Source, target: bmi.Target, plan: SecretsPlan) -> 
 
     if plan.keys.get(".secret_key"):
         return
-    conn = sqlite_util.connect_read_only(source.snapshot / "framework" / "istota.db")
+    conn = sqlite_util.connect_read_only(source.framework_db)
     try:
         encrypted = secrets_store.count_master_key_rows(conn)
     finally:
@@ -595,7 +590,7 @@ def _preflight(source: Source, target: bmi.Target, plan: SecretsPlan) -> None:
 
     if _daemon_running():
         raise Refusal("the scheduler daemon is running; stop the stack first")
-    problems = bmi._quick_check(source.snapshot / "framework" / "istota.db")
+    problems = bmi._quick_check(source.framework_db)
     if problems:
         raise Refusal("the staged framework database fails quick_check: " + "; ".join(problems[:5]))
 
@@ -645,6 +640,11 @@ def _finish_database(source: Source, target: bmi.Target, prefixes) -> bmi.DbRepo
 
 
 def run(args, *, env_text: str, out, err) -> int:
+    with contextlib.ExitStack() as scratch:
+        return _run(args, env_text=env_text, out=out, err=err, scratch=scratch)
+
+
+def _run(args, *, env_text: str, out, err, scratch: contextlib.ExitStack) -> int:
     from istota.serve import parse_env_text
 
     target = bmi.Target(Path(args.config), Path(args.secrets_dir), Path(args.data_dir))
@@ -656,11 +656,12 @@ def run(args, *, env_text: str, out, err) -> int:
             out(f"already imported from {record.get('source_root')} at {record.get('imported_at')}; nothing to do")
             return EXIT_OK
         check_layout(source)
+        source = bmi.with_plain_framework(source, target.data_dir, scratch)
         rewrite = rewrite_config(source.config, source=source, hostname=args.hostname)
         plan = map_secrets(parse_env_text(env_text), rewrite.credentials)
         check_user_ids(
             list((source.config.get("users") or {}).keys()),
-            profile_user_ids(source.snapshot / "framework" / "istota.db"),
+            profile_user_ids(source.framework_db),
             source.workspace_users,
         )
         settle_master_key(source, target, plan)
@@ -670,7 +671,7 @@ def run(args, *, env_text: str, out, err) -> int:
             raise Refusal(f"the rewritten config does not validate: {exc}") from None
         if args.dry_run:
             _print_plan(rewrite, section, plan, out)
-            conn = sqlite_util.connect_read_only(source.snapshot / "framework" / "istota.db")
+            conn = sqlite_util.connect_read_only(source.framework_db)
             try:
                 report = bmi.rebase_database(conn, rewrite.prefixes, write=False, rehearsal=False, scan=_scan(source))
             finally:
@@ -679,7 +680,7 @@ def run(args, *, env_text: str, out, err) -> int:
             out("--dry-run: nothing was written.")
             return EXIT_OK
         _preflight(source, target, plan)
-    except Refusal as exc:
+    except bmi.Refusal as exc:
         err(f"import-standalone: refused: {exc}")
         return EXIT_REFUSED
 

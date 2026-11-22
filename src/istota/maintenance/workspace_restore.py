@@ -213,6 +213,8 @@ def restore(workspace: Path, config_dir: Path, data_dir: Path, key: str, *,
     planned = db_restore.restore_database(config, label="framework", date=date, dry_run=True, force=force)
     if planned["status"] == "refused_empty":
         raise Refusal(f"the framework snapshot of {planned['date']} holds no data; --force restores it anyway")
+    if planned["status"] == "error" and "date" in planned:
+        raise Refusal(f"the framework snapshot of {planned['date']} cannot be read: {planned.get('error')}")
     if planned["status"] != "would_restore":
         when = f"of {date} " if date else ""
         raise Refusal(f"no framework database snapshot {when}to restore ({planned['status']})")
@@ -220,8 +222,15 @@ def restore(workspace: Path, config_dir: Path, data_dir: Path, key: str, *,
     # (a command-line install moved into an older Mac app) would leave a stack
     # whose daemon cannot start.
     from istota import db
+    from istota.maintenance.db_backup import _staging_parent, plain_snapshot
 
-    too_new = db.check_schema_version(Path(planned["src"]))
+    staging = _staging_parent(config)
+    staging.mkdir(parents=True, exist_ok=True)
+    try:
+        with plain_snapshot(Path(planned["src"]), staging) as framework:
+            too_new = db.check_schema_version(framework)
+    except OSError as exc:
+        raise Refusal(f"the framework snapshot of {planned['date']} cannot be read: {exc}") from exc
     if too_new is not None:
         raise Refusal(
             f"the framework snapshot of {planned['date']} is at schema {too_new.found}, written by a "

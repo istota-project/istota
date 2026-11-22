@@ -28,6 +28,7 @@ from istota import apply as apply_module
 from istota import db
 from istota.maintenance import bare_metal_import as bmi
 from istota.setup_wizard import SECRET_NAMES
+from tests.support import snapshots
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "bare_metal" / "role-config.toml"
 
@@ -957,3 +958,74 @@ class TestTheCli:
         with pytest.raises(SystemExit) as exit_info:
             cli.main()
         assert exit_info.value.code == bmi.EXIT_REFUSED
+
+
+def _every_path(root: Path) -> set[str]:
+    return {str(p) for p in root.rglob("*")}
+
+
+class TestACompressedExport:
+    """#988: an export made by a release that compresses its snapshots holds
+    ``<rel>.gz``; the importer reads it, and still reads a plain one."""
+
+    @pytest.fixture
+    def compressed_source(self, source):
+        snapshots.compress_tree(source / "db" / "2026-10-10")
+        return source
+
+    def test_it_leaves_the_files_a_plain_export_leaves(self, compressed_source, target, tmp_path):
+        assert bmi.main(target.args(compressed_source)) == bmi.EXIT_OK
+        (tmp_path / "plain").mkdir()
+        plain_target = Target(tmp_path / "plain")
+        assert bmi.main(plain_target.args(_export(tmp_path / "plain"))) == bmi.EXIT_OK
+
+        def _relative(t: Target) -> set[str]:
+            return {str(p.relative_to(t.data)) for p in t.data.rglob("*")}
+
+        assert _relative(target) == _relative(plain_target)
+
+    def test_it_lands_the_databases(self, compressed_source, target):
+        assert bmi.main(target.args(compressed_source)) == bmi.EXIT_OK
+        assert target.rows("SELECT COUNT(*) FROM tasks") == [(2,)]
+        assert target.rows("SELECT notes_path FROM note_resurface_configs") == [
+            ("/mnt/shared/Users/alice/notes",)
+        ]
+        feeds = target.data / "db" / "modules" / "alice" / "feeds.db"
+        conn = sqlite3.connect(feeds)
+        try:
+            assert conn.execute("SELECT url FROM feeds").fetchall() == [("https://example.test/feed.xml",)]
+        finally:
+            conn.close()
+
+    def test_the_listing_names_the_databases_not_the_files(self, compressed_source, target, capsys):
+        assert bmi.main(target.args(compressed_source, "--list")) == bmi.EXIT_OK
+        out = capsys.readouterr().out
+        assert "framework/istota.db" in out
+        assert "alice/feeds.db" in out
+        assert ".gz" not in out
+
+    def test_a_dry_run_reads_it_and_leaves_nothing(self, compressed_source, target, capsys):
+        before = _every_path(target.data)
+        assert bmi.main(target.args(compressed_source, "--dry-run")) == bmi.EXIT_OK
+        assert "tasks.attachments: 1" in capsys.readouterr().out
+        assert _every_path(target.data) == before
+
+    @pytest.mark.parametrize("form", ["plain", "compressed"])
+    def test_a_framework_database_that_is_not_one_is_refused(self, source, target, capsys, form):
+        """Not a traceback: `quick_check` raised on a file SQLite cannot open."""
+        framework = source / "db" / "2026-10-10" / "framework" / "istota.db"
+        framework.write_bytes(b"SQLite format 3\x00" + b"\x00" * 4000)
+        if form == "compressed":
+            snapshots.compress_tree(source / "db" / "2026-10-10")
+        before = target.snapshot()
+        assert bmi.main(target.args(source)) == bmi.EXIT_REFUSED
+        assert "quick_check" in capsys.readouterr().err
+        assert target.snapshot() == before
+
+    def test_a_truncated_framework_snapshot_is_refused(self, compressed_source, target, capsys):
+        packed = compressed_source / "db" / "2026-10-10" / "framework" / "istota.db.gz"
+        packed.write_bytes(packed.read_bytes()[: packed.stat().st_size // 2])
+        before = target.snapshot()
+        assert bmi.main(target.args(compressed_source)) == bmi.EXIT_REFUSED
+        assert "cannot be read" in capsys.readouterr().err
+        assert target.snapshot() == before
