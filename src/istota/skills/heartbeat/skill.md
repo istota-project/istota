@@ -88,6 +88,8 @@ cooldown_minutes = 60
 execution_test = true
 ```
 
+`conversation_token` and a check's `channel` must name a room the user is in now. An alert naming any other room is not sent, so take the token from `istota-skill rooms list` rather than guessing it.
+
 A check's own settings go directly under its `[[checks]]` entry, as above. A nested `[checks.config]` table is not read: its values are ignored.
 
 ## Quiet Hours
