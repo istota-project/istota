@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from istota.sandbox.confined import NotRegularFile
 from istota.sandbox.host_paths import (
     open_resolved, resolve_host_path, skill_file_env, write_resolved,
 )
@@ -145,6 +146,50 @@ def test_read_and_write_refuse_non_regular_objects(roots, kind):
         open_resolved(target)
     with pytest.raises(OSError):
         write_resolved(target, b"replacement")
+
+
+@pytest.mark.parametrize("kind", ["fifo", "directory"])
+def test_open_resolved_says_a_non_regular_leaf_is_not_a_regular_file(roots, kind):
+    allowed, _ = roots
+    target = allowed / "not-a-file"
+    if kind == "fifo":
+        os.mkfifo(target)
+    else:
+        target.mkdir()
+    with pytest.raises(NotRegularFile) as err:
+        open_resolved(target)
+    assert err.value.strerror == "not a regular file"
+
+
+@pytest.mark.parametrize("kind", ["missing", "leaf_link", "parent_link"])
+def test_open_resolved_says_why_it_could_not_open(roots, kind):
+    allowed, outside = roots
+    (outside / "f.txt").write_text("outside")
+    if kind == "missing":
+        target = allowed / "absent.txt"
+    elif kind == "leaf_link":
+        target = allowed / "link.txt"
+        target.symlink_to(outside / "f.txt")
+    else:
+        (allowed / "dir").symlink_to(outside, target_is_directory=True)
+        target = allowed / "dir" / "f.txt"
+    with pytest.raises(OSError) as err:
+        open_resolved(target)
+    assert not isinstance(err.value, NotRegularFile)
+    assert err.value.errno is not None and err.value.strerror
+
+
+@pytest.mark.parametrize("spelling", ["relative", "surrogate_dir", "surrogate_leaf"])
+def test_open_resolved_refuses_an_unusable_name_with_an_oserror(roots, spelling):
+    allowed, _ = roots
+    target = {
+        "relative": "inputs/f.txt",
+        "surrogate_dir": f"{allowed}/a\ud800/f.txt",
+        "surrogate_leaf": f"{allowed}/f\ud800.txt",
+    }[spelling]
+    with pytest.raises(OSError) as err:
+        open_resolved(target)
+    assert err.value.errno is not None and err.value.strerror
 
 
 def test_gws_passes_a_read_only_private_copy(roots, monkeypatch):

@@ -97,53 +97,94 @@ def open_dir(
     return fd
 
 
+class NotRegularFile(OSError):
+    """The name opened, and what it named is not a regular file."""
+
+    def __init__(self, *args: object) -> None:
+        # Arguments only so the exception survives a pickle round trip.
+        super().__init__(*(args or (errno.EINVAL, "not a regular file")))
+
+
+def _invalid_component() -> OSError:
+    return OSError(errno.EINVAL, "invalid path component")
+
+
 def open_regular_at(
     dir_fd: int, name: str, *, raise_mount_errors: bool = False,
+    raise_errors: bool = False,
 ) -> int | None:
     """A read-only fd on the regular file ``name`` in ``dir_fd``, or None.
 
     ``O_NONBLOCK`` so a FIFO planted at the name cannot block the open, then
     ``S_ISREG`` on the fd, then blocking mode back on. ``raise_mount_errors``
-    as for ``open_dir``. The caller closes the fd.
+    as for ``open_dir``. ``raise_errors`` turns every None into an
+    ``OSError`` saying why: ``NotRegularFile`` for a leaf that opened and is
+    not a regular file, the open's own error otherwise. The caller closes the
+    fd.
     """
     if not valid_part(name):
+        if raise_errors:
+            raise _invalid_component()
         return None
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
     except OSError as exc:
-        if raise_mount_errors and exc.errno in _MOUNT_ERRNOS:
+        if raise_errors or (raise_mount_errors and exc.errno in _MOUNT_ERRNOS):
             raise
         return None
     except ValueError:
+        # A lone surrogate the filesystem encoding cannot carry.
+        if raise_errors:
+            raise _invalid_component() from None
         return None
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            os.close(fd)
-            return None
-        os.set_blocking(fd, True)
+        regular = stat.S_ISREG(os.fstat(fd).st_mode)
+        if regular:
+            os.set_blocking(fd, True)
     except OSError:
         os.close(fd)
+        if raise_errors:
+            raise
+        return None
+    if not regular:
+        os.close(fd)
+        if raise_errors:
+            raise NotRegularFile()
         return None
     return fd
 
 
 def open_regular(
     root: Path, parts: Iterable[str], *, raise_mount_errors: bool = False,
+    raise_errors: bool = False,
 ) -> int | None:
     """``open_dir`` over all but the last of ``parts``, then ``open_regular_at``.
 
     None for an empty ``parts``, a refused walk, or a leaf that is not a
-    regular file. The caller closes the fd.
+    regular file; with ``raise_errors``, an ``OSError`` saying which (see
+    ``open_regular_at``). The caller closes the fd.
     """
     parts = tuple(parts)
-    if not parts:
+    if not parts or not valid_parts(parts):
+        if raise_errors:
+            raise _invalid_component()
         return None
     *dirs, leaf = parts
-    dir_fd = open_dir(root, *dirs, raise_mount_errors=raise_mount_errors)
+    try:
+        dir_fd = open_dir(
+            root, *dirs, raise_mount_errors=raise_mount_errors, raise_errors=raise_errors,
+        )
+    except ValueError:
+        # A lone surrogate in a directory component, as at the leaf below.
+        if raise_errors:
+            raise _invalid_component() from None
+        raise
     if dir_fd is None:
         return None
     try:
-        return open_regular_at(dir_fd, leaf, raise_mount_errors=raise_mount_errors)
+        return open_regular_at(
+            dir_fd, leaf, raise_mount_errors=raise_mount_errors, raise_errors=raise_errors,
+        )
     finally:
         os.close(dir_fd)
 

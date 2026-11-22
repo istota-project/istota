@@ -90,6 +90,7 @@ from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 from istota.sandbox.host_paths import (
+    NotRegularFile,
     env_host_roots,
     memory_refusal,
     open_resolved,
@@ -571,21 +572,20 @@ class ReadRefused(ValueError):
 def read_resolved_text(path: str | Path, *, flag: str, max_bytes: int) -> str:
     """Read an authorized UTF-8 file through a confined descriptor, with a cap."""
     import os
-    import stat
 
     resolved = Path(path)
     if not resolved.is_file():
         raise ReadRefused(f"{flag} is not a regular file: {resolved}")
     try:
+        # The leaf can become a FIFO between is_file() and the open, which
+        # open_resolved refuses on the descriptor.
         fd = open_resolved(resolved)
+    except NotRegularFile:
+        raise ReadRefused(f"{flag} is not a regular file: {resolved}") from None
     except OSError as e:
-        raise ReadRefused(f"could not open {flag}: {e}") from None
+        raise ReadRefused(f"could not open {flag}: {e.strerror or e}") from None
     try:
-        st = os.fstat(fd)
-        # The leaf can become a FIFO between is_file() and the open.
-        if not stat.S_ISREG(st.st_mode):
-            raise ReadRefused(f"{flag} is not a regular file: {resolved}")
-        size = st.st_size
+        size = os.fstat(fd).st_size
         if size > max_bytes:
             raise ReadRefused(f"{flag} is {size} bytes, over the {max_bytes}-byte cap")
         with os.fdopen(fd, encoding="utf-8") as fh:

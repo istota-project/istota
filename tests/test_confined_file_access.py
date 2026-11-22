@@ -477,6 +477,23 @@ class TestConfined:
         with pytest.raises(OSError):
             confined.open_regular(tmp_path, ["f.txt"], raise_mount_errors=True)
 
+    def test_raise_errors_tells_a_non_regular_leaf_from_a_failed_open(self, tmp_path):
+        os.mkfifo(tmp_path / "pipe")
+        (tmp_path / "real.txt").write_text("x")
+        (tmp_path / "link.txt").symlink_to(tmp_path / "real.txt")
+        with pytest.raises(confined.NotRegularFile):
+            confined.open_regular(tmp_path, ["pipe"], raise_errors=True)
+        with pytest.raises(OSError) as err:
+            confined.open_regular(tmp_path, ["link.txt"], raise_errors=True)
+        assert not isinstance(err.value, confined.NotRegularFile)
+        with pytest.raises(FileNotFoundError):
+            confined.open_regular(tmp_path, ["absent.txt"], raise_errors=True)
+
+    @pytest.mark.parametrize("parts", [[], [""], [".."], ["a/b"], ["a\0b"]])
+    def test_raise_errors_refuses_a_bad_component_with_an_oserror(self, tmp_path, parts):
+        with pytest.raises(OSError):
+            confined.open_regular(tmp_path, parts, raise_errors=True)
+
     def test_create_walk_refuses_a_link(self, tmp_path):
         outside = tmp_path / "outside"
         outside.mkdir()
