@@ -366,6 +366,15 @@ istota workspace reindex --forget-root /mnt/shared                              
 
 The four steps of `istota-stack localize-workspace`, which runs them in order with the stack stopped. `localize` exits 0 copied, 1 refused, 2 copied with entries skipped, 3 stopped on an I/O error; `--check` only answers whether it would start, and `--resume` continues an earlier copy, keeping a destination file of the same size and modification time. `localize-config` keeps the old file as `config.toml.pre-localize`. `moved-note` refuses while the config still names `--from` as the workspace, and `--remove` takes the notes off again when going back; either exits 2 when a user's own `MOVED.md` was left in place. See [Moving to a local workspace](../deployment/moving-to-a-local-workspace.md).
 
+### Memory index
+
+```bash
+istota memory purge-program-output [--samples N]    # Count indexed skill and command output, delete nothing
+istota memory purge-program-output --apply          # Delete it
+```
+
+Skill and command tasks (the feeds poll above all) run a program rather than the model, and their output is not indexed. Earlier releases indexed it as conversation memory. This finds those chunks two ways: by a task row that still exists and names a skill or a command, and by content, a first chunk that is the feeds poll's JSON with no surviving row saying a model wrote it. Output from other jobs older than task retention (seven days by default) matches neither and stays. It prints counts and a few chunk heads per way; check them before `--apply`. The database file keeps its size until a `VACUUM`, which needs the daemon stopped.
+
 ### Nextcloud
 
 ```bash

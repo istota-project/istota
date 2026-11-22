@@ -4318,6 +4318,29 @@ def cmd_workspace_localize_config(args) -> int:
     return 0
 
 
+def cmd_memory_purge_program_output(args) -> int:
+    """Report, and with --apply delete, indexed skill and command output (ISSUE-987)."""
+    from istota.memory.search import purge_program_output
+
+    config = load_config(Path(args.config) if args.config else None)
+    with db.get_db(config.db_path) as conn:
+        report = purge_program_output(conn, apply=args.apply, samples=args.samples)
+    mode = "deleted" if args.apply else "dry run, nothing deleted"
+    print(f"istota memory purge-program-output: {mode}")
+    for arm, found in report["arms"].items():
+        print(f"  {arm}: {found['sources']} sources, {found['chunks']} chunks, "
+              f"{found['text_bytes'] / 1048576:.1f} MiB of text")
+        for sample in found["samples"]:
+            print(f"    {sample['namespace']} {sample['source_id']}: {sample['head']}")
+    print(f"  total: {report['sources']} sources, {report['chunks']} chunks, "
+          f"{report['text_bytes'] / 1048576:.1f} MiB of text")
+    if args.apply:
+        print(f"  deleted {report['deleted_chunks']} chunks; the file shrinks only after a VACUUM")
+    else:
+        print("  run again with --apply to delete them")
+    return 0
+
+
 def cmd_workspace_reindex(args) -> int:
     """Reindex memory files on the current workspace and drop rows under the old root."""
     from istota.maintenance import workspace_localize as wl
@@ -6343,6 +6366,22 @@ def main():
         help="The host directory bound at /data; the repos mounts become binds below it",
     )
 
+    # memory (with subparsers)
+    memory_parser = subparsers.add_parser("memory", help="Maintain the memory search index")
+    memory_subparsers = memory_parser.add_subparsers(dest="memory_action", required=True)
+    memory_purge = memory_subparsers.add_parser(
+        "purge-program-output",
+        help="Find conversation chunks holding a skill's or a command's output; "
+             "delete them with --apply",
+    )
+    memory_purge.add_argument(
+        "--apply", action="store_true",
+        help="Delete what matched. Without it nothing is written",
+    )
+    memory_purge.add_argument(
+        "--samples", type=int, default=3, help="Chunk heads to print per arm (default 3)",
+    )
+
     # workspace (with subparsers)
     ws_parser = subparsers.add_parser(
         "workspace", help="Move a mounted workspace onto local storage (docs/deployment/moving-to-a-local-workspace.md)",
@@ -6625,6 +6664,13 @@ def main():
             "compose-file": cmd_devbox_compose_file,
         }
         rc = devbox_commands[args.devbox_action](args)
+        if rc:
+            sys.exit(rc)
+    elif args.command == "memory":
+        memory_commands = {
+            "purge-program-output": cmd_memory_purge_program_output,
+        }
+        rc = memory_commands[args.memory_action](args)
         if rc:
             sys.exit(rc)
     elif args.command == "workspace":

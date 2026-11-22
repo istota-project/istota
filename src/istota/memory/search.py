@@ -341,22 +341,33 @@ def _delete_source_chunks(
         return 0
 
     chunk_ids = [r[0] for r in rows]
-
-    # Delete from vec table if available
-    if enable_vec_extension(conn):
-        try:
-            for cid in chunk_ids:
-                conn.execute("DELETE FROM memory_chunks_vec WHERE chunk_id = ?", (cid,))
-        except Exception:
-            pass  # vec table might not exist
-
-    # Delete from main table (triggers handle FTS5)
-    conn.execute(
-        "DELETE FROM memory_chunks WHERE user_id = ? AND source_type = ? AND source_id = ?",
-        (user_id, source_type, source_id),
-    )
+    delete_chunk_ids(conn, chunk_ids)
     conn.commit()
     return len(chunk_ids)
+
+
+_DELETE_BATCH = 500
+
+
+def delete_chunk_ids(conn: sqlite3.Connection, chunk_ids: list[int]) -> None:
+    """Delete chunks by id, with their vectors. Leaves the commit to the caller.
+
+    The FTS rows go through the `AFTER DELETE` trigger on `memory_chunks`; the
+    vec table has no trigger, so its rows are deleted here, one at a time so a
+    failure on one does not skip the rest. Batched under SQLite's variable limit.
+    """
+    if not chunk_ids:
+        return
+    if enable_vec_extension(conn):
+        for cid in chunk_ids:
+            try:
+                conn.execute("DELETE FROM memory_chunks_vec WHERE chunk_id = ?", (cid,))
+            except Exception:
+                pass  # vec table may not exist on older deployments
+    for start in range(0, len(chunk_ids), _DELETE_BATCH):
+        batch = chunk_ids[start:start + _DELETE_BATCH]
+        marks = ",".join("?" * len(batch))
+        conn.execute(f"DELETE FROM memory_chunks WHERE id IN ({marks})", batch)
 
 
 # Default ephemeral source types swept by cleanup_old_chunks. user_memory,
@@ -412,22 +423,111 @@ def cleanup_old_chunks(
     if not chunk_ids:
         return 0
 
-    # Cascade to vec table (no trigger exists for memory_chunks_vec). Catch
-    # per-row so a single failure doesn't silently skip the rest.
-    if enable_vec_extension(conn):
-        for cid in chunk_ids:
-            try:
-                conn.execute("DELETE FROM memory_chunks_vec WHERE chunk_id = ?", (cid,))
-            except Exception:
-                pass  # vec table may not exist on older deployments
-
-    id_placeholders = ",".join("?" * len(chunk_ids))
-    conn.execute(
-        f"DELETE FROM memory_chunks WHERE id IN ({id_placeholders})",
-        chunk_ids,
-    )
+    delete_chunk_ids(conn, chunk_ids)
     conn.commit()
     return len(chunk_ids)
+
+
+_PURGE_COMMIT_SOURCES = 1000
+
+
+def _program_output_arms(conn: sqlite3.Connection) -> dict[str, list[tuple[str, str]]]:
+    """The conversation sources each purge arm matches, as (namespace, source_id).
+
+    ``program_task``: the source's task row still exists and ran a skill or a
+    command. ``feeds_envelope``: the first chunk is the feeds poller's JSON
+    envelope and no surviving row says a model wrote it; this is how the many
+    sources whose rows task retention has deleted are found.
+    """
+    from .. import db
+
+    program = conn.execute(
+        "SELECT DISTINCT m.user_id, m.source_id FROM memory_chunks m "
+        "WHERE m.source_type = 'conversation' AND EXISTS ("
+        "SELECT 1 FROM tasks t WHERE t.id = CAST(m.source_id AS INTEGER) "
+        f"AND NOT {db.answered_by_model_sql('t')}) "
+        "ORDER BY m.user_id, m.source_id",
+    ).fetchall()
+    envelope = conn.execute(
+        "SELECT DISTINCT m.user_id, m.source_id FROM memory_chunks m "
+        "WHERE m.source_type = 'conversation' AND m.chunk_index = 0 "
+        "AND m.content LIKE 'Bot: {%' "
+        "AND m.content LIKE '%\"polled\":%' AND m.content LIKE '%\"new_entries\":%' "
+        "AND NOT EXISTS ("
+        "SELECT 1 FROM tasks t WHERE t.id = CAST(m.source_id AS INTEGER) "
+        f"AND {db.answered_by_model_sql('t')}) "
+        "ORDER BY m.user_id, m.source_id",
+    ).fetchall()
+    return {
+        "program_task": [(r[0], r[1]) for r in program],
+        "feeds_envelope": [(r[0], r[1]) for r in envelope],
+    }
+
+
+def purge_program_output(
+    conn: sqlite3.Connection, *, apply: bool, samples: int = 3,
+) -> dict:
+    """Find, and with ``apply`` delete, conversation chunks holding a program's output.
+
+    ISSUE-987: releases before it indexed skill and command tasks' results, the
+    feeds poller's JSON above all. A matched source loses every chunk, so a long
+    envelope's continuation chunks go with its first. Without ``apply`` nothing
+    is written, and the report gives counts per arm and a few chunk heads to
+    check the match against before a real run. The file keeps its size until a
+    `VACUUM`; the freed pages are reused by later inserts.
+    """
+    arms = _program_output_arms(conn)
+    stats: dict[tuple[str, str], tuple[list[int], int]] = {}
+    for sources in arms.values():
+        for source in sources:
+            if source in stats:
+                continue
+            rows = conn.execute(
+                "SELECT id, LENGTH(content) FROM memory_chunks "
+                "WHERE user_id = ? AND source_type = 'conversation' AND source_id = ?",
+                source,
+            ).fetchall()
+            stats[source] = ([r[0] for r in rows], sum(r[1] or 0 for r in rows))
+
+    report: dict = {"applied": apply, "arms": {}}
+    for arm, sources in arms.items():
+        heads = []
+        for namespace, source_id in sources[:max(samples, 0)]:
+            row = conn.execute(
+                "SELECT content FROM memory_chunks WHERE user_id = ? "
+                "AND source_type = 'conversation' AND source_id = ? "
+                "ORDER BY chunk_index LIMIT 1",
+                (namespace, source_id),
+            ).fetchone()
+            head = " ".join((row[0] if row else "").split())[:120]
+            heads.append({"namespace": namespace, "source_id": source_id, "head": head})
+        report["arms"][arm] = {
+            "sources": len(sources),
+            "chunks": sum(len(stats[s][0]) for s in sources),
+            "text_bytes": sum(stats[s][1] for s in sources),
+            "samples": heads,
+        }
+    report["sources"] = len(stats)
+    report["chunks"] = sum(len(ids) for ids, _ in stats.values())
+    report["text_bytes"] = sum(size for _, size in stats.values())
+
+    deleted = 0
+    if apply:
+        pending: list[int] = []
+        for done, (ids, _size) in enumerate(stats.values(), start=1):
+            pending.extend(ids)
+            # Committed in batches so the daemon's writers are not held off
+            # for the whole run.
+            if done % _PURGE_COMMIT_SOURCES == 0:
+                delete_chunk_ids(conn, pending)
+                conn.commit()
+                deleted += len(pending)
+                pending = []
+        delete_chunk_ids(conn, pending)
+        conn.commit()
+        deleted += len(pending)
+    report["deleted_chunks"] = deleted
+    return report
 
 
 def index_conversation(
@@ -776,13 +876,7 @@ def delete_namespace_chunks(conn: sqlite3.Connection, namespace: str) -> None:
     rows = conn.execute(
         "SELECT id FROM memory_chunks WHERE user_id = ?", (namespace,),
     ).fetchall()
-    if rows and enable_vec_extension(conn):
-        try:
-            for row in rows:
-                conn.execute("DELETE FROM memory_chunks_vec WHERE chunk_id = ?", (row[0],))
-        except Exception:
-            pass  # vec table might not exist
-    conn.execute("DELETE FROM memory_chunks WHERE user_id = ?", (namespace,))
+    delete_chunk_ids(conn, [row[0] for row in rows])
 
 
 def reindex_all(
@@ -796,6 +890,8 @@ def reindex_all(
     Only the user's own turns go under their namespace, as in the scheduler's
     auto-index: a guest's or a correspondent's text would be recalled back into
     their private tasks.
+    A skill or command task's result is a program's output and is left out, as
+    there too (ISSUE-987).
 
     Returns stats dict with counts.
     """
@@ -812,7 +908,7 @@ def reindex_all(
     rows = conn.execute(
         "SELECT id, prompt, result FROM tasks "
         "WHERE user_id = ? AND status = 'completed' AND created_at >= ? "
-        "AND incognito = 0 ORDER BY id",
+        f"AND incognito = 0 AND {db.answered_by_model_sql()} ORDER BY id",
         (user_id, since),
     ).fetchall()
 

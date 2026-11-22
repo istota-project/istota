@@ -4520,12 +4520,14 @@ def _process_one_task(
                 # a turn that broke, so repeated failures would seed recall with
                 # near-identical text that never answered anything (ISSUE-211).
                 # An assignment wake's answer is its wake row's summary and
-                # goes nowhere else, conversation recall included.
+                # goes nowhere else, conversation recall included. A skill or
+                # command task's result is a program's output (ISSUE-987).
                 if (
                     config.memory_search.enabled
                     and config.memory_search.auto_index_conversations
                     and not task.heartbeat_silent
                     and not task.incognito
+                    and db.answered_by_model(task)
                     and not is_no_final_answer(result)
                     and task.source_type not in NO_DELIVERY_SOURCE_TYPES
                 ):

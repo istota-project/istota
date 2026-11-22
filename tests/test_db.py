@@ -449,10 +449,10 @@ class TestTaskColumnRoundTrip:
         defaults.update(overrides)
         return db.create_task(conn, **defaults)
 
-    def _assert_dispatch_preserved(self, task):
+    def _assert_dispatch_preserved(self, task, *, skill="feeds", skill_args='["run-scheduled"]'):
         assert task is not None
-        assert task.skill == "feeds"
-        assert task.skill_args == '["run-scheduled"]'
+        assert task.skill == skill
+        assert task.skill_args == skill_args
         assert task.model == "claude-sonnet-4-6"
         assert task.effort == "high"
         assert task.talk_delivery_token == "real-talk-room"
@@ -532,33 +532,42 @@ class TestTaskColumnRoundTrip:
             assert len(stale) == 1
             self._assert_dispatch_preserved(stale[0])
 
+    # These two readers feed memory, so they leave a skill task out (ISSUE-987):
+    # the round trip is of the same rich row with no skill.
     def test_get_completed_channel_tasks_since(self, db_path):
         with db.get_db(db_path) as conn:
-            tid = self._create_rich(conn, conversation_token="ch-room")
-            conn.execute(
-                "UPDATE tasks SET status='completed', result='ok', "
-                "completed_at=datetime('now') WHERE id=?",
-                (tid,),
-            )
+            for skill in ("feeds", None):
+                tid = self._create_rich(
+                    conn, conversation_token="ch-room", skill=skill,
+                    skill_args='["run-scheduled"]' if skill else None,
+                )
+                conn.execute(
+                    "UPDATE tasks SET status='completed', result='ok', "
+                    "completed_at=datetime('now') WHERE id=?",
+                    (tid,),
+                )
             tasks = db.get_completed_channel_tasks_since(
                 conn, "ch-room", "2000-01-01T00:00:00",
             )
             assert len(tasks) == 1
-            self._assert_dispatch_preserved(tasks[0])
+            self._assert_dispatch_preserved(tasks[0], skill=None, skill_args=None)
 
     def test_get_completed_tasks_since(self, db_path):
         with db.get_db(db_path) as conn:
-            tid = self._create_rich(conn)
-            conn.execute(
-                "UPDATE tasks SET status='completed', result='ok', "
-                "completed_at=datetime('now') WHERE id=?",
-                (tid,),
-            )
+            for skill in ("feeds", None):
+                tid = self._create_rich(
+                    conn, skill=skill, skill_args='["run-scheduled"]' if skill else None,
+                )
+                conn.execute(
+                    "UPDATE tasks SET status='completed', result='ok', "
+                    "completed_at=datetime('now') WHERE id=?",
+                    (tid,),
+                )
             tasks = db.get_completed_tasks_since(
                 conn, "user1", "2000-01-01T00:00:00",
             )
             assert len(tasks) == 1
-            self._assert_dispatch_preserved(tasks[0])
+            self._assert_dispatch_preserved(tasks[0], skill=None, skill_args=None)
 
     def test_list_tasks(self, db_path):
         with db.get_db(db_path) as conn:
