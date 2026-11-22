@@ -812,7 +812,8 @@ def drop_job_approvals(
     conn: sqlite3.Connection, user_id: str, subject: str, *, keep_digest: str,
 ) -> list[str]:
     """Delete the `open:` and `public:` rows that do not name this digest, and
-    return which kinds went. Host and `skill:` entries stay."""
+    return which kinds went. Host and `skill:` entries stay, on purpose (#984):
+    see "Grants that survive an edit" in docs/architecture/egress.md."""
     dropped = []
     for kind in JOB_REQUESTS:
         cursor = conn.execute(
