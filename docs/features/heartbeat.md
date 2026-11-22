@@ -49,6 +49,8 @@ When a check fails, the alert is routed through `surface_for_purpose(config, use
 
 If the resolved channel isn't configured, the alert is skipped with a warning and the consecutive-error count is *not* incremented — an undeliverable alert is a deployment gap, not a failing check.
 
+A check's `channel` and the `conversation_token` setting may name only rooms the user is a member of now, the same rule a CRON.md job's room follows (see [scheduling](scheduling.md)). An alert naming any other room, or a room the user has since left, is not sent, and the daemon logs a warning naming the check.
+
 For an immediate health check, independent of the heartbeat schedule, run `istota doctor` on the host or open the admin Health pane. There is no chat command for it.
 
 ## Configuration

@@ -238,9 +238,9 @@ Natural-language reminders are implemented as one-shot cron entries (`once = tru
 
 ## Managing jobs
 
-Settings, Scheduled jobs lists your jobs with each one's schedule, state, access, last run and failures in a row. New job adds one, and opening a job shows its form, its last error and its Network access card. Saving writes CRON.md, and the job shows as waiting for the next sync until the daemon reads it, within about a minute. From the list or the job's page you can run a job now, disable or enable it, and delete it, which takes it out of CRON.md too. Enabling a job Istota suspended after repeated failures starts it again.
+Settings, Scheduled jobs lists your jobs with each one's schedule, timezone, state, access, last run and failures in a row. The Timezone column shows a job's own zone, or "User" for a job that follows yours. New job adds one, and opening a job shows its form, its last error and its Network access card. Saving writes CRON.md, and the job shows as waiting for the next sync until the daemon reads it, within about a minute. From the list or the job's page you can run a job now, disable or enable it, and delete it, which takes it out of CRON.md too. Enabling a job Istota suspended after repeated failures starts it again.
 
-The form covers what CRON.md authors, for whoever may set it. Model and run holds the model and effort, with a brain and provider for an admin. Publish holds the shared target and trust, for someone who may publish. Asks ahead of its first run holds the `egress` entries. A model or brain you may no longer pick stays as the file has it until you change or remove it, and the form says the job does not use it.
+The form covers what CRON.md authors, for whoever may set it. Timezone, beside Schedule, is "Your timezone" or any zone name, and the job's summary shows its next run in that zone. Model and run holds the model and effort, with a brain and provider for an admin. Publish holds the shared target and trust, for someone who may publish. Asks ahead of its first run holds the `egress` entries. A model or brain you may no longer pick stays as the file has it until you change or remove it, and the form says the job does not use it.
 
 If you change what a job dispatches or where it publishes and it holds an approval, the page asks whether to keep that access for the new text or save and run limited. Renaming a job starts its network access over, since a new name is a new job, and the page says so first. While CRON.md has a job that does not load, every job is read only, because a rewrite would drop the one that failed.
 
@@ -254,7 +254,7 @@ Some rows have fewer actions:
 In Talk, use `!cron` to list, enable, or disable scheduled jobs:
 
 ```
-!cron              # List all jobs with status
+!cron              # List all jobs with status, and the zone of a job that has its own
 !cron enable NAME  # Re-enable a disabled job, or lift a suspension
 !cron disable NAME # Disable a job
 ```

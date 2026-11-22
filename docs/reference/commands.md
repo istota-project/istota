@@ -26,7 +26,7 @@ Commands prefixed with `!` are intercepted before task creation and handled sync
 | `!memory channel` | Show CHANNEL.md contents |
 | `!memory facts [ENTITY]` | Show knowledge graph facts, optionally filtered to one subject |
 | `!models` | List available model aliases and what they resolve to |
-| `!cron` | List scheduled jobs with status |
+| `!cron` | List scheduled jobs with status, and `tz: <zone>` for a job with its own timezone |
 | `!cron enable NAME` | Re-enable a disabled job |
 | `!cron disable NAME` | Disable a job |
 | `!export [markdown\|text]` | Export conversation history to a file |
