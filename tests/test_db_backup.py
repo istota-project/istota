@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import stat
 import sys
+import time
 import tomllib
 from datetime import date as _date
 from datetime import timedelta
@@ -591,6 +593,97 @@ class TestStagedSnapshotAndManifest:
         (dated / "alice" / ".location.db.abc123").write_bytes(b"partial")
 
         assert db_backup._good_db_relpaths(dated) == {"framework/istota.db", "alice/location.db"}
+
+
+class TestALostRename:
+    """#986: on the rclone mount the framework snapshot's rename found no
+    staging file to move, while the bytes it had written went on to upload
+    under the staging name."""
+
+    def _seeded(self, tmp_path):
+        cfg = _config(tmp_path)
+        db.init_db(cfg.db_path)
+        _add_place(_seed_module_db(cfg, "alice", "location"))
+        return cfg
+
+    def test_a_rename_that_finds_nothing_is_retried_once(self, tmp_path, monkeypatch):
+        from istota.lib import atomic_write
+
+        cfg = self._seeded(tmp_path)
+        real_replace = atomic_write.os.replace
+        calls = []
+
+        def _lost_once(src, dst, *a, **kw):
+            calls.append(Path(dst).name)
+            if Path(dst).name == "istota.db" and calls.count("istota.db") == 1:
+                raise FileNotFoundError(2, "No such file or directory", str(src))
+            return real_replace(src, dst, *a, **kw)
+
+        monkeypatch.setattr(atomic_write.os, "replace", _lost_once)
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY)
+
+        framework = next(r for r in results if r["label"] == "framework")
+        assert framework["status"] == "ok"
+        assert calls.count("istota.db") == 2
+        dated = _root(tmp_path) / FIXED_DAY
+        assert (dated / "framework" / "istota.db").is_file()
+        counts = json.loads((dated / "manifest.json").read_text())["rows"]
+        assert "framework/istota.db" in counts
+
+    def test_a_second_lost_rename_is_an_error(self, tmp_path, monkeypatch):
+        from istota.lib import atomic_write
+
+        cfg = self._seeded(tmp_path)
+        real_replace = atomic_write.os.replace
+
+        def _always_lost(src, dst, *a, **kw):
+            if Path(dst).name == "istota.db":
+                raise FileNotFoundError(2, "No such file or directory", str(src))
+            return real_replace(src, dst, *a, **kw)
+
+        monkeypatch.setattr(atomic_write.os, "replace", _always_lost)
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY)
+
+        framework = next(r for r in results if r["label"] == "framework")
+        assert framework["status"] == "error"
+        loc = next(r for r in results if r["label"] == "location:alice")
+        assert loc["status"] == "ok"
+
+    def test_a_staging_file_left_on_an_earlier_run_is_removed(self, tmp_path):
+        cfg = self._seeded(tmp_path)
+        db_backup.backup_databases(cfg, today="2026-07-11")
+        earlier = _root(tmp_path) / "2026-07-11"
+        old = time.time() - 2 * 3600
+        leftovers = [
+            earlier / "framework" / ".istota.db.k3x9q2a_",
+            earlier / "alice" / ".location.db.suspect.ab12cd34",
+            earlier / ".manifest.json.zz99yy88",
+        ]
+        kept = [
+            # Written within the hour: a run beside this one may own it.
+            earlier / "alice" / ".location.db.fresh123",
+            # Not a name the upload writes.
+            earlier / "alice" / ".notes",
+            earlier / "alice" / ".location.db.toolongsuffix",
+        ]
+        for path in leftovers + kept:
+            path.write_bytes(b"partial")
+        for path in leftovers + kept[1:]:
+            os.utime(path, (old, old))
+        target = tmp_path / "outside.db"
+        target.write_bytes(b"keep me")
+        link = earlier / "alice" / ".location.db.lnk12345"
+        link.symlink_to(target)
+        os.utime(link, (old, old), follow_symlinks=False)
+
+        db_backup.backup_databases(cfg, today=FIXED_DAY)
+
+        assert [p for p in leftovers if p.exists()] == []
+        assert all(p.exists() for p in kept)
+        assert link.is_symlink() and target.read_bytes() == b"keep me"
+        assert (earlier / "framework" / "istota.db").exists()
+        assert (earlier / "alice" / "location.db").exists()
+        assert (earlier / "manifest.json").exists()
 
 
 class TestRetentionProtectsNewestGood:
