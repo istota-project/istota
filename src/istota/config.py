@@ -4030,6 +4030,8 @@ EXEC_SOCKET_NAME = "exec.sock"
 #: ``tests/test_task_control_dir.py``, the same way `sandbox_cache_sweeper`
 #: restates the cache subdirectory names.
 _CONTROL_DIR_NAME = ".control"
+#: ``executor.RESTRICTED_TEMP_DIR_NAME``, restated for the same reason.
+_RESTRICTED_TEMP_DIR_NAME = ".restricted"
 
 #: Said once per process per entry, not once per ``load_config``: the skill proxy spawns a host-side CLI per model tool call and each
 #: one loads the config. Keyed on the entry as written, so an operator who
@@ -4086,6 +4088,7 @@ def _warn_ro_paths_over_control_tree(config: "Config") -> None:
         return
     try:
         control_root = Path(config.temp_dir).resolve() / _CONTROL_DIR_NAME
+        restricted_root = Path(config.temp_dir).resolve() / _RESTRICTED_TEMP_DIR_NAME
     except (OSError, ValueError):  # pragma: no cover - an unresolvable temp_dir
         return
     for entry in config.security.sandbox_ro_paths:
@@ -4112,6 +4115,18 @@ def _warn_ro_paths_over_control_tree(config: "Config") -> None:
                 "need; the control directory a task needs is bound for it "
                 "already.",
                 entry, control_root,
+                log=first,
+            )
+        elif paths_overlap(resolved, restricted_root):
+            first = entry not in _RO_PATH_CONTROL_TREE_WARNED
+            _RO_PATH_CONTROL_TREE_WARNED.add(entry)
+            report_problem(
+                "warning", ("security", "sandbox_ro_paths"),
+                "[security] sandbox_ro_paths entry %r would bind the restricted "
+                "task temp dirs (%s) into every sandbox: a guest's, a "
+                "correspondent's and other restricted tasks' files and pending "
+                "operations are there (ISSUE-980). Narrow the entry.",
+                entry, restricted_root,
                 log=first,
             )
 

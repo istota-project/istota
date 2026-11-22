@@ -15,7 +15,7 @@ No `on_progress` parameter (task-event-streaming spec): the scheduler passes an 
 Returns `(success, result_text, actions_taken_json, execution_trace_json)`. The trace is interleaved `{"type": "tool"|"text", "text": …}` entries; a Bash `tool` entry also carries `"raw"`, the verbatim command (`_tool_invocation` in `agent/events.py`), so playbooks quote the real invocation (ISSUE-174 fix 1).
 
 ### Flow
-1. **Temp dirs**: `temp_dir/user_id`, plus the control dir `temp_dir/.control/user_id/task_{id}` (`ensure_task_control_dir`, 0700 per level). Failure is a **returned** failure, never a raise: `process_one_task` handles no exception from `execute_task`.
+1. **Temp dirs**: `temp_dir/user_id`, or for a restricted task `temp_dir/.restricted/user_id/{room,emissary}-task-<id>` (`ensure_task_temp_dir`, ISSUE-980), plus the control dir `temp_dir/.control/user_id/task_{id}` (`ensure_task_control_dir`, 0700 per level). Failure is a **returned** failure, never a raise: `process_one_task` handles no exception from `execute_task`.
 1b. **Deferred briefing prompt** (ISSUE-143): for a briefing task, `build_deferred_briefing_prompt` builds the prompt here, off the dispatch thread. Failure keeps the placeholder.
 1c. **Attachments**: `_pre_transcribe_attachments()` then `prepare_image_attachments()`, before selection and assembly so all see the same paths and OCR.
 2. **Resources**: DB + config into `db.UserResource`s.

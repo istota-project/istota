@@ -218,13 +218,14 @@ def _user_md_path() -> Path:
 
     Refusing rather than degrading, because a write must not silently land
     somewhere else and a `show` must not answer with a file the user did not
-    name. A link that stays *inside* the user's own tree passes: it leads
-    nowhere they could not already reach, and refusing it would break someone
-    who reorganised their own workspace.
+    name.
 
-    The **resolved** path comes back so a caller cannot re-walk by the
-    unresolved name — the check and the write are separated by a lock
-    acquisition and a read.
+    The path is the lock key and what messages name. The read and the write
+    do not open it: they walk `Target.walk` from the user's root with no link
+    followed, because a path checked here and opened after a lock acquisition
+    and a read let a swap of `config` in between reach another user's file
+    (ISSUE-981). So a link inside the user's own tree, which this check
+    passes, is refused there.
     """
     d = _user_config_dir()
     resolved = contained_overlay_dir(d, _mount_path() / "Users" / _user_id())
@@ -386,6 +387,45 @@ class Target(NamedTuple):
     kind: str
     group_id: str | None = None
     room_token: str | None = None
+    #: ``(root, parts)`` for a file in the user's own tree: every read and
+    #: write walks ``parts`` from ``root`` with no link followed and goes
+    #: through that descriptor, never ``path`` (ISSUE-981). ``path`` is the
+    #: lock key and what messages name.
+    walk: tuple[Path, tuple[str, ...]] | None = None
+
+
+def _user_walk(*below: str) -> tuple[Path, tuple[str, ...]]:
+    return _mount_path() / "Users" / _user_id(), (_bot_dir(), "config", *below)
+
+
+def _open_walk(
+    walk: tuple[Path, tuple[str, ...]], *, create: bool = False,
+) -> tuple[int | None, bool]:
+    """``(fd, refused)`` on the walked directory: ``(None, False)`` when it does
+    not exist, ``(None, True)`` when a component is a link or not a directory."""
+    from istota.sandbox.confined import open_dir, open_or_create_dirs
+
+    root, parts = walk
+    try:
+        if create:
+            return open_or_create_dirs(root, parts), False
+        fd = open_dir(root, *parts, raise_errors=True)
+    except FileNotFoundError:
+        # On the create path a component that vanished mid-walk was renamed
+        # away under it, which is a refusal: there is no directory to write in.
+        return None, create
+    except (OSError, ValueError):
+        return None, True
+    return fd, fd is None
+
+
+def _open_walk_or_exit(walk: tuple[Path, tuple[str, ...]], *, create: bool = False) -> int | None:
+    fd, refused = _open_walk(walk, create=create)
+    if refused:
+        root, parts = walk
+        _err("user_md_outside_user_tree", path=_mount_relative(root.joinpath(*parts)))
+        sys.exit(1)
+    return fd
 
 
 def _resolve_target(args, *, verb: str) -> Target:
@@ -404,12 +444,12 @@ def _resolve_target(args, *, verb: str) -> Target:
         sys.exit(1)
     if room:
         path, room_token = _room_notes_path(room)
-        return Target(path, _ROOM, room_token=room_token)
+        return Target(path, _ROOM, room_token=room_token, walk=_user_walk("rooms"))
     if group_id is not None:
         return Target(_group_md_path(group_id), _GROUP, group_id)
     if token:
         return Target(_channel_md_path(token), _CHANNEL)
-    return Target(_user_md_path(), _USER)
+    return Target(_user_md_path(), _USER, walk=_user_walk())
 
 
 def _config_for_audit():
@@ -439,7 +479,10 @@ def _read_cap(target: Target) -> int:
     return _MAX_ROOM_NOTES_BYTES if target.kind == _ROOM else _MAX_USER_MD_READ_BYTES
 
 
-def _read_text(path: Path, max_bytes: int = _MAX_USER_MD_READ_BYTES) -> str:
+def _read_text(
+    path: Path, max_bytes: int = _MAX_USER_MD_READ_BYTES,
+    walk: tuple[Path, tuple[str, ...]] | None = None,
+) -> str:
     """Read USER.md or CHANNEL.md, refusing anything that is not a plain file.
 
     Through `_loader.read_overlay_bytes`, which is where this hardening already
@@ -464,7 +507,18 @@ def _read_text(path: Path, max_bytes: int = _MAX_USER_MD_READ_BYTES) -> str:
     verbatim rather than forked — the `path` on the envelope is what says which
     document was refused.
     """
-    raw, reason, _size = read_overlay_bytes(path, max_bytes=max_bytes)
+    if walk is None:
+        raw, reason, _size = read_overlay_bytes(path, max_bytes=max_bytes)
+    else:
+        dir_fd = _open_walk_or_exit(walk)
+        if dir_fd is None:
+            return ""
+        try:
+            raw, reason, _size = read_overlay_bytes(
+                Path(path.name), max_bytes=max_bytes, dir_fd=dir_fd,
+            )
+        finally:
+            os.close(dir_fd)
     if reason is not None:
         _err(reason, path=_mount_relative(path))
         sys.exit(1)
@@ -476,7 +530,9 @@ def _read_text(path: Path, max_bytes: int = _MAX_USER_MD_READ_BYTES) -> str:
         sys.exit(1)
 
 
-def _atomic_write(path: Path, text: str) -> None:
+def _atomic_write(
+    path: Path, text: str, walk: tuple[Path, tuple[str, ...]] | None = None,
+) -> None:
     """Replace `path` with `text` via a uniquely-named staging file.
 
     The staging name is per-writer rather than `<name>.tmp`, because that fixed
@@ -492,8 +548,20 @@ def _atomic_write(path: Path, text: str) -> None:
     is model-plantable, and the model is the party that invoked this CLI, so it
     knows when the window between the close and a path-based `chmod` opens.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_text_atomic(path, text, mode=0o644)
+    if walk is None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_text_atomic(path, text, mode=0o644)
+        return
+    from istota.lib.atomic_write import replace_at
+
+    dir_fd = _open_walk_or_exit(walk, create=True)
+    if dir_fd is None:  # unreachable: the create path exits rather than answer None
+        _err("user_md_outside_user_tree", path=_mount_relative(path))
+        sys.exit(1)
+    try:
+        replace_at(dir_fd, path.name, text.encode("utf-8"), mode=0o644)
+    finally:
+        os.close(dir_fd)
 
 
 def _mount_relative(path: Path) -> str:
@@ -542,22 +610,27 @@ def _audit_for(args, op: dict, outcome_or_reason: str, *,
         )
     size = None
     extra = None
-    # `target.path` **is** the USER.md path, already resolved once by
-    # `_resolve_target`. Calling `_user_md_path()` again here would re-walk
-    # `config/` after the write has landed and after `_update_last_seen`
-    # fingerprinted it — and it exits on a refusal, so a link swapped into that
-    # window made a successful, recorded append report an error and exit 1,
-    # which the model reads as a failure and retries. It is also a redundant
-    # realpath walk on every single write (ISSUE-339).
+    # Not `_user_md_path()` again, which exits on a refusal: a link swapped in
+    # after the write landed would make a successful, recorded append report an
+    # error and exit 1, which the model reads as a failure and retries
+    # (ISSUE-339). The walk here records a refusal instead (ISSUE-981).
     #
     # The read goes through the hardened reader like everything else here. A
     # refusal is recorded *as such* rather than silently leaving `size` None,
     # which is what a missing file records — the audit trail feeds
     # `detect_bypass_write`, so "absent" and "unreadable" must not collapse into
     # one value on exactly the files that were tampered with.
-    raw, reason, _size = read_overlay_bytes(
-        target.path, max_bytes=_MAX_USER_MD_READ_BYTES
-    )
+    raw, reason = None, None
+    dir_fd, refused = _open_walk(target.walk) if target.walk is not None else (None, False)
+    if refused:
+        reason = "user_md_outside_user_tree"
+    if dir_fd is not None:
+        try:
+            raw, reason, _size = read_overlay_bytes(
+                Path(target.path.name), max_bytes=_MAX_USER_MD_READ_BYTES, dir_fd=dir_fd,
+            )
+        finally:
+            os.close(dir_fd)
     if reason is not None:
         extra = {"user_md_read_refused": reason}
     elif raw:
@@ -606,7 +679,7 @@ def _group_config():
 
 def _read_target(target: Target) -> str:
     if target.kind != _GROUP:
-        return _read_text(target.path, _read_cap(target))
+        return _read_text(target.path, _read_cap(target), target.walk)
     from istota.storage import read_group_memory_result
     result = read_group_memory_result(_group_config(), target.group_id)
     if result["status"] == "refused":
@@ -663,7 +736,7 @@ def _do_op(args, op_dict: dict, *, verb: str) -> int:
                     if not write_group_memory(_group_config(), target.group_id, new_text):
                         return _err("memory_write_failed")
                 else:
-                    _atomic_write(path, new_text)
+                    _atomic_write(path, new_text, target.walk)
                 _update_last_seen(path, new_text, target)
             from istota.workspace.text_files import revision
             recorded = _audit_for(args, op_dict, outcome, target=target, applied=True,

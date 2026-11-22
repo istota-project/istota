@@ -82,8 +82,8 @@ def run_confined_command(
         build_bwrap_cmd,
         public_posture_refusal,
         record_egress_posture,
+        ensure_task_temp_dir,
         record_egress_refusals,
-        task_temp_dir,
     )
     from istota.lib.egress_log import REFUSED_LOG_NAME
     from istota.sandbox import cgroup as task_cgroup
@@ -107,12 +107,9 @@ def run_confined_command(
     from_reach = egress_hosts is FROM_TASK_REACH
     limit = reach.egress_hosts if from_reach else egress_hosts
     egress_log = control_dir / REFUSED_LOG_NAME if from_reach else None
-    temp_dir = task_temp_dir(config, task, restricted=reach.restricted)
-    # Bound read-write under this name, so a planted link would decide what the
-    # namespace sees. Checked before the mkdir, as `execute_task` does.
-    if temp_dir.is_symlink():
-        raise OSError(f"task temp directory {temp_dir} is a symlink")
-    temp_dir.mkdir(parents=True, exist_ok=True)
+    # Bound read-write by name, so it is made where `execute_task` makes it:
+    # a restricted one under the daemon-only `.restricted` root (ISSUE-980).
+    temp_dir = ensure_task_temp_dir(config, task, restricted=reach.restricted)
 
     user_resources: list = []
     group_ids: list[str] = []

@@ -202,6 +202,8 @@ These files live in the user's Nextcloud folder at `/Users/{user_id}/{bot_dir}/c
 | `HEARTBEAT.md` | Health monitoring checks | [Heartbeat](../features/heartbeat.md) |
 | `skills/<name>.md` | Per-skill instruction overlay (one file per skill) | [below](#per-skill-overlays) |
 
+`config/` and the bot folder above it have to be real directories, not symlinks, including a symlink that stays inside your own workspace. Istota opens the folder and reads and writes these files through it, because the folder is writable from inside the sandbox and a path checked first and opened afterwards can be repointed in between. With a link there, none of these files is read or written.
+
 There is no per-user persona: the operator's `PERSONA.md` at the file root is the bot's character for everyone (see [Persona](persona.md)). A user's preferences about language, length or tone, and any standing instructions for them, go in their `USER.md`.
 
 ### TASKS.md format

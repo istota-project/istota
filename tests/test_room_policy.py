@@ -709,8 +709,10 @@ class TestReviewFixes:
             own = db.get_task(conn, _member_turn(conn, config, "alice", "hi").task_id)
         base = get_user_temp_dir(config, "alice")
         assert task_temp_dir(config, own) == base
-        assert task_temp_dir(config, guest).parent == base
-        assert task_temp_dir(config, guest) != base
+        # Beside the per-user dir, not in it: no task can write its parent (ISSUE-980).
+        assert task_temp_dir(config, guest).parent.name == "alice"
+        assert task_temp_dir(config, guest).parent.parent.name == ".restricted"
+        assert not task_temp_dir(config, guest).is_relative_to(base)
 
 
 # ---------------------------------------------------------------------------

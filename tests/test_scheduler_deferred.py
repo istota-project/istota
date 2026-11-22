@@ -1027,16 +1027,16 @@ def mail_config(config):
 def _strangers_turn(config):
     """A stranger's mail through the poller, as the run leaves it: the task's own
     directory exists, because `execute_task` made one."""
-    from istota.executor import RESTRICTED_DIR_PREFIX, get_user_temp_dir
+    from istota.executor import ensure_task_temp_dir
 
     from .test_email_thread_rooms import _poll
 
     (task_id,) = _poll(config, sender=STRANGER, to=("bot+alice@test.com",),
                        message_id="<s1@example.com>", body="Are you open Sunday?")
-    (get_user_temp_dir(config, "alice") / f"{RESTRICTED_DIR_PREFIX}{task_id}").mkdir(
-        parents=True, exist_ok=True)
     with db.get_db(config.db_path) as conn:
-        return db.get_task(conn, task_id)
+        task = db.get_task(conn, task_id)
+    ensure_task_temp_dir(config, task, restricted=True)
+    return task
 
 
 def _own_turn(config, output_target=None):

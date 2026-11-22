@@ -13,6 +13,7 @@ import struct
 import threading
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from pathlib import Path
 
 logger = logging.getLogger("istota.memory_search")
 
@@ -827,26 +828,43 @@ def reindex_all(
                 stats["conversations"] += 1
                 stats["chunks"] += n
 
-    # Reindex memory files if mount available
+    # Reindex memory files if mount available. Every read below is the
+    # hardened one, through a directory walked with no link followed: these
+    # trees are written from the user's own sandbox, and a plain `read_text`
+    # by name indexed whatever a planted link pointed at, another user's
+    # memory included, where recall then served it (ISSUE-981).
     if config.workspace_path:
+        from istota.storage import (  # noqa: PLC0415 - import cycle
+            dated_memory_names,
+            open_walked_dir,
+            read_regular_file,
+            read_user_config_text,
+        )
+
+        from istota.sandbox.user_scope import scoped_user_dir  # noqa: PLC0415
+
         memories_dir = config.workspace_path / f"Users/{user_id}/memories"
-        if memories_dir.is_dir():
-            for path in sorted(memories_dir.glob("*.md")):
-                content = path.read_text()
-                if content.strip():
-                    n = index_file(conn, user_id, str(path), content, "memory_file")
-                    if n > 0:
-                        stats["memory_files"] += 1
-                        stats["chunks"] += n
+        user_root = scoped_user_dir(config.workspace_path / "Users", user_id)
+        dir_fd, _absent = open_walked_dir(user_root, "memories")
+        if dir_fd is not None:
+            try:
+                for name in dated_memory_names(dir_fd):
+                    content, _reason = read_regular_file(Path(name), dir_fd=dir_fd)
+                    if content and content.strip():
+                        n = index_file(conn, user_id, str(memories_dir / name), content, "memory_file")
+                        if n > 0:
+                            stats["memory_files"] += 1
+                            stats["chunks"] += n
+            finally:
+                os.close(dir_fd)
 
         # Index USER.md
         user_md = config.workspace_path / f"Users/{user_id}/{config.bot_dir_name}/config/USER.md"
-        if user_md.is_file():
-            content = user_md.read_text()
-            if content.strip():
-                n = index_file(conn, user_id, str(user_md), content, "user_memory")
-                if n > 0:
-                    stats["chunks"] += n
+        content, _reason = read_user_config_text(config, user_id, "USER.md")
+        if content and content.strip():
+            n = index_file(conn, user_id, str(user_md), content, "user_memory")
+            if n > 0:
+                stats["chunks"] += n
 
         n_files, n_chunks = reindex_skill_overlays(conn, config, user_id)
         stats["skill_overlays"] = n_files
@@ -866,24 +884,30 @@ def reindex_all(
                     continue
                 channel_user_id = f"channel:{token}"
                 memories_dir = token_dir / "memories"
-                if memories_dir.is_dir():
-                    for path in sorted(memories_dir.glob("*.md")):
-                        content = path.read_text()
-                        if content.strip():
+                dir_fd, _absent = open_walked_dir(channels_dir, token, "memories")
+                if dir_fd is not None:
+                    try:
+                        for name in dated_memory_names(dir_fd):
+                            content, _reason = read_regular_file(Path(name), dir_fd=dir_fd)
+                            if not (content and content.strip()):
+                                continue
                             n = index_file(
                                 conn,
                                 channel_user_id,
-                                str(path),
+                                str(memories_dir / name),
                                 content,
                                 "channel_memory",
                             )
                             if n > 0:
                                 stats["channel_memories"] += 1
                                 stats["chunks"] += n
+                    finally:
+                        os.close(dir_fd)
                 # Durable CHANNEL.md — durable like USER.md, refreshed on edit.
+                # The leaf `O_NOFOLLOW`: no task can rename the room's folder.
                 channel_md = token_dir / "CHANNEL.md"
-                if channel_md.is_file():
-                    content = channel_md.read_text()
+                content, _reason = read_regular_file(channel_md)
+                if content:
                     if content.strip():
                         n = index_file(
                             conn,

@@ -1173,11 +1173,12 @@ class TestCurateUserMemory:
 
         real_write = sleep_cycle_module.write_regular_file
 
-        def swap_then_write(path, text):
-            if path == user_md and user_md.exists() and not user_md.is_symlink():
+        def swap_then_write(path, text, **kwargs):
+            # The write is a name in the config dir's descriptor (ISSUE-981).
+            if os.path.basename(path) == "USER.md" and user_md.exists() and not user_md.is_symlink():
                 user_md.unlink()
                 user_md.symlink_to(victim)
-            return real_write(path, text)
+            return real_write(path, text, **kwargs)
 
         mock_run.return_value = (True, '{"ops": [{"op": "append", "heading": "Preferences", "line": "- new fact"}]}')
         with patch.object(sleep_cycle_module, "write_regular_file", swap_then_write):

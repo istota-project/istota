@@ -1448,7 +1448,7 @@ def _write_cron_md(
     to. Harmless and idempotent (``_write_generated_prompt`` compares content
     on a collision), but it is not evidence the write landed.
     """
-    from .storage import resolve_user_config_dir, write_regular_file  # noqa: PLC0415
+    from .storage import write_user_config_file  # noqa: PLC0415
 
     try:
         if externalize_prompts:
@@ -1459,21 +1459,9 @@ def _write_cron_md(
             user_id, e.errno,
         )
         return False
-    config_dir = resolve_user_config_dir(config, user_id)
-    if config_dir is None:
-        logger.warning(
-            "cron_md_write_refused user=%s reason=config_dir_outside_user_tree", user_id,
-        )
-        return False
-    try:
-        config_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        logger.warning(
-            "cron_md_write_refused user=%s reason=config_dir_uncreatable errno=%s",
-            user_id, e.errno,
-        )
-        return False
-    return write_regular_file(config_dir / "CRON.md", _cron_md_content(jobs, doc, block))
+    # Made and written through one descriptor walked from the user's root, so
+    # a `config` swapped for a link to another user's is refused (ISSUE-981).
+    return write_user_config_file(config, user_id, "CRON.md", _cron_md_content(jobs, doc, block))
 
 
 def _cron_md_content(
@@ -2043,7 +2031,9 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
 
 
 def _migrate_db_jobs_locked(conn, config, user_id: str, config_dir, overwrite: bool) -> bool:
-    if (config_dir / "CRON.md").exists():
+    from .storage import user_config_file_lexists  # noqa: PLC0415 - import cycle
+
+    if user_config_file_lexists(config, user_id, "CRON.md") is not False:
         if not overwrite:
             return False
         current = load_cron_document(config, user_id)
@@ -2439,10 +2429,11 @@ def remove_job_definition(config, user_id: str, job_name: str) -> bool:
     doc = load_cron_document(config, user_id)
     if doc is not None:
         return not _document_names_job(doc, job_name)
-    from .storage import resolve_user_config_dir  # noqa: PLC0415 - import cycle
+    from .storage import user_config_file_lexists  # noqa: PLC0415 - import cycle
 
-    config_dir = resolve_user_config_dir(config, user_id)
-    return config_dir is None or not os.path.lexists(config_dir / "CRON.md")
+    # Only a file known to be absent answers True; a directory that cannot be
+    # opened without following a link may still hold it.
+    return user_config_file_lexists(config, user_id, "CRON.md") is False
 
 
 # ---------------------------------------------------------------------------
@@ -2828,11 +2819,10 @@ def save_job_definition(
 def job_file_writable(config, user_id: str, doc: "CronDocument | None") -> bool:
     """Whether a whole job may be written over ``doc``, this user's CRON.md as just read.
     No document is fine only where there is no file."""
-    from .storage import resolve_user_config_dir  # noqa: PLC0415 - import cycle
+    from .storage import user_config_file_lexists  # noqa: PLC0415 - import cycle
 
     if doc is None:
-        config_dir = resolve_user_config_dir(config, user_id)
-        return config_dir is not None and not os.path.lexists(config_dir / "CRON.md")
+        return user_config_file_lexists(config, user_id, "CRON.md") is False
     return not (document_hides_jobs(doc) or doc.block is None)
 
 

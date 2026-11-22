@@ -320,7 +320,7 @@ def test_failed_atomic_writer_reports_no_applied_operation(install, monkeypatch)
     seed(install)
     before = install[2].read_bytes()
     context, operations = preview(install, [{"name": "daily", "prompt": "Updated"}])
-    monkeypatch.setattr(storage, "write_regular_file", lambda path, content: False)
+    monkeypatch.setattr(storage, "write_regular_file", lambda path, content, **_: False)
     result = engine.execute_plan(operations, context)
     assert result.exit_code == 1 and not result.changed
     assert result.errors == [{"code": "file_write_failed", "path": ["users", "alice", "scheduled_jobs"]}]

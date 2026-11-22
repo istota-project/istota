@@ -498,6 +498,113 @@ def resolve_user_config_dir(config: "Config", user_id: str) -> Path | None:
     )
 
 
+#: Why a read of ``{bot_dir}/config`` was refused before any file was opened:
+#: the directory could not be walked to without following a link.
+USER_CONFIG_DIR_REFUSED = "config_dir_not_openable"
+
+
+def _walk_user_config_dir(
+    config: "Config", user_id: str, *, create: bool = False, below: tuple[str, ...] = (),
+) -> tuple[int | None, bool]:
+    """``(fd, absent)`` for ``{bot_dir}/config`` (or ``below`` it), walked from
+    the user's root.
+
+    Every component below ``Config.workspace_root(user_id)`` is opened
+    ``O_NOFOLLOW | O_DIRECTORY`` (``sandbox.confined``), so a link at the bot
+    dir or at ``config`` is refused, wherever it points (ISSUE-981). ``absent``
+    is True only when a component does not exist, which reads as "no file"
+    rather than as a refusal. With ``create`` the missing levels are made.
+    """
+    from .sandbox.confined import open_dir, open_or_create_dirs  # noqa: PLC0415
+
+    if not config.has_workspace:
+        return None, False
+    root = config.workspace_root(user_id)
+    if root is None:
+        return None, False
+    parts = (config.bot_dir_name, "config", *below)
+    try:
+        if create:
+            return open_or_create_dirs(root, parts), False
+        return open_dir(root, *parts, raise_errors=True), False
+    except FileNotFoundError:
+        return None, True
+    except (OSError, ValueError):
+        return None, False
+
+
+def open_user_config_dir(
+    config: "Config", user_id: str, *, create: bool = False,
+) -> tuple[Path | None, int | None]:
+    """The user's ``{bot_dir}/config`` and an open descriptor on it.
+
+    ``open_user_skill_overlays`` one level up, with the same two answers:
+    ``(path, fd)``, where ``path`` is ``resolve_user_config_dir``'s spelling
+    for messages and lock keys and never for opening, and **the caller closes
+    the fd**; or ``(None, None)``. Every read and write of a file in this
+    directory goes through the descriptor: the directory is bound read-write
+    into the user's own sandbox, and a path checked and then opened by name
+    let a task swap ``config`` for a link to another user's in between.
+    """
+    path = resolve_user_config_dir(config, user_id)
+    if path is None:
+        return None, None
+    fd, _absent = _walk_user_config_dir(config, user_id, create=create)
+    if fd is None:
+        return None, None
+    return path, fd
+
+
+def read_user_config_text(
+    config: "Config", user_id: str, filename: str, *,
+    max_bytes: int | None = None,
+) -> tuple[str | None, str | None]:
+    """``read_regular_file`` for ``{bot_dir}/config/{filename}``, through the
+    directory's descriptor: ``(text, refusal_reason)``, ``("", None)`` when the
+    file or the directory is not there."""
+    fd, absent = _walk_user_config_dir(config, user_id)
+    if fd is None:
+        return ("", None) if absent else (None, USER_CONFIG_DIR_REFUSED)
+    try:
+        cap = USER_CONFIG_READ_CAP_BYTES if max_bytes is None else max_bytes
+        return read_regular_file(Path(filename), max_bytes=cap, dir_fd=fd)
+    finally:
+        os.close(fd)
+
+
+def write_user_config_file(
+    config: "Config", user_id: str, filename: str, text: str | bytes, *,
+    keep_mode: bool = False,
+) -> bool:
+    """``write_regular_file`` for ``{bot_dir}/config/{filename}``, creating the
+    directory, through its descriptor. False on a refusal or a failed write."""
+    fd, _absent = _walk_user_config_dir(config, user_id, create=True)
+    if fd is None:
+        logger.warning("user_config_write_refused user=%s file=%s", user_id, filename)
+        return False
+    try:
+        return write_regular_file(Path(filename), text, dir_fd=fd, keep_mode=keep_mode)
+    finally:
+        os.close(fd)
+
+
+def user_config_file_lexists(config: "Config", user_id: str, filename: str) -> bool | None:
+    """Whether anything stands at ``{bot_dir}/config/{filename}``, a link
+    included; None when the directory cannot be opened without following one."""
+    fd, absent = _walk_user_config_dir(config, user_id)
+    if fd is None:
+        return False if absent else None
+    try:
+        os.stat(filename, dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return True
+
+
 @dataclass(frozen=True)
 class VaultLocation:
     """Where a user's KDBX vault is, and the directory it was reached through.
@@ -1159,8 +1266,9 @@ def read_user_config_file(
 ) -> str | None:
     """Text of ``{bot_dir}/config/{filename}``, or None where there is none.
 
-    The hardened read for every host-side reader of that directory. Containment
-    on the directory, then ``read_overlay_bytes`` on the leaf — ``O_NOFOLLOW``
+    The hardened read for every host-side reader of that directory. The
+    directory is walked from the user's root with no link followed and held
+    by descriptor (ISSUE-981), then ``read_overlay_bytes`` on the leaf — ``O_NOFOLLOW``
     so a symlink planted at the filename cannot put another file's bytes into
     the prompt, ``S_ISREG`` behind ``O_NONBLOCK`` so a FIFO left there is
     refused rather than blocking ``open(2)`` forever, and the size checked on
@@ -1183,14 +1291,9 @@ def read_user_config_file(
     seeding — and the never-raises contract is what lets both degrade to "no
     such file" instead of failing a task.
     """
-    config_dir = resolve_user_config_dir(config, user_id)
-    if config_dir is None:
-        if config.has_workspace:
-            logger.warning(
-                "user_config_dir_outside_user_tree user=%s file=%s", user_id, filename,
-            )
+    if not config.has_workspace:
         return None
-    text, reason = read_regular_file(config_dir / filename)
+    text, reason = read_user_config_text(config, user_id, filename)
     if reason is not None:
         logger.warning(
             "user_config_read_refused user=%s file=%s reason=%s",
@@ -1496,7 +1599,7 @@ def write_regular_file(
         return False
 
 
-def remove_regular_file(path: Path) -> bool:
+def remove_regular_file(path: Path, *, dir_fd: int | None = None) -> bool:
     """Delete ``path``, refusing anything that is not a plain file.
 
     For the ``examples/`` refresh, the one caller here that removes rather than
@@ -1528,14 +1631,10 @@ def remove_regular_file(path: Path) -> bool:
     it either — the fd is closed before the unlink, which re-resolves the path
     by name from scratch.
 
-    That residual is accepted rather than absent, on two grounds. It is
-    strictly smaller than the one ``write_regular_file`` already carries
-    through the same ancestor check, where the same swap is an arbitrary
-    *clobber*. And it is bounded by the single hard-coded leaf in
-    ``RETIRED_EXAMPLES``. If this ever grows a second name, or a name anything
-    but a code constant supplies, close it properly: ``open_overlay_dir`` for
-    the directory and ``os.unlink(name, dir_fd=fd)`` for the leaf, which is
-    containment by construction rather than by comparison.
+    **With ``dir_fd``** (the examples refresh passes one since ISSUE-981),
+    ``path`` is a name in that directory and the probe and the unlink both go
+    through it, which closes that window by construction rather than by
+    comparison. Without one the residual above stands.
 
     False on refusal, on failure and on an absent file — the ordinary case
     after the first sweep — never an exception. The caller runs on every task,
@@ -1543,7 +1642,7 @@ def remove_regular_file(path: Path) -> bool:
     advisory.
     """
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
     except FileNotFoundError:
         return False
     except OSError as e:
@@ -1562,7 +1661,7 @@ def remove_regular_file(path: Path) -> bool:
         os.close(fd)
 
     try:
-        path.unlink()
+        os.unlink(path, dir_fd=dir_fd)
         return True
     except FileNotFoundError:
         return False
@@ -2092,6 +2191,25 @@ def _migrate_dir_into_bot_dir(user_base: Path, name: str, bot_dir: str) -> None:
             os.close(new_fd)
 
 
+def _seed_config_files(config: "Config", user_id: str, bot_dir: str, config_fd: int) -> None:
+    """Create TASKS.md, HEARTBEAT.md and CRON.md in ``config_fd`` where absent.
+
+    No BRIEFINGS.md is seeded. The file is retired as an input: briefings are
+    the TOML config plus the `briefing_configs` table the web UI and `istota
+    briefing` write. An existing one is left alone rather than deleted, since
+    it is the user's file, which is what separates it from the
+    `examples/BRIEFINGS.md` tombstone in `RETIRED_EXAMPLES`, ours to remove.
+    """
+    seeds = (
+        ("TASKS.md", TASKS_FILE_TEMPLATE),
+        ("HEARTBEAT.md", _build_heartbeat_seed(config, user_id)),
+        ("CRON.md", _build_cron_seed(config, user_id)),
+    )
+    for name, text in seeds:
+        if create_file_if_absent(Path(name), text, dir_fd=config_fd):
+            logger.debug("Created %s/config/%s for %s", bot_dir, name, user_id)
+
+
 def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
     """
     Create the bot-managed directory structure for a user (mount-aware).
@@ -2146,12 +2264,20 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
             path.mkdir(parents=True, exist_ok=True)
         logger.debug("Ensured user directories for %s via mount", user_id)
 
-        # `config_dir` first and by name: it is the containment-checked path
-        # above, and the loop's own `config` entry is then a no-op on the same
-        # directory.
-        config_dir.mkdir(exist_ok=True)
+        # Each made through a walk from the user's root with no link followed,
+        # not by the containment-checked path: a bot dir swapped for a link in
+        # between put these in another user's tree (ISSUE-981).
+        from .sandbox.confined import open_or_create_dirs as _make_dirs  # noqa: PLC0415
+
         for sub in BOT_SUBDIRS:
-            (bot_dir_path / sub).mkdir(exist_ok=True)
+            try:
+                os.close(_make_dirs(config.workspace_root(user_id), [bot_dir, sub]))
+            except (OSError, ValueError, TypeError) as e:
+                logger.warning(
+                    "ensure_user_directories_refused user=%s dir=%s errno=%s",
+                    user_id, sub, getattr(e, "errno", None),
+                )
+                return False
         # Migrate scripts/ and exports/ from the user root into the bot dir
         _migrate_dir_into_bot_dir(base, "scripts", bot_dir)
         _migrate_dir_into_bot_dir(base, "exports", bot_dir)
@@ -2160,31 +2286,35 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
         # `if not exists(): write_text(...)`. `exists()` follows a link, so a
         # dangling symlink planted at one of these names read as absent and the
         # seed landed wherever it pointed, written by the daemon (ISSUE-339).
-        readme = bot_dir_path / "README.md"
-        if create_file_if_absent(readme, WORKSPACE_README):
-            logger.debug("Created %s README for %s", bot_dir, user_id)
+        #
+        # And each one is written through a descriptor walked from the user's
+        # root with no link followed, never by the containment-checked path:
+        # the check and the writes are separate calls, and a `config` or bot
+        # dir swapped in between sent the seeds into another user's tree
+        # (ISSUE-981).
+        from .sandbox.confined import open_dir, open_or_create_dirs  # noqa: PLC0415
+
+        user_root = config.workspace_root(user_id)
+        bot_fd = open_dir(user_root, bot_dir) if user_root is not None else None
+        if bot_fd is not None:
+            try:
+                if create_file_if_absent(Path("README.md"), WORKSPACE_README, dir_fd=bot_fd):
+                    logger.debug("Created %s README for %s", bot_dir, user_id)
+            finally:
+                os.close(bot_fd)
 
         # Seed config/ with default files
-        tasks_file = config_dir / "TASKS.md"
-        if create_file_if_absent(tasks_file, TASKS_FILE_TEMPLATE):
-            logger.debug("Created %s/config/TASKS.md for %s", bot_dir, user_id)
-
-        # No BRIEFINGS.md is seeded. The file is retired as an input — briefings
-        # are the TOML config plus the `briefing_configs` table the web UI and
-        # `istota briefing` write. An existing one is left alone rather than
-        # deleted: it is the user's file, which is what separates it from the
-        # `examples/BRIEFINGS.md` tombstone in `RETIRED_EXAMPLES`, ours to
-        # remove. The `briefings_config` skill body says the file is inert.
-
-        heartbeat_file = config_dir / "HEARTBEAT.md"
-        if create_file_if_absent(
-            heartbeat_file, _build_heartbeat_seed(config, user_id)
-        ):
-            logger.debug("Created %s/config/HEARTBEAT.md for %s", bot_dir, user_id)
-
-        cron_file = config_dir / "CRON.md"
-        if create_file_if_absent(cron_file, _build_cron_seed(config, user_id)):
-            logger.debug("Created %s/config/CRON.md for %s", bot_dir, user_id)
+        config_fd, _absent = _walk_user_config_dir(config, user_id, create=True)
+        if config_fd is None:
+            logger.warning(
+                "ensure_user_directories_refused user=%s reason=config_dir_not_openable",
+                user_id,
+            )
+            return False
+        try:
+            _seed_config_files(config, user_id, bot_dir, config_fd)
+        finally:
+            os.close(config_fd)
 
         # No PERSONA.md is seeded. The persona is the operator's
         # `{root}/PERSONA.md` for every user, and the copies earlier releases
@@ -2197,47 +2327,50 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
         # victim of the model's choosing on *every* call — and a FIFO there
         # blocked prompt assembly, which is the wedge this whole issue is about
         # (measured both, ISSUE-339).
-        examples_dir = _contained_under_user_root(
-            config, user_id, bot_dir_path / "examples"
-        )
-        if examples_dir is None:
+        try:
+            examples_fd = open_or_create_dirs(user_root, [bot_dir, "examples"])
+        except (OSError, ValueError, TypeError):
+            examples_fd = None
+        if examples_fd is None:
             logger.warning(
-                "examples_refresh_refused user=%s reason=outside_user_tree", user_id,
+                "examples_refresh_refused user=%s reason=dir_not_openable", user_id,
             )
         else:
-            examples_dir.mkdir(exist_ok=True)
-            examples = {
-                "README.md": workspace_readme_example(config),
-                "TASKS.md": TASKS_FILE_EXAMPLE,
-                "HEARTBEAT.md": HEARTBEAT_EXAMPLE,
-                "CRON.md": CRON_EXAMPLE,
-                "WORKFLOW.md": WORKFLOW_EXAMPLE,
-            }
-            for filename, content in examples.items():
-                write_regular_file(examples_dir / filename, content)
-            # Dropping a name from the dict above only stops the overwrite;
-            # the file stays on every workspace that ever got one. This
-            # directory is ours and is rewritten wholesale on every call, so a
-            # retired example is removed rather than abandoned.
-            #
-            # The bare-name check is what keeps "the user's own `config/`
-            # files are never in this list" structural rather than a promise
-            # about future edits: a `/` or a `..` in an entry would escape
-            # `examples_dir` on the join, before any of the leaf guards in
-            # `remove_regular_file` run.
-            for filename in RETIRED_EXAMPLES:
-                if filename != Path(filename).name or filename in (".", ".."):
-                    logger.error(
-                        "retired_example_refused name=%s reason=not_a_bare_name",
-                        filename,
-                    )
-                    continue
-                if remove_regular_file(examples_dir / filename):
-                    logger.info(
-                        "Removed retired %s example %s for %s",
-                        bot_dir, filename, user_id,
-                    )
-            logger.debug("Updated %s examples for %s", bot_dir, user_id)
+            try:
+                examples = {
+                    "README.md": workspace_readme_example(config),
+                    "TASKS.md": TASKS_FILE_EXAMPLE,
+                    "HEARTBEAT.md": HEARTBEAT_EXAMPLE,
+                    "CRON.md": CRON_EXAMPLE,
+                    "WORKFLOW.md": WORKFLOW_EXAMPLE,
+                }
+                for filename, content in examples.items():
+                    write_regular_file(Path(filename), content, dir_fd=examples_fd)
+                # Dropping a name from the dict above only stops the overwrite;
+                # the file stays on every workspace that ever got one. This
+                # directory is ours and is rewritten wholesale on every call, so a
+                # retired example is removed rather than abandoned.
+                #
+                # The bare-name check is what keeps "the user's own `config/`
+                # files are never in this list" structural rather than a promise
+                # about future edits: a `/` or a `..` in an entry would escape
+                # `examples/` on the join, before any of the leaf guards in
+                # `remove_regular_file` run.
+                for filename in RETIRED_EXAMPLES:
+                    if filename != Path(filename).name or filename in (".", ".."):
+                        logger.error(
+                            "retired_example_refused name=%s reason=not_a_bare_name",
+                            filename,
+                        )
+                        continue
+                    if remove_regular_file(Path(filename), dir_fd=examples_fd):
+                        logger.info(
+                            "Removed retired %s example %s for %s",
+                            bot_dir, filename, user_id,
+                        )
+                logger.debug("Updated %s examples for %s", bot_dir, user_id)
+            finally:
+                os.close(examples_fd)
 
         # Auto-share bot dir back to the user (OCS). Only when the workspace
         # is the bot's Nextcloud files: on a local workspace the path does not
@@ -2317,18 +2450,13 @@ def init_user_memory_v2(config: "Config", user_id: str) -> bool:
 
     Returns True on success.
 
-    The directory is resolved under the user's own tree and the write refuses
+    The directory is walked with no link followed and the write refuses
     to follow a link at ``USER.md`` itself. Both halves are needed: the caller
     reaches here precisely when the file reads as absent, and a *dangling*
     symlink is what that looks like (ISSUE-339).
     """
     if config.has_workspace:
-        config_dir = resolve_user_config_dir(config, user_id)
-        if config_dir is None:
-            logger.warning("init_user_memory_refused user=%s reason=config_dir", user_id)
-            return False
-        config_dir.mkdir(parents=True, exist_ok=True)
-        return write_regular_file(config_dir / "USER.md", MEMORY_TEMPLATE)
+        return write_user_config_file(config, user_id, "USER.md", MEMORY_TEMPLATE)
     return False
 
 
@@ -2406,6 +2534,40 @@ def upload_file_to_inbox_v2(
 _DATED_MEMORY_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}\.md$")
 
 
+def open_walked_dir(root: Path | None, *parts: str) -> tuple[int | None, bool]:
+    """``(fd, absent)`` on ``{root}/{parts...}``, walked with no link followed.
+
+    For a directory below a tree a task writes (a user's ``memories/``, a
+    room's ``memories/``): a check of the path and a read or unlink by name
+    let a task swap a component for a link to another user's in between
+    (ISSUE-981). ``absent`` is True only when a component does not exist.
+    """
+    from .sandbox.confined import open_dir  # noqa: PLC0415
+
+    if root is None:
+        return None, False
+    try:
+        return open_dir(root, *parts, raise_errors=True), False
+    except FileNotFoundError:
+        return None, True
+    except (OSError, ValueError):
+        return None, False
+
+
+def dated_memory_names(dir_fd: int) -> list[str]:
+    """The regular ``YYYY-MM-DD.md`` files in ``dir_fd``, sorted by name."""
+    with os.scandir(dir_fd) as entries:
+        listed = sorted(e.name for e in entries if _DATED_MEMORY_PATTERN.match(e.name))
+    names = []
+    for name in listed:
+        try:
+            if stat.S_ISREG(os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode):
+                names.append(name)
+        except OSError:
+            continue
+    return names
+
+
 def read_dated_memories(
     config: "Config",
     user_id: str,
@@ -2423,10 +2585,20 @@ def read_dated_memories(
     if not config.has_workspace:
         return None  # Only supported with mount
 
-    context_dir = _get_mount_path(config, get_user_memories_path(user_id))
-    if not context_dir.exists():
+    # Walked from the user's root and read through the descriptor: a swap of
+    # `memories/` put another user's dated memories into this prompt (ISSUE-981).
+    dir_fd, _absent = open_walked_dir(config.workspace_root(user_id), "memories")
+    if dir_fd is None:
         return None
+    try:
+        return _read_dated_memories_at(config, user_id, dir_fd, max_days, max_chars)
+    finally:
+        os.close(dir_fd)
 
+
+def _read_dated_memories_at(
+    config: "Config", user_id: str, dir_fd: int, max_days: int, max_chars: int,
+) -> str | None:
     # Cutoff is computed in the user's timezone so it lines up with the
     # filenames the sleep cycle writes (which are user-local YYYY-MM-DD).
     # Falling back to UTC matches the historical behavior for callers
@@ -2448,24 +2620,15 @@ def read_dated_memories(
     cutoff = datetime.now(user_tz) - timedelta(days=max_days)
     cutoff_str = cutoff.strftime("%Y-%m-%d")
 
-    # Find matching files. `is_file()` follows a link, so a symlink at
-    # `memories/2026-08-29.md` used to put up to `max_chars` of any
-    # daemon-readable file into the prompt — `memories/` is under the same
-    # read-write sandbox bind as `config/` (ISSUE-339). `lstat` here and
-    # `read_regular_file` below are the two halves; the FIFO case was already
-    # closed by accident, since `is_file()` is False for one.
+    # Find matching files. A symlink at `memories/2026-08-29.md` used to put
+    # up to `max_chars` of any daemon-readable file into the prompt (ISSUE-339);
+    # `dated_memory_names` keeps regular files only and `read_regular_file`
+    # opens the leaf `O_NOFOLLOW`.
     dated_files = []
-    for path in context_dir.iterdir():
-        if not _DATED_MEMORY_PATTERN.match(path.name):
-            continue
-        try:
-            if not stat.S_ISREG(os.lstat(path).st_mode):
-                continue
-        except OSError:
-            continue
-        date_str = path.stem  # e.g. "2026-01-28"
+    for name in dated_memory_names(dir_fd):
+        date_str = name[:-3]  # e.g. "2026-01-28"
         if date_str >= cutoff_str:
-            dated_files.append((date_str, path))
+            dated_files.append((date_str, name))
 
     if not dated_files:
         return None
@@ -2476,12 +2639,12 @@ def read_dated_memories(
     # Concatenate with headers, respecting max_chars
     parts = []
     total = 0
-    for date_str, path in dated_files:
-        text, reason = read_regular_file(path)
+    for date_str, name in dated_files:
+        text, reason = read_regular_file(Path(name), dir_fd=dir_fd)
         if reason is not None:
             logger.warning(
                 "dated_memory_read_refused user=%s file=%s reason=%s",
-                user_id, path.name, reason,
+                user_id, name, reason,
             )
             continue
         content = (text or "").strip()
@@ -2967,13 +3130,24 @@ def read_room_notes(config: "Config", user_id: str, token: str) -> str | None:
         path = room_notes_path(config, user_id, candidate)
         if path is None:
             return None
-        try:
-            path.lstat()
-        except FileNotFoundError:
-            continue
-        except OSError:
+        # Through the directory's descriptor, never the path (ISSUE-981).
+        dir_fd, absent = _walk_user_config_dir(config, user_id, below=(ROOM_NOTES_DIR,))
+        if dir_fd is None:
+            if absent:
+                continue
             return None
-        content, reason = read_regular_file(path, max_bytes=NOTES_MAX_BYTES)
+        try:
+            try:
+                os.stat(path.name, dir_fd=dir_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                return None
+            content, reason = read_regular_file(
+                Path(path.name), max_bytes=NOTES_MAX_BYTES, dir_fd=dir_fd,
+            )
+        finally:
+            os.close(dir_fd)
         if reason is not None:
             logger.warning("room_notes_read_refused user=%s token=%s reason=%s",
                            user_id, candidate, reason)
@@ -2991,16 +3165,18 @@ def write_room_notes(config: "Config", user_id: str, token: str, text: str) -> b
     path = room_notes_path(config, user_id, token)
     if path is None:
         return False
+    # Made and written through one descriptor walked from the user's root,
+    # never by the path (ISSUE-981).
+    dir_fd, _absent = _walk_user_config_dir(
+        config, user_id, create=True, below=(ROOM_NOTES_DIR,),
+    )
+    if dir_fd is None:
+        logger.warning("room_notes_write_failed user=%s reason=dir_not_openable", user_id)
+        return False
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        logger.warning("room_notes_write_failed user=%s errno=%s", user_id, e.errno)
-        return False
-    # Re-checked after the mkdir: the directory may have been created through
-    # a link swapped in since the first check.
-    if room_notes_path(config, user_id, token) != path:
-        return False
-    return write_regular_file(path, text)
+        return write_regular_file(Path(path.name), text, dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def room_notes_tokens(config: "Config", user_id: str) -> set[str]:
@@ -3009,27 +3185,31 @@ def room_notes_tokens(config: "Config", user_id: str) -> set[str]:
     Names only: a file the listing finds is read through ``read_room_notes``
     before anything shows it. Never raises; an unreadable directory is empty.
     """
-    notes_dir = _room_notes_dir(config, user_id)
-    if notes_dir is None:
+    if _room_notes_dir(config, user_id) is None:
         return set()
     found: set[str] = set()
+    dir_fd, _absent = _walk_user_config_dir(config, user_id, below=(ROOM_NOTES_DIR,))
+    if dir_fd is None:
+        return set()
     try:
-        entries = list(os.scandir(notes_dir))
+        with os.scandir(dir_fd) as entries:
+            names = [entry.name for entry in entries]
+        for name in names:
+            if not name.endswith(".md"):
+                continue
+            token = name[:-3]
+            if not _TOKEN_PATTERN.match(token):
+                continue
+            try:
+                st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode) and st.st_size > 0:
+                found.add(token)
     except OSError:
         return set()
-    for entry in entries:
-        name = entry.name
-        if not name.endswith(".md"):
-            continue
-        token = name[:-3]
-        if not _TOKEN_PATTERN.match(token):
-            continue
-        try:
-            st = entry.stat(follow_symlinks=False)
-        except OSError:
-            continue
-        if stat.S_ISREG(st.st_mode) and st.st_size > 0:
-            found.add(token)
+    finally:
+        os.close(dir_fd)
     return found
 
 

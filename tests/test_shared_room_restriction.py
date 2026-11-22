@@ -410,15 +410,17 @@ class TestAGuestsTurn:
     """Emissary mode (multiplayer Stage 11): a guest's turn runs as the host,
     and the host's own temp directory, where every other task of theirs leaves
     deferred ops the scheduler replays with their authority, is not in its
-    namespace. Only a directory of its own inside it is."""
+    namespace. Only a directory of its own beside it is, under the daemon-only
+    `.restricted` root (ISSUE-980)."""
 
     def test_the_hosts_temp_dir_is_not_bound_only_its_own(self, config):
         seen = _run(config, _room(config, shared=True), guest=True)
         argv = seen["argv"]
         host_dir = str((config.temp_dir / "alice").resolve())
+        own_root = str((config.temp_dir / ".restricted" / "alice").resolve())
         rw = [argv[i + 1] for i, tok in enumerate(argv) if tok == "--bind"]
         assert host_dir not in rw
-        own = [path for path in rw if path.startswith(host_dir + "/emissary-task-")]
+        own = [path for path in rw if path.startswith(own_root + "/emissary-task-")]
         assert len(own) == 1
         assert seen["model_env"]["ISTOTA_DEFERRED_DIR"] == own[0]
         assert "calendar" in seen["disabled"]
