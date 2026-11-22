@@ -14,6 +14,7 @@ all key off it once the executor's interactive gates include ``repl``.
 
 from __future__ import annotations
 
+import re
 import threading
 import uuid
 from pathlib import Path
@@ -36,8 +37,13 @@ Anything else is sent to the assistant.
 
 
 def _mint_token(user_id: str) -> str:
-    """Filesystem-safe stable conversation token (no colons)."""
-    return f"repl-{user_id}-{uuid.uuid4().hex[:8]}"
+    """A conversation token `validate_conversation_token` accepts.
+
+    A user id may hold characters a token may not (`first.last`), and the
+    executor fails a task whose token is not one (#979), so they become `-`.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_-]", "-", user_id)
+    return f"repl-{safe}-{uuid.uuid4().hex[:8]}"
 
 
 def _resolve_workspace(workspace: str) -> Path | None:
@@ -82,6 +88,8 @@ def run_session(
     # The `repl` lane's brain, not the base kind — see above (ISSUE-421).
     brain = make_brain(resolve_brain_kind("repl", config.brain))
     sub = TerminalSubscriber(stream=stream)
+    from ..storage import validate_conversation_token
+
     token = token or _mint_token(user_id)
     workspace_dir = _resolve_workspace(workspace)
     cur_model = model
@@ -89,6 +97,12 @@ def run_session(
 
     def _say(text: str) -> None:
         print(text, file=stream) if stream is not None else print(text)
+
+    try:
+        validate_conversation_token(token)
+    except ValueError:
+        _say("istota repl: --token may hold only letters, digits, - and _")
+        return
 
     _say(f"istota repl — user={user_id} token={token}")
     _say(f"workspace={workspace_dir or '(standard temp dir)'}  (/help for commands)")

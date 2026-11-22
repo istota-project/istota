@@ -79,6 +79,7 @@ from .storage import (
     read_group_memory,
     read_room_notes,
     read_user_memory_v2,
+    validate_conversation_token,
 )
 from .brain import (
     is_portable_alias,
@@ -668,8 +669,9 @@ def image_bind_roots(
         own = scoped_user_dir(mount / "Users", task.user_id)
         if own is not None:
             roots.append(own)
-        if task.conversation_token:
-            roots.append(mount / "Channels" / task.conversation_token)
+        channel = scoped_user_dir(mount / "Channels", task.conversation_token or "")
+        if channel is not None:
+            roots.append(channel)
     resolved = []
     for root in roots:
         try:
@@ -8811,6 +8813,15 @@ def execute_task(
 
     from .rooms.scopes import BRIEFING_RESEARCH_SOURCE_TYPES, is_briefing_research
     from .browser.owner import BRIEFINGS_IDENTITY
+
+    # Every reader of `Channels/<token>` refuses a bad name on its own; this
+    # stops the task before one that only warned let it reach the sandbox (#979).
+    if task.conversation_token:
+        try:
+            validate_conversation_token(task.conversation_token)
+        except ValueError:
+            logger.error("Task %s: invalid conversation token", task.id)
+            return False, "invalid conversation token", None, None
 
     research = is_briefing_research(task)
     if research:

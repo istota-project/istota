@@ -1039,6 +1039,36 @@ def effective_alert_surface(config: "Config", user_id: str, check: HeartbeatChec
     return surface_for_purpose(config, user_id, "alert")
 
 
+def _alert_room_refusal(
+    conn, config: "Config", user_id: str, check: HeartbeatCheck,
+    settings: HeartbeatSettings, alert_surface: str,
+) -> str | None:
+    """Why the rooms this check's alert names are refused, else None.
+
+    Only what the file states is judged: the check's ``channel``, and the
+    settings' ``conversation_token`` when the alert has a bare ``talk`` leg for
+    it to steer. The user's own alert route was checked when it was saved. A
+    read failure refuses.
+    """
+    from istota.transport import parse_output_target
+    from istota.transport.route_checks import RouteRefused, refuse_unjoined_rooms
+
+    token = settings.conversation_token
+    if token and not any(
+        d.surface == "talk" and not d.channel for d in parse_output_target(alert_surface)
+    ):
+        token = ""
+    if not check.channel and not token:
+        return None
+    try:
+        refuse_unjoined_rooms(conn, config, user_id, token, check.channel)
+    except RouteRefused as exc:
+        return str(exc)
+    except Exception as exc:  # noqa: BLE001 — a room that cannot be checked is refused
+        return f"room check failed: {type(exc).__name__}"
+    return None
+
+
 def send_heartbeat_alert(
     config: "Config",
     user_id: str,
@@ -1148,6 +1178,17 @@ def check_heartbeats(conn, config: "Config") -> list[str]:
                     from istota.notifications.delivery import is_channel_configured
 
                     alert_surface = effective_alert_surface(config, user_id, check)
+                    # HEARTBEAT.md is task-writable, so a room it names must be
+                    # one of the user's, as a CRON.md job's must (#979).
+                    room_refusal = _alert_room_refusal(
+                        conn, config, user_id, check, settings, alert_surface,
+                    )
+                    if room_refusal is not None:
+                        logger.warning(
+                            "heartbeat %r for user %s: %s — alert skipped",
+                            check.name, user_id, room_refusal,
+                        )
+                        continue
                     if not is_channel_configured(
                         config, user_id, alert_surface,
                         conversation_token=settings.conversation_token,

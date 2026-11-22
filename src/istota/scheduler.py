@@ -200,6 +200,7 @@ from .lib.egress_log import refusal_advice
 from .lib.timezones import is_valid_timezone
 from .transport.ingest import describe_attachment_only_message
 from .transport.routing import private_phone_room
+from .transport.route_checks import RouteRefused, refuse_unjoined_rooms
 from .storage import BOT_USER_BASE, ensure_user_directories_v2, ensure_workspace_roots
 
 # Deferred-op handlers were extracted to a sibling module; re-export the
@@ -9499,6 +9500,7 @@ def _sync_cron_files(conn, app_config: Config) -> None:
                         is_admin=app_config.is_admin(user_id),
                         unread_names=doc.unread_names,
                         ceiling=app_config.security.scheduled_job_max_unapproved,
+                        config=app_config,
                     )
                     if refused_subjects:
                         egress.raise_refused_bell(app_config, conn, user_id, refused_subjects)
@@ -10060,11 +10062,23 @@ def _create_scheduled_job_task(
     Built from the job row as it stands, so a run-now after an edit runs the
     edited definition. ``parent_task_id`` links a manual run to the failed
     occurrence it replaces. Raises ``ValueError`` from ``db.create_task`` for a
-    ``user_id`` that cannot name a directory.
+    ``user_id`` that cannot name a directory, and `RouteRefused` (a
+    ``ValueError``) for a room the job's owner is not in.
     """
     from istota.briefings.group_migrate import publisher_retired
     if publisher_retired(conn, job.user_id, job.name):
         raise ValueError("publisher_retired")
+    # Again here, not only at the sync: the sync runs when the file changes,
+    # and leaving a room does not change it (#979). A read failure refuses.
+    try:
+        refuse_unjoined_rooms(
+            conn, app_config, job.user_id,
+            job.conversation_token or "", job.output_target or "",
+        )
+    except RouteRefused:
+        raise
+    except Exception as exc:
+        raise RouteRefused(f"room check failed: {type(exc).__name__}") from None
     # `TEXT` in a dynamically typed store, so coerce once and use
     # the same value for the resolution and the column:
     # `resolve_brain_kind` opens with `(override or "").strip()`,
@@ -10493,6 +10507,15 @@ def check_scheduled_jobs(conn, app_config: Config) -> list[int]:
                 # carry one this guard refuses.
                 try:
                     task_id = _create_scheduled_job_task(conn, app_config, job)
+                except RouteRefused as e:
+                    # Spent like a slot with nothing to do, so a job whose
+                    # owner left its room logs once per slot, not every tick.
+                    db.set_scheduled_job_last_run(conn, job.id)
+                    logger.warning(
+                        "Scheduled job '%s' (user: %s) skipped: %s",
+                        job.name, job.user_id, e,
+                    )
+                    continue
                 except ValueError as e:
                     logger.error(
                         "Scheduled job '%s' (user: %s) skipped: %s",

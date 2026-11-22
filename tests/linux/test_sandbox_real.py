@@ -489,3 +489,43 @@ class TestTheDevboxExecSocket:
     def test_control_otherwise_it_is_bound(self, layout, task, user_temp, tmp_path):
         result = self._probe(layout, task, user_temp, tmp_path, frozenset())
         assert "exec-dir" in result.stdout, (result.stdout, result.stderr)
+
+
+class TestTheChannelBindStaysInChannels:
+    """A task's `conversation_token` came from a CRON.md `room` as written,
+    and `{mount}/Channels/{token}` was bound read-write with no component check
+    (#979). Run in the namespace, not read off argv: whatever bwrap does with
+    a `..` in a destination, the source was the resolved victim directory."""
+
+    @pytest.mark.parametrize("token", ["..", "../Users", "../Users/bob"])
+    def test_a_token_that_leaves_channels_binds_nothing(self, layout, user_temp, token):
+        mount = Path(layout.workspace_path)
+        (mount / "Channels").mkdir(exist_ok=True)
+        task = db.Task(
+            id=1, prompt="probe", user_id="alice", source_type="scheduled",
+            status="running", conversation_token=token,
+        )
+        result = run_probe(
+            f'cat {_q(mount / "Users" / "alice" / "mine.txt")}; '
+            f'cat {_q(mount / "Users" / "bob" / "secret.txt")} 2>/dev/null || echo BOB_UNREADABLE',
+            layout, task, user_temp,
+        )
+        # Alice's own bind happened, so "unreadable" is not a namespace that bound nothing.
+        assert "alice's file" in result.stdout, result.stderr
+        assert "bob's file" not in result.stdout
+        assert "BOB_UNREADABLE" in result.stdout, result.stdout
+
+    def test_a_real_channel_is_bound_read_write(self, layout, user_temp):
+        mount = Path(layout.workspace_path)
+        channel = mount / "Channels" / "room1"
+        channel.mkdir(parents=True)
+        task = db.Task(
+            id=1, prompt="probe", user_id="alice", source_type="talk",
+            status="running", conversation_token="room1",
+        )
+        result = run_probe(
+            f'echo note > {_q(channel / "CHANNEL.md")} && echo WRITE_OK',
+            layout, task, user_temp,
+        )
+        assert "WRITE_OK" in result.stdout, result.stderr
+        assert (channel / "CHANNEL.md").read_text() == "note\n"

@@ -95,6 +95,15 @@ class TestRunSession:
         assert t.conversation_token.startswith("repl-alice-")
         assert t.status == "completed"
 
+    def test_a_dotted_user_id_mints_a_valid_token(self):
+        """The executor fails a task whose token is not one (#979)."""
+        from istota.repl.session import _mint_token
+        from istota.storage import validate_conversation_token
+
+        token = _mint_token("first.last")
+        assert token.startswith("repl-first-last-")
+        validate_conversation_token(token)
+
     def test_terminal_renders_result(self, cfg, monkeypatch):
         monkeypatch.setattr("istota.scheduler.execute_task", _fake_execute("the answer"))
         out = io.StringIO()
@@ -394,3 +403,12 @@ class TestBrainFallbackNotice:
         sub.on_event(_ev("text_delta", {"text": "the real answer"}, seq=3))
         sub.on_event(_ev("result", {"text": "the real answer"}, seq=4))
         assert out.getvalue().count("the real answer") == 1
+
+
+def test_a_token_that_is_not_one_is_refused_before_any_task(cfg, monkeypatch):
+    monkeypatch.setattr("istota.scheduler.execute_task", _fake_execute("hi"))
+    out = io.StringIO()
+    run_session(cfg, user_id="alice", token="../Users", input_fn=_input_seq(["hello"]), stream=out)
+    assert "--token" in out.getvalue()
+    with db.get_db(cfg.db_path) as conn:
+        assert db.list_tasks(conn, user_id="alice") == []

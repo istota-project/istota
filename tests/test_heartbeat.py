@@ -1064,6 +1064,8 @@ path = "/nonexistent.txt"
         )
 
         with db.get_db(db_path) as conn:
+            # The alert's Talk leg goes to `room123`, which must be alice's (#979).
+            db.register_room(conn, "room123", "alice", origin="talk")
             result = check_heartbeats(conn, config)
 
             # Verify alert state was updated

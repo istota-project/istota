@@ -352,9 +352,11 @@ def user_data_mounts(
         # No `{mount}/Talk`, for any task (ISSUE-880): it is flat and holds
         # every conversation's files. `execute_task` copies the task's own
         # attachments into its control directory instead.
+        # Scoped like the user bind: a token is a task's `conversation_token`,
+        # which a CRON.md `room` wrote, and `..` here bound the workspace (#979).
         if conversation_token and ROOM_NOTES_WITHHELD not in withheld_scopes:
-            channel_dir = mount / "Channels" / conversation_token
-            if channel_dir.exists():
+            channel_dir = scoped_user_dir(mount / "Channels", conversation_token)
+            if channel_dir is not None and channel_dir.exists():
                 _rw(channel_dir, "nextcloud_channel_dir", user_data=True)
         # `scoped_user_dir` for the same reason as the user bind above: a
         # collapsing id would bind `{mount}/Groups`, every group, read-write.
