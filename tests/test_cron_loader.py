@@ -54,6 +54,11 @@ def make_config_with_mount(tmp_path, mount_path):
     return _make
 
 
+def _alices_room(conn, token):
+    """A room alice is in, so a job naming it syncs (#979)."""
+    db.register_room(conn, token, "alice", origin="web")
+
+
 def _write_cron_md(mount_path, user_id, content):
     cron_path = mount_path / get_user_cron_path(user_id, "istota").lstrip("/")
     cron_path.parent.mkdir(parents=True, exist_ok=True)
@@ -628,6 +633,7 @@ class TestSyncCronJobsToDb:
             CronJob(name="j2", cron="0 18 * * 0", prompt="world", target="email"),
         ]
         with db.get_db(db_path) as conn:
+            _alices_room(conn, "r1")
             sync_cron_jobs_to_db(conn, "alice", file_jobs)
             jobs = db.get_user_scheduled_jobs(conn, "alice")
 
@@ -660,6 +666,7 @@ class TestSyncCronJobsToDb:
             )
         file_jobs = [CronJob(name="j1", cron="0 9 * * *", prompt="new prompt", target="talk", room="r1")]
         with db.get_db(db_path) as conn:
+            _alices_room(conn, "r1")
             sync_cron_jobs_to_db(conn, "alice", file_jobs)
             jobs = db.get_user_scheduled_jobs(conn, "alice")
 
@@ -1088,6 +1095,7 @@ class TestColumnOwnership:
         assert set(expected) == FILE_OWNED_COLUMNS, "expect a value for every file-owned column"
 
         with db.get_db(db_path) as conn:
+            _alices_room(conn, "r1")
             if path == "update":
                 sync_cron_jobs_to_db(
                     conn, "alice", [CronJob(name="j1", cron="0 0 * * *", prompt="old")],
@@ -1373,6 +1381,7 @@ target = "talk"
             CronJob(name="cmd1", cron="0 6 * * *", command="echo hi", target="talk", room="r1"),
         ]
         with db.get_db(db_path) as conn:
+            _alices_room(conn, "r1")
             sync_cron_jobs_to_db(conn, "alice", file_jobs)
             jobs = db.get_user_scheduled_jobs(conn, "alice")
 
@@ -2876,6 +2885,7 @@ class TestSuspensionSurvivesTheSync:
         plausibly a fix for a job that fails every time."""
         base = {"name": "digest", "cron": "0 7 * * *", "prompt": "summarise"}
         with db.get_db(db_path) as conn:
+            _alices_room(conn, "room2")
             sync_cron_jobs_to_db(conn, "alice", [CronJob(**base)])
             job = db.get_scheduled_job_by_name(conn, "alice", "digest")
             db.suspend_scheduled_job(conn, job.id)

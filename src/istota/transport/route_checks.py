@@ -250,6 +250,56 @@ def validate_talk_route_token(config, token: str, user_id: str) -> None:
         )
 
 
+def refuse_unjoined_rooms(conn, config, user_id: str, room: str, target: str) -> None:
+    """Raise `RouteRefused` when ``room``, or a ``room:``, ``web:`` or
+    ``talk:`` leaf of ``target``, names a room ``user_id`` is not a current
+    member of (#979).
+
+    The counterpart of `validate_descriptor_rooms` for routes a user writes in
+    a file their tasks can write: a CRON.md job, asked at sync and again at
+    dispatch, where ``room`` becomes the task's ``conversation_token`` and its
+    ``Channels/<token>`` is bound read-write; and a HEARTBEAT.md check's
+    ``channel`` and ``conversation_token``, asked before each alert. Each name must be a conversation token by spelling, then the
+    user's own provisioned Talk channel or a registered room they are in now
+    (`rooms.scopes.is_current_member`, which counts a Talk departure).
+
+    A shared room the owner is in is accepted, unlike on the web form: a
+    member's own job aimed at one is their turn asked in advance (ISSUE-594),
+    and delivery already refuses every other shared leg. ``config`` may be
+    None; only the provisioned channels need it.
+    """
+    from istota.rooms.scopes import canonical_token, is_current_member
+    from istota.storage import validate_conversation_token
+    from istota.transport import parse_output_target
+
+    names: list[tuple[str, str]] = []
+    if room:
+        names.append(("room", room))
+    for dest in parse_output_target(target or ""):
+        if dest.surface in ("room", "web", "talk") and dest.channel:
+            names.append((dest.surface, dest.channel))
+    if not names:
+        return
+
+    own_channels: set[str] | None = None
+    for surface, token in names:
+        try:
+            validate_conversation_token(token)
+        except ValueError:
+            raise RouteRefused(f"{surface} {token!r} is not a conversation token") from None
+        if surface in ("room", "talk"):
+            if own_channels is None:
+                own_channels = (
+                    {t for _, t in user_talk_channels(config, user_id)}
+                    if config is not None else set()
+                )
+            if token in own_channels:
+                continue
+        found = talk_ref_room(conn, token) if surface == "talk" else canonical_token(conn, token)
+        if found is None or not is_current_member(conn, found, user_id):
+            raise RouteRefused(f"{surface} {token!r} is not one of your rooms")
+
+
 def validate_descriptor_surfaces(config, descriptor: str) -> None:
     """Raise ValueError if any leaf surface in a descriptor is neither a builtin
     surface nor a registered transport.

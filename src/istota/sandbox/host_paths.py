@@ -119,8 +119,8 @@ def workspace_roots(
     `{mount}/Users/{user_id}` goes through `scoped_user_dir`, so a `.`, a
     `..`, an absolute or a nested user id costs that one root instead of
     collapsing it to `{mount}/Users` — every user's directory at once
-    (ISSUE-402). The conversation token is guarded the same way, since
-    `../..` would walk straight back out of `Channels/`. An *absent* user id
+    (ISSUE-402). The conversation token goes through it too, under
+    `Channels/`, the rule the channel bind uses (#979). An *absent* user id
     is different from an unscopable one and contributes nothing from the
     mount at all: without an identity there is no per-user subtree, and the
     channel root would then be the only thing standing between the caller and
@@ -168,8 +168,9 @@ def workspace_roots(
         roots.append(own)
 
     token = conversation_token.strip() if isinstance(conversation_token, str) else ""
-    if token and "/" not in token and token not in (".", ".."):
-        roots.append(mount_path / "Channels" / token)
+    channel = scoped_user_dir(mount_path / "Channels", token) if token else None
+    if channel is not None:
+        roots.append(channel)
 
     if attachments_dir and not writable:
         try:

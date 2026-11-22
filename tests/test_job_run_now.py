@@ -51,6 +51,8 @@ def _ctx(config, conn, *, args, user_id="alice", token="room1"):
 
 
 def _job(conn, *, name="digest", prompt="Write the digest", user_id="alice"):
+    # The owner is in the job's room, or no run is queued (#979).
+    db.register_room(conn, "room1", user_id, origin="talk")
     cur = conn.execute(
         "INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, "
         "conversation_token, output_target, enabled) VALUES (?, ?, ?, ?, ?, ?, 1)",

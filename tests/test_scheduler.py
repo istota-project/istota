@@ -2297,6 +2297,12 @@ class TestCheckBriefingsStaleGate:
 
 
 class TestCheckScheduledJobs:
+    @pytest.fixture(autouse=True)
+    def _alices_room(self, db_path):
+        """The jobs below name `room1`; a job fires only into a room its owner is in (#979)."""
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "room1", "alice", origin="talk")
+
     @patch("istota.scheduler._sync_cron_files")
     def test_no_jobs(self, mock_sync, db_path):
         config = Config(db_path=db_path, users={})
@@ -2709,6 +2715,7 @@ def _utc(*args) -> datetime:
 
 def _insert_job(db_path, name, cron, *, last_run_at, timezone=None):
     with db.get_db(db_path) as conn:
+        db.register_room(conn, "room1", "alice", origin="talk")
         conn.execute(
             """INSERT INTO scheduled_jobs
                (user_id, name, cron_expression, prompt, conversation_token,

@@ -28,6 +28,7 @@ from .storage import (
     USER_CONFIG_READ_CAP_BYTES,
     get_user_scripts_path,
     read_owner_text,
+    validate_conversation_token,
 )
 
 # The fence markers (ISSUE-386), and this module is why `toml_fence` states
@@ -798,8 +799,26 @@ def cron_document_errors(content: str, config, user_id: str) -> list[str]:
     """
     doc, errors = _parse_cron_document(content, config, user_id)
     if doc is not None:
-        return list(doc.errors)
+        return list(doc.errors) + job_room_problems(config, user_id, doc.jobs)
     return errors
+
+
+def job_room_problems(config, user_id: str, jobs: list["CronJob"]) -> list[str]:
+    """A sentence per job the sync drops for naming a room ``user_id`` is not
+    in (#979), for the validators that show the file's problems. Asked of the
+    database now, so a room left since the last sync shows here too."""
+    if config is None or not getattr(config, "db_path", None) or not jobs:
+        return []
+    try:
+        with db.get_db(config.db_path) as conn:
+            refused = _room_refusals(conn, config, user_id, jobs)
+    except Exception as exc:  # noqa: BLE001 — a validator reports, it does not fail
+        logger.warning("could not check CRON.md rooms for %s: %s", user_id, type(exc).__name__)
+        return []
+    return [
+        f"Job '{name}': {reason}, so it is not scheduled"
+        for name, reason in refused.items()
+    ]
 
 
 def _parse_cron_document(
@@ -1047,13 +1066,25 @@ def _parse_jobs(
                 model, config, brain if owner_is_admin else "",
                 provider if owner_is_admin else "", owner_is_admin,
             )
+        room = _str_field(name, user_id, "room", j.get("room", ""), errors)
+        # `room` is the task's conversation token, joined under `Channels/` and
+        # bound read-write, so a name that is not a token can never run (#979).
+        # Refused rather than skipped, so a held sync still removes its row.
+        if room:
+            try:
+                validate_conversation_token(room)
+            except ValueError:
+                logger.warning(
+                    "Skipping job '%s' in CRON.md for %s: room is not a "
+                    "conversation token", name, user_id,
+                )
+                errors.append(f"Job '{name}': room {room[:80]!r} is not a room token")
+                refused.add(name)
+                continue
         target = _str_field(name, user_id, "target", j.get("target", ""), errors)
         if target:
             _validate_target(name, user_id, target, config)
-            _validate_room_pairing(
-                name, user_id, target,
-                _str_field(name, user_id, "room", j.get("room", "")),
-            )
+            _validate_room_pairing(name, user_id, target, room)
         declared, egress_kept = _validate_egress(
             name, config, user_id, j.get("egress", []), errors,
         )
@@ -1065,7 +1096,7 @@ def _parse_jobs(
             command=command,
             prompt_file=prompt_file,
             target=target,
-            room=_str_field(name, user_id, "room", j.get("room", ""), errors),
+            room=room,
             enabled=_coerce_bool(
                 name, user_id, "enabled", j.get("enabled", True), True, errors),
             silent_unless_action=_coerce_bool(
@@ -1629,6 +1660,20 @@ def _stored_model(fj: "CronJob", provider_val: str | None) -> tuple[str, str | N
     return fj.model, provider_val
 
 
+def _room_refusals(conn, config, user_id: str, file_jobs: list[CronJob]) -> dict[str, str]:
+    """Job name -> why its rooms are refused, for the jobs whose `room` or
+    target names a room the user is not in."""
+    from .transport.route_checks import RouteRefused, refuse_unjoined_rooms
+
+    refused: dict[str, str] = {}
+    for fj in file_jobs:
+        try:
+            refuse_unjoined_rooms(conn, config, user_id, fj.room, fj.target)
+        except RouteRefused as exc:
+            refused[fj.name] = str(exc)
+    return refused
+
+
 def sync_cron_jobs_to_db(
     conn,
     user_id: str,
@@ -1637,6 +1682,7 @@ def sync_cron_jobs_to_db(
     is_admin: bool = True,
     unread_names: frozenset[str] = frozenset(),
     ceiling: str = "limited",
+    config=None,
 ) -> list[str]:
     """
     Sync CRON.md job definitions into the scheduled_jobs DB table.
@@ -1660,6 +1706,10 @@ def sync_cron_jobs_to_db(
       (`_sync_job_approvals`)
     - ``unread_names`` are jobs whose `prompt_file` could not be read this tick:
       kept, not orphaned
+    - a job whose `room` or a room in its `target` is not one the user is a
+      current member of is dropped like a disallowed command, row and all
+      (`route_checks.refuse_unjoined_rooms`, #979); ``config`` supplies the
+      user's provisioned Talk channels to that check
 
     Both write paths name exactly ``FILE_OWNED_COLUMNS``, so the daemon's
     state columns are left alone rather than surviving by omission.
@@ -1673,7 +1723,11 @@ def sync_cron_jobs_to_db(
     # respective module package); CRON.md must not touch them.
     db_jobs = [j for j in db_jobs if not j.name.startswith(_MODULE_JOB_PREFIX)]
     db_by_name = {j.name: j for j in db_jobs}
-    file_names = {j.name for j in file_jobs if not (fj_is_disallowed_command(j, is_admin))}
+    room_refused = _room_refusals(conn, config, user_id, file_jobs)
+    file_names = {
+        j.name for j in file_jobs
+        if not fj_is_disallowed_command(j, is_admin) and j.name not in room_refused
+    }
     file_names |= unread_names
     refused_subjects: list[str] = []
 
@@ -1688,6 +1742,12 @@ def sync_cron_jobs_to_db(
             logger.warning(
                 "Skipping CRON.md job '%s' for %s: command-type jobs are admin-only",
                 fj.name, user_id,
+            )
+            continue
+        if fj.name in room_refused:
+            logger.warning(
+                "Skipping CRON.md job '%s' for %s: %s",
+                fj.name, user_id, room_refused[fj.name],
             )
             continue
         cmd_val, skill_val, skill_args_val = _resolve_job_dispatch(fj)
@@ -2722,13 +2782,17 @@ def validate_job_input(config, user_id: str, payload, stored: CronJob | None) ->
 
 
 def _candidate_errors(config, user_id: str, job: CronJob, stored: CronJob | None) -> list[str]:
-    """What the sync's own parser says of this job alone. Two things the file may hold
+    """What the sync's own parser says of this job alone. Three things the file may hold
     and the parser reports are left out when unchanged from ``stored``: a model its owner
-    may no longer pick and a kept `egress` entry, both of which a save keeps as they are."""
+    may no longer pick, a kept `egress` entry, and a room they have since left, all of
+    which a save keeps as they are. The sync and dispatch still refuse that room."""
     probe = dataclasses.replace(job)
     if stored is not None:
         if job.model == stored.model:
             probe.model = ""
+        if (job.room, job.target) == (stored.room, stored.target):
+            probe.room = ""
+            probe.target = ""
         probe.egress_kept = tuple(e for e in job.egress_kept if e not in stored.egress_kept)
     content = f"```toml\n{render_jobs_block([probe])}```\n"
     return cron_document_errors(content, config, user_id)

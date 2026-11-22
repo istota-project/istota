@@ -45,6 +45,8 @@ def cmd_check(args):
     doc, problems = (
         cron_loader._parse_cron_document(content, config, user_id) if content else (None, [])
     )
+    if doc is not None:
+        problems = list(problems) + cron_loader.job_room_problems(config, user_id, doc.jobs)
     if doc is not None and doc.is_template and content.strip():
         # No problem to the web editor, which always writes a fence. To the sync it is a
         # file stating no jobs, which it rewrites from the table when there are rows.
