@@ -81,6 +81,7 @@ than implied by ``writable``: a read whose bytes leave the task is not the same
 question as a read whose bytes stay in it.
 """
 
+import errno
 import os
 import stat
 import shutil
@@ -89,7 +90,9 @@ from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
-from .confined import open_dir, open_or_create_dirs, open_regular, valid_parts
+from .confined import (  # noqa: F401 - NotRegularFile is what open_resolved raises
+    NotRegularFile, open_dir, open_or_create_dirs, open_regular, valid_parts,
+)
 from .user_scope import ROOM_NOTES_WITHHELD, is_within, scoped_user_dir
 
 
@@ -429,7 +432,7 @@ def _absolute_parts(path: str | Path) -> tuple[Path, tuple[str, ...]]:
     # Do not resolve again: the no-follow walk must see every component.
     path = Path(path)
     if not path.is_absolute() or not valid_parts(path.parts[1:]):
-        raise OSError("Expected an absolute resolved file path")
+        raise OSError(errno.EINVAL, "expected an absolute resolved file path")
     return Path(path.anchor), path.parts[1:]
 
 
@@ -438,13 +441,13 @@ def open_resolved(path: str | Path) -> int:
 
     Scope checks remain the caller's responsibility. The filesystem root
     anchors the walk because validation already returned a resolved name.
-    The caller owns the returned regular-file descriptor.
+    The caller owns the returned regular-file descriptor. A refusal is an
+    ``OSError`` carrying its errno and ``strerror``: ``NotRegularFile`` when
+    the leaf opened and is not a regular file, the failed open's own error
+    otherwise.
     """
     anchor, parts = _absolute_parts(path)
-    fd = open_regular(anchor, parts)
-    if fd is None:
-        raise OSError("Could not open resolved regular file")
-    return fd
+    return open_regular(anchor, parts, raise_errors=True)
 
 
 def read_resolved(path: str | Path) -> bytes:

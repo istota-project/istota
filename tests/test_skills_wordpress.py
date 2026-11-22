@@ -910,6 +910,7 @@ class TestContentFiles:
             with pytest.raises(content_mod.WordPressError) as err:
                 content_mod.read_text_file(str(path), "f", 10)
             assert err.value.reason == "validation_error"
+            assert "None" not in str(err.value)
 
     @pytest.mark.parametrize("text", ["[1, 2]", "not json"])
     def test_meta_file_must_be_a_json_object(self, env, posts, capsys, text):
