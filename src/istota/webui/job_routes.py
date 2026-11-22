@@ -365,13 +365,16 @@ def _keep_access_kind(payload: dict) -> str | None:
     raise _Refused(refusal(400, "invalid_field", "That is not a kind of access.", "keep_access"))
 
 
-def _holds_approval(config, user_id: str, row: db.ScheduledJob, kind: str) -> bool:
+def _holds_approval(config, user_id: str, row: db.ScheduledJob, stored, kind: str) -> bool:
+    """Whether the text under the owner's edit is text they approved. The form read
+    CRON.md, which runs ahead of the row until the next sync, so it is the file's text
+    that is compared: a model's edit in that gap must not ride on the kept grant (#982)."""
     subject = egress.cron_subject(row.name)
+    digest = cron_loader.job_text_digest(stored, is_admin=config.is_admin(user_id))
     with db.get_db(Path(config.db_path)) as conn:
-        current = egress.job_row_by_subject(conn, user_id, subject)
-        if current is None:
+        if egress.job_row_by_subject(conn, user_id, subject) is None:
             return False
-        return f"{kind}:{egress.job_digest(current)}" in egress.grants_for(conn, user_id, subject)
+        return f"{kind}:{digest}" in egress.grants_for(conn, user_id, subject)
 
 
 def _keep_approval(config, user_id: str, subject: str, kind: str, digest: str) -> bool:
@@ -407,7 +410,7 @@ def _edit(config, user_id: str, job_id: str, payload: dict) -> JSONResponse:
     job = _validated(config, user_id, fields, stored)
 
     # Asked before the write: a sync landing first drops the old grant.
-    holds = keep is not None and job.name == row.name and _holds_approval(config, user_id, row, keep)
+    holds = keep is not None and job.name == row.name and _holds_approval(config, user_id, row, stored, keep)
     outcome = cron_loader.save_job_definition(
         config, user_id, job, original_name=stored.name, expected_revision=revision,
     )

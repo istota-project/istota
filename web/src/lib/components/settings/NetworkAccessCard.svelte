@@ -183,8 +183,20 @@
   }
 </script>
 
+{#snippet hiddenCharacters(diffOnly: boolean)}
+  {#if job?.hidden_characters}
+    <Alert appearance="inline" variant="warn">
+      This text holds characters a browser does not draw. Where it is shown here they are spelled
+      out as <code>{'\\u{…}'}</code>, and the job reads them as part of its text.
+      {#if diffOnly}The changes above may not include them: choose the access below to read the
+        whole text.{/if}
+    </Alert>
+  {/if}
+{/snippet}
+
 {#snippet jobText()}
   {#if job}
+    {@render hiddenCharacters(false)}
     {#if job.prompt}<pre class="job-text">{job.prompt}</pre>{/if}
     {#if job.command}<pre class="job-text">{job.command}</pre>{/if}
     {#if job.skill}<pre class="job-text">{job.skill} {job.skill_args}</pre>{/if}
@@ -274,6 +286,8 @@
           </div>
         {/each}
         {#if job?.settable}
+          <!-- The diff shows changed lines only, and this approves the whole text. -->
+          {@render hiddenCharacters(true)}
           <div>
             <Button
               size="sm"

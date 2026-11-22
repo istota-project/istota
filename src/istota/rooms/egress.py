@@ -91,6 +91,14 @@ _MAX_HOST_CHARS = 253
 _MAX_COMPARED_CHARS = 100_000
 _MAX_COMPARED_LINES = 2_000
 _UNDRAWN_CATEGORIES = frozenset({"Cc", "Cf", "Cn", "Co", "Cs", "Zl", "Zp"})
+#: Unicode's Default_Ignorable_Code_Point ranges the categories above miss: a renderer
+#: draws them as nothing, and a variation selector after each letter can carry a payload.
+_UNDRAWN_RANGES = (
+    (0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
+    (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFFA0, 0xFFA0), (0xE0100, 0xE01EF),
+)
+#: The text fields `describe_subject` shows, all of them digested.
+_SHOWN_COLUMNS = ("prompt", "command", "skill", "skill_args", "publish_shared_kv")
 
 _LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 _SKILL_RE = re.compile(r"[a-z0-9_-]{1,64}")
@@ -264,14 +272,23 @@ def job_text_changes(approved: Mapping, current: "Mapping | sqlite3.Row") -> lis
 
 
 def _visible(line: str) -> str:
-    """A diff line with what a browser would not draw spelled out. A model reads a
+    """A line with what a browser would not draw spelled out. A model reads a
     zero-width or tag character and the owner approving the text does not see it."""
-    return "".join(
-        f"\\u{{{ord(char):04x}}}"
-        if char != "\t" and unicodedata.category(char) in _UNDRAWN_CATEGORIES
-        else char
-        for char in line
-    )
+    return "".join(f"\\u{{{ord(char):04x}}}" if _undrawn(char) else char for char in line)
+
+
+def _undrawn(char: str) -> bool:
+    if char == "\t":
+        return False
+    if unicodedata.category(char) in _UNDRAWN_CATEGORIES:
+        return True
+    point = ord(char)
+    return any(low <= point <= high for low, high in _UNDRAWN_RANGES)
+
+
+def visible_text(text: str) -> str:
+    """`_visible` over text of several lines, keeping its line breaks."""
+    return "\n".join(_visible(line) for line in text.split("\n"))
 
 
 def cron_subject(job_name: str) -> str:
@@ -1110,6 +1127,8 @@ def describe_subject(
             unapproved_reach(row["reach"], ceiling),
         )
     if row is not None:
+        # The Access dialog approves this text, so nothing in it may be invisible (#982).
+        shown = {column: visible_text(row[column] or "") for column in _SHOWN_COLUMNS}
         run_state = job_run_state(row)
         waiting = run_state == JOB_RUNNING and once_job_waiting(
             conn, user_id, row["name"], ceiling=ceiling,
@@ -1129,11 +1148,8 @@ def describe_subject(
                 kind: unapproved_reach(ACCESS_REACH[kind], ceiling) != ACCESS_REACH[kind]
                 for kind in JOB_REQUESTS
             },
-            "prompt": row["prompt"] or "",
-            "command": row["command"] or "",
-            "skill": row["skill"] or "",
-            "skill_args": row["skill_args"] or "",
-            "publish_shared_kv": row["publish_shared_kv"] or "",
+            **shown,
+            "hidden_characters": any(shown[column] != (row[column] or "") for column in shown),
             "publish_shared_kv_trusted": bool(row["publish_shared_kv_trusted"]),
         }
     return {
