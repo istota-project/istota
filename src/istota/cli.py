@@ -1719,11 +1719,26 @@ def cmd_egress(args):
             for item in subjects:
                 entries = [*item["hosts"], *(f"skill:{name}" for name in item["skills"])]
                 state = f"{item['by_default']}-by-default" if item["by_default"] else item["state"]
-                print(f"{item['subject']} {state} {' '.join(entries)}".rstrip())
-                if item["job"] and item["job"]["run_state"] != egress.JOB_RUNNING:
-                    print(f"  {item['job']['run_state']}")
-                if item["job"] and item["job"]["waiting"]:
-                    print(f"  waiting {' '.join(item['waiting_on']) or item['job']['reach']}")
+                # A job's name comes from CRON.md, which a model can write.
+                subject = egress.visible_line(item["subject"])
+                print(f"{subject} {state} {' '.join(entries)}".rstrip())
+                job = item["job"]
+                if job and job["run_state"] != egress.JOB_RUNNING:
+                    print(f"  {job['run_state']}")
+                if job and job["waiting"]:
+                    print(f"  waiting {' '.join(item['waiting_on']) or job['reach']}")
+                if job:
+                    # What `grant ... open|public --digest` approves, spelled out (#985).
+                    print(f"  digest {job['digest']}")
+                    if job["hidden_characters"]:
+                        print("  hidden characters, spelled out as \\u{...}")
+                    for column in egress.SHOWN_COLUMNS:
+                        if job[column]:
+                            print(f"  {column}:")
+                            for line in job[column].split("\n"):
+                                print(f"    {line}")
+                    if job["publish_shared_kv_trusted"]:
+                        print("  publish_shared_kv_trusted: true")
                 for refused in item["refused"]:
                     print(f"  refused {refused['entry']} hits={refused['hits']}")
                     if refused["dropped_approval"]:
@@ -1740,11 +1755,18 @@ def cmd_egress(args):
             if args.egress_action == "revoke":
                 egress.remove_grant(conn, args.user, args.subject, args.entry)
             elif args.entry in egress.JOB_REQUESTS:
+                if not args.digest:
+                    raise egress.EntryRefused(
+                        f"Pass --digest, as `istota egress list {args.user}` prints it "
+                        "beside the text it approves.",
+                    )
                 egress.approve_job(
                     conn, args.user, args.subject, args.entry, args.digest, decided_via="cli",
                 )
                 print(json.dumps(egress.describe_subject(conn, args.user, args.subject)["job"], indent=2))
             else:
+                if args.digest:
+                    raise egress.EntryRefused("--digest pins only an open or public approval.")
                 skills = None
                 if args.entry.startswith("skill:"):
                     from .skills._loader import load_skill_index
@@ -1762,6 +1784,13 @@ def cmd_egress(args):
                     operator=egress.operator_endpoints(conn, config, args.user),
                 )
                 egress.clear_refused(conn, args.user, args.subject, parsed.text)
+        except egress.StaleJob:
+            print(
+                "Error: This job's text no longer has that digest. "
+                f"Read it again with `istota egress list {args.user}`.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         except egress.EntryRefused as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -5982,7 +6011,10 @@ def main():
     egress_grant.add_argument("user")
     egress_grant.add_argument("subject", help="cron:<job> or assignment:<id>")
     egress_grant.add_argument("entry")
-    egress_grant.add_argument("--digest", help="For open or public: refuse unless the job's text has this digest")
+    egress_grant.add_argument(
+        "--digest",
+        help="Required for open or public: the digest `egress list` prints with the job's text",
+    )
     egress_revoke = egress_subparsers.add_parser("revoke", help="Remove an entry", allow_abbrev=False)
     egress_revoke.add_argument("user")
     egress_revoke.add_argument("subject")

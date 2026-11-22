@@ -150,9 +150,17 @@ def test_an_approved_public_job_holds_nothing_and_its_subtask_neither(stack):
     try:
         _wait("the job never synced", stack, lambda: stack.probe.query(
             "SELECT reach FROM scheduled_jobs WHERE user_id = ? AND name = ?", [USER, JOB]))
+        listed = stack.exec([
+            "uv", "run", "istota", "-c", CONTAINER_CONFIG, "egress", "list", USER, "--json",
+        ], timeout=120)
+        assert listed.returncode == 0, listed.stdout + listed.stderr
+        digest = next(
+            item["job"]["digest"] for item in json.loads(listed.stdout)["subjects"]
+            if item["subject"] == SUBJECT
+        )
         approved = stack.exec([
             "uv", "run", "istota", "-c", CONTAINER_CONFIG,
-            "egress", "grant", USER, SUBJECT, "public",
+            "egress", "grant", USER, SUBJECT, "public", "--digest", digest,
         ], timeout=120)
         assert approved.returncode == 0, approved.stdout + approved.stderr
         _write_job(stack, enabled=True)
