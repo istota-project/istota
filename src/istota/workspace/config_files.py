@@ -73,9 +73,35 @@ def lookup(
 
 
 def _directory(config: "Config", user_id: str, file: ConfigFile) -> Path | None:
+    """The directory's spelling, for the lock key and the view path only."""
     if file.kind == "config":
         return storage.resolve_user_config_dir(config, user_id)
     return storage.resolve_user_skill_overlays_dir(config, user_id)
+
+
+def _parts(config: "Config", file: ConfigFile) -> list[str]:
+    return [config.bot_dir_name, "config"] + (["skills"] if file.kind == "skill" else [])
+
+
+def _open_directory(
+    config: "Config", user_id: str, file: ConfigFile, *, create: bool = False,
+) -> tuple[int | None, bool]:
+    """``(fd, absent)`` on the file's directory, walked from the user's root
+    with no link followed (ISSUE-981). Every read and write here goes through
+    it: the directory is in the tree the user's own sandbox writes."""
+    from istota.sandbox.confined import open_dir
+
+    root = config.workspace_root(user_id)
+    if root is None:
+        return None, False
+    try:
+        if create:
+            return open_or_create_dirs(root, _parts(config, file)), False
+        return open_dir(root, *_parts(config, file), raise_errors=True), False
+    except FileNotFoundError:
+        return None, True
+    except (OSError, ValueError):
+        return None, False
 
 
 def _read_cap(file: ConfigFile) -> int:
@@ -91,6 +117,16 @@ def list_files(config: "Config", user_id: str) -> list[dict]:
     user_root = config.workspace_root(user_id)
     names = [*CORE_FILES, *(SKILL_PREFIX + skill for skill in skills)]
     directories: dict[str, Path | None] = {}
+    opened: dict[str, tuple[int | None, bool]] = {}
+    try:
+        return _list_rows(config, user_id, skills, user_root, names, directories, opened)
+    finally:
+        for dir_fd, _absent in opened.values():
+            if dir_fd is not None:
+                os.close(dir_fd)
+
+
+def _list_rows(config, user_id, skills, user_root, names, directories, opened) -> list[dict]:
     rows = []
     for name in names:
         file = lookup(config, user_id, name, skills)
@@ -103,32 +139,46 @@ def list_files(config: "Config", user_id: str) -> list[dict]:
             if user_root is not None:
                 relative = (directory / file.leaf).relative_to(user_root.resolve())
                 row["view_path"] = f"/Users/{user_id}/{relative.as_posix()}"
-            try:
-                st = os.lstat(directory / file.leaf)
-            except FileNotFoundError:
-                row["editable"] = True
-            except OSError:
-                pass
+            if file.kind not in opened:
+                opened[file.kind] = _open_directory(config, user_id, file)
+            dir_fd, absent = opened[file.kind]
+            if dir_fd is None:
+                row["editable"] = absent
             else:
-                row["exists"] = True
-                if stat.S_ISREG(st.st_mode):
-                    row["size"] = st.st_size
+                try:
+                    st = os.stat(file.leaf, dir_fd=dir_fd, follow_symlinks=False)
+                except FileNotFoundError:
                     row["editable"] = True
+                except OSError:
+                    pass
+                else:
+                    row["exists"] = True
+                    if stat.S_ISREG(st.st_mode):
+                        row["size"] = st.st_size
+                        row["editable"] = True
         rows.append(row)
     return rows
 
 
 def read(config: "Config", user_id: str, file: ConfigFile) -> str | None:
     """The file's text, `""` when it is absent, None when it was refused."""
-    directory = _directory(config, user_id, file)
-    if directory is None:
+    if _directory(config, user_id, file) is None:
         logger.warning("config_file_outside_user_tree user=%s file=%s", user_id, file.name)
         return None
-    return _read_path(user_id, file, directory / file.leaf)
+    return _read_through(config, user_id, file)
 
 
-def _read_path(user_id: str, file: ConfigFile, path: Path) -> str | None:
-    text, reason = storage.read_regular_file(path, max_bytes=_read_cap(file))
+def _read_through(config: "Config", user_id: str, file: ConfigFile) -> str | None:
+    dir_fd, absent = _open_directory(config, user_id, file)
+    if dir_fd is None:
+        if absent:
+            return ""
+        logger.warning("config_file_read_refused user=%s file=%s reason=dir_not_openable", user_id, file.name)
+        return None
+    try:
+        text, reason = storage.read_regular_file(Path(file.leaf), max_bytes=_read_cap(file), dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
     if reason is not None:
         logger.warning("config_file_read_refused user=%s file=%s reason=%s", user_id, file.name, reason)
     return text
@@ -153,17 +203,22 @@ def save(
         return text_files.SaveOutcome("failed")
     # The resolved path is the lock key, as for every daemon writer of the file.
     path = directory / file.leaf
-    parts = [config.bot_dir_name, "config"] + (["skills"] if file.kind == "skill" else [])
 
     def write(text: str) -> bool:
         # The directory may not exist yet (a first overlay). Each component is
-        # created and opened without following a link, as an upload's is.
-        os.close(open_or_create_dirs(config.workspace_root(user_id), parts))
-        return storage.write_regular_file(path, text)
+        # created and opened without following a link, as an upload's is, and
+        # the write goes through that descriptor rather than the path.
+        dir_fd, _absent = _open_directory(config, user_id, file, create=True)
+        if dir_fd is None:
+            return False
+        try:
+            return storage.write_regular_file(Path(file.leaf), text, dir_fd=dir_fd)
+        finally:
+            os.close(dir_fd)
 
     return text_files.save(
         config, user_id, path, content, expected_revision,
-        read=lambda: _read_path(user_id, file, path),
+        read=lambda: _read_through(config, user_id, file),
         write=write,
         validate=_validator(config, user_id, file),
         max_bytes=file.max_bytes,

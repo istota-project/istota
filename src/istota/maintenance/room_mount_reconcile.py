@@ -344,7 +344,7 @@ def _rewrite_user(config, user: str, mapping: dict[str, str], *, dry_run: bool) 
         path = directory / filename
         if _local_kind(path) is None:
             continue
-        content, reason = storage.read_regular_file(path)
+        content, reason = storage.read_user_config_text(config, user, filename)
         if reason:
             raise ValueError(f"{filename}: {reason}")
         plan = _cron_plan(config, user, content, mapping) if filename == "CRON.md" else _briefing_plan(content, mapping)
@@ -355,13 +355,13 @@ def _rewrite_user(config, user: str, mapping: dict[str, str], *, dry_run: bool) 
     for filename, content, plan in plans:
         _backup(config, (user,), filename, content)
     for filename, content, plan in plans:
-        current, reason = storage.read_regular_file(directory / filename)
+        current, reason = storage.read_user_config_text(config, user, filename)
         if reason or current != content:
             raise ValueError(f"{filename} changed during migration")
         if filename == "CRON.md":
             ok = cron_loader._write_cron_md(config, user, plan[2], doc=plan[1], externalize_prompts=False)
         else:
-            ok = storage.write_regular_file(directory / filename, plan)
+            ok = storage.write_user_config_file(config, user, filename, plan)
         if not ok:
             raise OSError(f"{filename} write failed")
 

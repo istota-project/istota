@@ -1093,19 +1093,19 @@ class TestUserConfigPlantedPaths:
 
         assert read_user_memory_v2(mount_config, "alice") is None
 
-    def test_an_ancestor_symlink_inside_the_users_own_tree_is_allowed(
+    def test_an_ancestor_symlink_inside_the_users_own_tree_is_refused_too(
         self, mount_config
     ):
-        # Containment, not "no symlinks": a link that stays inside the user's
-        # own tree leads nowhere they could not already reach, and refusing it
-        # would break someone who reorganised their own workspace.
+        # Reversed by ISSUE-981, as ISSUE-344 reversed it for overlays: a link
+        # that stays inside the user's tree cannot be told from one just
+        # repointed at another user's, so the walk refuses both.
         base = mount_config.workspace_path / "Users" / "alice"
         real = base / "istota" / "real_config"
         real.mkdir(parents=True)
         (real / "USER.md").write_text("Remember: likes coffee")
         (base / "istota" / "config").symlink_to(real, target_is_directory=True)
 
-        assert read_user_memory_v2(mount_config, "alice") == "Remember: likes coffee"
+        assert read_user_memory_v2(mount_config, "alice") is None
 
     def test_init_memory_refuses_to_write_through_a_dangling_symlink(
         self, mount_config, tmp_path

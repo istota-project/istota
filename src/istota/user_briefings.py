@@ -541,8 +541,8 @@ def _read_one_user(
     from .skills._loader import read_overlay_bytes
     from .storage import (
         USER_CONFIG_READ_CAP_BYTES,
+        _walk_user_config_dir,
         get_user_briefings_path,
-        resolve_user_config_dir,
     )
 
     # The hardened read every other reader of `{bot_dir}/config/` uses
@@ -550,14 +550,22 @@ def _read_one_user(
     # leaf opened `O_NOFOLLOW | O_NONBLOCK`, so a symlink planted at the name
     # cannot import another file and a FIFO cannot hang the scheduler's start.
     # A refusal is retried at the next start rather than marked done.
-    config_dir = resolve_user_config_dir(config, user_id)
-    if config_dir is None:
-        logger.warning("BRIEFINGS.md: %s's config dir is outside their tree", user_id)
-        return None
+    # The directory itself is walked with no link followed and read through
+    # its descriptor (ISSUE-981); an absent one reads like an absent file.
     name = Path(get_user_briefings_path(user_id, bot_dir)).name
-    data, reason, size = read_overlay_bytes(
-        config_dir / name, max_bytes=USER_CONFIG_READ_CAP_BYTES,
-    )
+    dir_fd, absent = _walk_user_config_dir(config, user_id)
+    if dir_fd is None and not absent:
+        logger.warning("BRIEFINGS.md: %s's config dir could not be opened", user_id)
+        return None
+    if dir_fd is None:
+        data, reason, size = b"", None, None
+    else:
+        try:
+            data, reason, size = read_overlay_bytes(
+                Path(name), max_bytes=USER_CONFIG_READ_CAP_BYTES, dir_fd=dir_fd,
+            )
+        finally:
+            os.close(dir_fd)
     if reason is not None:
         logger.warning("BRIEFINGS.md refused for %s: %s", user_id, reason)
         return None

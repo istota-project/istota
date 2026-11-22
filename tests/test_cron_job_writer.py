@@ -249,7 +249,7 @@ class TestRefusals:
 
     def test_a_failed_write(self, config, mount, monkeypatch):
         write_file(mount, TWO_JOBS)
-        monkeypatch.setattr("istota.storage.write_regular_file", lambda *_: False)
+        monkeypatch.setattr("istota.storage.write_regular_file", lambda *_, **__: False)
         outcome = save_job_definition(config, USER, job("third"), original_name=None, expected_revision=None)
         assert outcome.status == "failed"
 

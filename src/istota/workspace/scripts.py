@@ -245,15 +245,11 @@ def _target_kind(root: Path, path: str) -> str | None:
 
 
 def _load_source(config: "Config", user_id: str, source: str, loader) -> tuple[object, str]:
-    directory = storage.resolve_user_config_dir(config, user_id)
-    if directory is None:
+    present = storage.user_config_file_lexists(config, user_id, f"{source.upper()}.md")
+    if present is None:
         return None, "error"
-    try:
-        (directory / f"{source.upper()}.md").lstat()
-    except FileNotFoundError:
+    if not present:
         return None, "missing"
-    except OSError:
-        return None, "error"
     try:
         loaded = loader(config, user_id)
         if loaded is None and source == "heartbeat":

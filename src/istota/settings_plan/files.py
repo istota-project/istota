@@ -2,7 +2,6 @@
 
 from contextlib import closing, contextmanager
 from dataclasses import asdict, fields, replace
-import os
 import sqlite3
 import tomllib
 
@@ -19,7 +18,6 @@ from istota.settings_plan.profiles import validate_destination
 from istota.settings_plan.schema import SchemaError, validate_user_plan
 from istota.transport import parse_output_target
 from istota.workspace import text_files
-from istota.workspace.writes import open_or_create_dirs
 
 
 def _file_path(config, user, filename, field_path):
@@ -29,8 +27,9 @@ def _file_path(config, user, filename, field_path):
     return directory / filename
 
 
-def _read_file(path, field_path):
-    content, refusal = storage.read_regular_file(path)
+def _read_file(config, user, filename, field_path):
+    # Through the directory's descriptor, never the resolved path (ISSUE-981).
+    content, refusal = storage.read_user_config_text(config, user, filename)
     if refusal is not None:
         raise ExecutionError("file_unavailable", field_path)
     return content
@@ -68,8 +67,7 @@ def _cron_document(content, config, user):
 def snapshot_cron(conn, config, user):
     """Complete file definitions and revision, refusing pending DB migration."""
     field_path = ["users", user, "scheduled_jobs"]
-    path = _file_path(config, user, "CRON.md", field_path)
-    content = _read_file(path, field_path)
+    content = _read_file(config, user, "CRON.md", field_path)
     doc, _, definitions = _cron_document(content, config, user)
     if doc.is_template and any(not job.name.startswith(cron_loader._MODULE_JOB_PREFIX)
                                for job in db.get_user_scheduled_jobs(conn, user)):
@@ -152,20 +150,18 @@ def apply_file(context, user, section, filename, content, expected, operations, 
         if validate is not None:
             validate()
         # Same directory creation and atomic writer as the workspace editor.
-        os.close(open_or_create_dirs(config.workspace_root(user), [config.bot_dir_name, "config"]))
-        if not storage.write_regular_file(path, content):
+        if not storage.write_user_config_file(config, user, filename, content):
             raise ExecutionError("file_write_failed", field_path)
 
     context.units.append(Unit(section, user, operations, transaction,
-                              lambda conn: text_files.revision(_read_file(path, field_path)),
+                              lambda conn: text_files.revision(_read_file(config, user, filename, field_path)),
                               write, expected_state=expected))
 
 
 def plan_cron(plan, user, context, options):
     config = context.config
     field_path = ["users", user, "scheduled_jobs"]
-    path = _file_path(config, user, "CRON.md", field_path)
-    content = _read_file(path, field_path)
+    content = _read_file(config, user, "CRON.md", field_path)
     expected = text_files.revision(content)
     doc, data, before = _cron_document(content, config, user)
     existing = {item["name"]: item for item in before}
@@ -297,8 +293,7 @@ def _validate_heartbeat_definition(definition, field_path):
 def snapshot_heartbeat(config, user):
     """Complete file definitions and revision; absent overrides reset a target."""
     field_path = ["users", user, "heartbeat"]
-    path = _file_path(config, user, "HEARTBEAT.md", field_path)
-    content = _read_file(path, field_path)
+    content = _read_file(config, user, "HEARTBEAT.md", field_path)
     _, _, definition = _heartbeat_document(content, user)
     definition["checks"].sort(key=lambda item: item["name"])
     for check in definition["checks"]:
@@ -344,8 +339,7 @@ def _validate_heartbeat_reach(config, user, definition, before=None):
 def plan_heartbeat(plan, user, context, options):
     config = context.config
     field_path = ["users", user, "heartbeat"]
-    path = _file_path(config, user, "HEARTBEAT.md", field_path)
-    content = _read_file(path, field_path)
+    content = _read_file(config, user, "HEARTBEAT.md", field_path)
     expected = text_files.revision(content)
     span, data, before = _heartbeat_document(content, user)
     declaration = plan.users[user].sections["heartbeat"]

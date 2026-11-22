@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import stat
 import re
 import time
 from datetime import datetime, timedelta
@@ -19,12 +20,11 @@ from ..mail.support import own_addresses
 from ..rooms.scopes import turn_author
 from istota.usage.telemetry import SYSTEM_USER_ID
 from ..storage import (
-    _contained_under_user_root,
     _get_mount_path,
     create_file_if_absent,
     ensure_channel_directories,
+    open_user_config_dir,
     open_user_skill_overlays,
-    resolve_user_config_dir,
     get_user_memories_path,
     get_user_playbooks_path,
     get_channel_memories_path,
@@ -34,7 +34,8 @@ from ..storage import (
     read_dated_memories,
     read_channel_memory,
     write_regular_file,
-    _DATED_MEMORY_PATTERN,
+    dated_memory_names,
+    open_walked_dir,
 )
 
 logger = logging.getLogger("istota.sleep_cycle")
@@ -1553,7 +1554,32 @@ def curate_user_memory(
     result back, and audit-logs the run.
 
     Returns True if USER.md was updated.
+
+    `config/` is opened **once**, here, and the first read, the re-read after
+    the LLM call and the write all go through that one descriptor (ISSUE-339,
+    ISSUE-981). A path resolved once and reopened by name let a swap of
+    `config/` during the brain call aim the anti-clobber guard and the write
+    at another directory, another user's included.
     """
+    if not config.has_workspace:
+        logger.warning("USER.md curation requires mount mode, skipping for %s", user_id)
+        return False
+    config_dir, dir_fd = open_user_config_dir(config, user_id, create=True)
+    if dir_fd is None:
+        logger.warning(
+            "memory_curation_aborted user=%s reason=config_dir_not_openable", user_id,
+        )
+        return False
+    try:
+        return _curate_user_memory_at(config, user_id, conn, config_dir, dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def _curate_user_memory_at(
+    config: Config, user_id: str, conn: "db.sqlite3.Connection | None",
+    config_dir: Path, dir_fd: int,
+) -> bool:
     import hashlib
     import json
 
@@ -1582,28 +1608,14 @@ def curate_user_memory(
         prepend_agents_header_if_missing,
     )
 
-    if not config.has_workspace:
-        logger.warning("USER.md curation requires mount mode, skipping for %s", user_id)
-        return False
-
     # The audit, last-seen and lint-seen writes below each open their own
     # connection, which waits on a lock `conn` holds.
     _release_write_lock(conn)
 
-    # `config/` is resolved **once**, here, and every later read and write in
-    # this function goes through the path derived from it (ISSUE-339). Resolving
-    # again after the LLM call would re-walk `config/` from scratch, so the
-    # anti-clobber sha guard would compare whatever the directory points at now
-    # against a write going to the path resolved minutes earlier — and an
-    # in-tree link swap during the brain call is permitted and model-reachable.
-    config_dir = resolve_user_config_dir(config, user_id)
-    if config_dir is None:
-        logger.warning(
-            "memory_curation_aborted user=%s reason=config_dir_outside_user_tree",
-            user_id,
-        )
-        return False
+    # For the lock key and the index only; every read and write goes through
+    # `dir_fd`.
     memory_path = config_dir / "USER.md"
+    leaf = Path("USER.md")
 
     # The tri-state matters here and nowhere else, so the curator reads the leaf
     # directly rather than through `read_user_memory_v2`, which folds every
@@ -1616,7 +1628,7 @@ def curate_user_memory(
     # 1.26 MB USER.md was reduced to 456 bytes that way, with the run reporting
     # success. Refusing to curate what it cannot read is the fix; raising the
     # read cap, which made it reachable by padding, is depth behind it.
-    current, read_reason = read_regular_file(memory_path)
+    current, read_reason = read_regular_file(leaf, dir_fd=dir_fd)
     if read_reason is not None:
         logger.warning(
             "memory_curation_aborted user=%s reason=user_md_unreadable detail=%s",
@@ -1720,10 +1732,8 @@ def curate_user_memory(
         )
         return False
 
-    # `config_dir` and `memory_path` come from the single resolve at the top of
-    # this function. Not re-resolved here: that is the whole point of holding
-    # the resolved path across the brain call.
-    config_dir.mkdir(parents=True, exist_ok=True)
+    # `dir_fd` is the one walk `curate_user_memory` made. Not reopened here:
+    # that is the whole point of holding it across the brain call.
 
     header_added = False
     # Anchor under the user's deferred dir so the lock is the same inode the
@@ -1736,12 +1746,12 @@ def curate_user_memory(
             # between read and write), abort tonight's curation rather
             # than clobber the runtime write.
             #
-            # Off `memory_path`, not by re-deriving the path from the config —
+            # Through `dir_fd`, not by re-deriving the path from the config —
             # the guard has to read the same file the write is about to go to.
             # A refusal aborts: falling back to `current` would compare a
             # refusal against itself, match, and license the write, which is
             # exactly the shape that destroyed the file above.
-            latest, latest_reason = read_regular_file(memory_path)
+            latest, latest_reason = read_regular_file(leaf, dir_fd=dir_fd)
             if latest_reason is not None:
                 logger.warning(
                     "memory_curation_aborted user=%s reason=user_md_unreadable_on_recheck detail=%s",
@@ -1806,7 +1816,7 @@ def curate_user_memory(
             # `os.replace` so neither leaves a truncated file behind. The reason
             # here stays generic rather than naming one of the two, since this
             # branch cannot tell them apart.
-            if not write_regular_file(memory_path, new_text):
+            if not write_regular_file(leaf, new_text, dir_fd=dir_fd):
                 logger.warning(
                     "memory_curation_aborted user=%s reason=user_md_not_written",
                     user_id,
@@ -1906,10 +1916,21 @@ def cleanup_old_memory_files(
     if not config.has_workspace:
         return 0
 
-    context_dir = _get_mount_path(config, get_user_memories_path(user_id))
-    if not context_dir.exists():
+    # Walked from the user's root, listed and unlinked through the descriptor:
+    # a swap of `memories/` deleted another user's files (ISSUE-981).
+    dir_fd, _absent = open_walked_dir(config.workspace_root(user_id), "memories")
+    if dir_fd is None:
         return 0
+    try:
+        return _cleanup_dated_at(
+            dir_fd, _user_tz_cutoff(config, user_id, retention_days),
+            what=f"memory file(s) for {user_id}",
+        )
+    finally:
+        os.close(dir_fd)
 
+
+def _user_tz_cutoff(config: Config, user_id: str, retention_days: int) -> str:
     # Cutoff in the user's timezone — filenames are user-local
     # YYYY-MM-DD, so a server-tz cutoff can be off by a day either way.
     # Live DB value so it tracks a web-UI tz change (ISSUE-099).
@@ -1922,19 +1943,23 @@ def cleanup_old_memory_files(
     # (ISSUE-470), so retention measures the age of the content. That is one
     # calendar day tighter than it was before the stems moved.
     cutoff = datetime.now(user_tz) - timedelta(days=retention_days)
-    cutoff_str = cutoff.strftime("%Y-%m-%d")
+    return cutoff.strftime("%Y-%m-%d")
 
+
+def _cleanup_dated_at(dir_fd: int, cutoff_str: str, *, what: str) -> int:
+    """Unlink the regular dated files in ``dir_fd`` older than ``cutoff_str``."""
     deleted = 0
-    for path in context_dir.iterdir():
-        if path.is_file() and _DATED_MEMORY_PATTERN.match(path.name):
-            date_str = path.stem
-            if date_str < cutoff_str:
-                path.unlink()
-                deleted += 1
-                logger.debug("Deleted old memory file: %s", path.name)
+    for name in dated_memory_names(dir_fd):
+        if name[:-3] < cutoff_str:
+            try:
+                os.unlink(name, dir_fd=dir_fd)
+            except FileNotFoundError:
+                continue
+            deleted += 1
+            logger.debug("Deleted old dated memory file: %s", name)
 
     if deleted:
-        logger.info("Cleaned up %d old memory file(s) for %s", deleted, user_id)
+        logger.info("Cleaned up %d old %s", deleted, what)
 
     return deleted
 
@@ -1987,8 +2012,8 @@ _PINNED_FM_RE = re.compile(
 )
 
 
-def _playbook_is_pinned(path: Path, *, on_read_error: bool = False) -> bool:
-    """True if the playbook file carries ``pinned: true`` in its frontmatter.
+def _playbook_text_is_pinned(text: str) -> bool:
+    """True if the playbook text carries ``pinned: true`` in its frontmatter.
 
     A pinned playbook is a human-corrected version the sleep cycle must not
     clobber on the next same-slug re-derivation (ISSUE-174 Concern 1). Only the
@@ -1996,28 +2021,9 @@ def _playbook_is_pinned(path: Path, *, on_read_error: bool = False) -> bool:
     inspected; a match in the body doesn't count, and a file with an opening
     fence but no closing one has no valid frontmatter (so a body ``pinned: true``
     can't false-positive). Tolerates a leading BOM / blank lines, quoted value,
-    and an inline comment.
-
-    ``on_read_error`` is what an unreadable file answers, and the two callers
-    need opposite answers because the consequence of being wrong is not the
-    same shape (ISSUE-430). The re-derivation caller fails **open** (``False``,
-    the default): the cost of overwriting is a regenerated playbook, and
-    refusing to overwrite on a transient read failure would strand a stale one.
-    The prune caller fails **closed** (``True``), because its next statement is
-    ``path.unlink()`` — a transient read failure on the shared mount would
-    otherwise delete a human-pinned playbook permanently, reported as nothing
-    but a count. The loop's own ``except OSError`` cannot cover that, since the
-    error is swallowed a frame down.
+    and an inline comment. The prune treats a file it cannot read as pinned
+    (ISSUE-430), since its next step is an unlink.
     """
-    try:
-        text = path.read_text()
-    except OSError:
-        return on_read_error
-    return _playbook_text_is_pinned(text)
-
-
-def _playbook_text_is_pinned(text: str) -> bool:
-    """``_playbook_is_pinned`` for text the caller already read."""
     text = text.lstrip("﻿").lstrip()
     if not text.startswith("---"):
         return False
@@ -2163,37 +2169,85 @@ def cleanup_old_playbooks(
     if not config.has_workspace:
         return 0
 
+    from ..sandbox.confined import open_dir, parts_below  # noqa: PLC0415
+
     pb_dir = _get_mount_path(config, get_user_playbooks_path(user_id, config.bot_dir_name))
-    if not pb_dir.exists():
-        return 0
-    # This path touches and deletes files, so a `playbooks/` linked out of the
-    # user's tree is refused rather than pruned.
-    if _contained_under_user_root(config, user_id, pb_dir) is None:
+    root = config.workspace_root(user_id)
+    parts = parts_below(pb_dir, root) if root is not None else None
+    if parts is None:
         logger.warning("playbook_retention_refused user=%s reason=outside_user_tree", user_id)
         return 0
+    # This path touches and deletes files, so `playbooks/` is walked from the
+    # user's root with no link followed and every touch, read and unlink goes
+    # through that descriptor: a check of the path and an unlink by name let a
+    # swap of `playbooks/` delete another user's (ISSUE-981).
+    try:
+        pb_fd = open_dir(root, *parts, raise_errors=True)
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        pb_fd = None
+    if pb_fd is None:
+        logger.warning("playbook_retention_refused user=%s reason=dir_not_openable", user_id)
+        return 0
+    try:
+        return _prune_playbooks(config, user_id, retention_days, conn, pb_dir, pb_fd)
+    finally:
+        os.close(pb_fd)
 
+
+def _playbook_names(pb_fd: int) -> list[str]:
+    """The regular ``*.md`` files in ``pb_fd``, by name."""
+    with os.scandir(pb_fd) as entries:
+        listed = sorted(entry.name for entry in entries if entry.name.endswith(".md"))
+    names = []
+    for name in listed:
+        try:
+            st = os.stat(name, dir_fd=pb_fd, follow_symlinks=False)
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode):
+            names.append(name)
+    return names
+
+
+def _touch_at(pb_fd: int, name: str, ts: float) -> None:
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pb_fd)
+    try:
+        os.utime(fd, (ts, ts))
+    finally:
+        os.close(fd)
+
+
+def _prune_playbooks(
+    config: Config, user_id: str, retention_days: int,
+    conn: "db.sqlite3.Connection | None", pb_dir: Path, pb_fd: int,
+) -> int:
     now_ts = datetime.now(tz=ZoneInfo("UTC")).timestamp()
 
     # Grandfather one-shot: give every existing playbook a fresh window keyed
     # from first upgrade so nothing is deleted on stale write-mtime.
-    sentinel = pb_dir / _RETENTION_SENTINEL
-    if not sentinel.exists():
+    try:
+        os.stat(_RETENTION_SENTINEL, dir_fd=pb_fd, follow_symlinks=False)
+        grandfathered = True
+    except FileNotFoundError:
+        grandfathered = False
+    if not grandfathered:
         unrefreshed = 0
-        for path in pb_dir.iterdir():
-            if path.is_file() and path.suffix == ".md":
-                try:
-                    os.utime(path, (now_ts, now_ts))
-                except OSError as e:
-                    # If the mount rejects utimens the grandfather can't refresh
-                    # this file's clock, and the prune below would then delete it
-                    # on stale *write*-mtime. Warn rather than debug: this is the
-                    # point where a use-based clock silently degrades into a
-                    # write-based one that deletes files.
-                    logger.warning(
-                        "playbook grandfather mtime refresh failed for %s: %s", path.name, e
-                    )
-                    unrefreshed += 1
-                    continue
+        for name in _playbook_names(pb_fd):
+            try:
+                _touch_at(pb_fd, name, now_ts)
+            except OSError as e:
+                # If the mount rejects utimens the grandfather can't refresh
+                # this file's clock, and the prune below would then delete it
+                # on stale *write*-mtime. Warn rather than debug: this is the
+                # point where a use-based clock silently degrades into a
+                # write-based one that deletes files.
+                logger.warning(
+                    "playbook grandfather mtime refresh failed for %s: %s", name, e
+                )
+                unrefreshed += 1
+                continue
         if unrefreshed:
             # Leave the sentinel unwritten so the next cycle grandfathers again
             # instead of arming the prune against clocks we could not set
@@ -2210,7 +2264,8 @@ def cleanup_old_playbooks(
         # cycle re-grandfathers, which is the safe way to fail. The helper
         # logs its own refusal and never writes through a link.
         create_file_if_absent(
-            sentinel, datetime.now(tz=ZoneInfo("UTC")).date().isoformat(),
+            Path(_RETENTION_SENTINEL), datetime.now(tz=ZoneInfo("UTC")).date().isoformat(),
+            dir_fd=pb_fd,
         )
         logger.info("playbook_retention_grandfathered user=%s", user_id)
         return 0
@@ -2218,16 +2273,16 @@ def cleanup_old_playbooks(
     cutoff_ts = now_ts - retention_days * 86400
 
     deleted = 0
-    for path in pb_dir.iterdir():
-        if not (path.is_file() and path.suffix == ".md"):
-            continue
+    for name in _playbook_names(pb_fd):
+        path = pb_dir / name
         try:
             # Fail closed: an unreadable file is treated as pinned, because the
             # alternative on this path is an unlink we cannot undo.
-            if _playbook_is_pinned(path, on_read_error=True):
+            text, reason = read_regular_file(Path(name), dir_fd=pb_fd)
+            if reason is not None or _playbook_text_is_pinned(text or ""):
                 continue
-            if path.stat().st_mtime < cutoff_ts:
-                path.unlink()
+            if os.stat(name, dir_fd=pb_fd, follow_symlinks=False).st_mtime < cutoff_ts:
+                os.unlink(name, dir_fd=pb_fd)
                 if conn is not None:
                     try:
                         from .search import _delete_source_chunks, source_path
@@ -2246,7 +2301,7 @@ def cleanup_old_playbooks(
                         for key in keys:
                             _delete_source_chunks(conn, user_id, "playbook", key)
                     except Exception as e:
-                        logger.debug("Playbook chunk cleanup failed for %s: %s", path.name, e)
+                        logger.debug("Playbook chunk cleanup failed for %s: %s", name, e)
                 deleted += 1
         except OSError:
             continue
@@ -2686,12 +2741,6 @@ def cleanup_old_channel_memory_files(
     if not config.has_workspace:
         return 0
 
-    memories_dir = _get_mount_path(
-        config, get_channel_memories_path(conversation_token)
-    )
-    if not memories_dir.exists():
-        return 0
-
     # Channel filenames are written in UTC (channels span timezones); cutoff
     # follows the same convention to stay aligned.
     # Stems name the window's day, not the run's (ISSUE-470) — see the user
@@ -2699,23 +2748,21 @@ def cleanup_old_channel_memory_files(
     cutoff = datetime.now(ZoneInfo("UTC")) - timedelta(days=retention_days)
     cutoff_str = cutoff.strftime("%Y-%m-%d")
 
-    deleted = 0
-    for path in memories_dir.iterdir():
-        if path.is_file() and _DATED_MEMORY_PATTERN.match(path.name):
-            date_str = path.stem
-            if date_str < cutoff_str:
-                path.unlink()
-                deleted += 1
-                logger.debug("Deleted old channel memory file: %s", path.name)
-
-    if deleted:
-        logger.info(
-            "Cleaned up %d old channel memory file(s) for %s",
-            deleted,
-            conversation_token,
+    # `memories/` is an entry every task in the room can replace, so it is
+    # walked from the channels root and pruned through the descriptor; a swap
+    # for a link to another room's deleted that room's files (ISSUE-981).
+    dir_fd, _absent = open_walked_dir(
+        _get_mount_path(config, "Channels"), conversation_token, "memories",
+    )
+    if dir_fd is None:
+        return 0
+    try:
+        return _cleanup_dated_at(
+            dir_fd, cutoff_str,
+            what=f"channel memory file(s) for {conversation_token}",
         )
-
-    return deleted
+    finally:
+        os.close(dir_fd)
 
 
 def check_channel_sleep_cycles(

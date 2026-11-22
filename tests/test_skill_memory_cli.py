@@ -754,23 +754,24 @@ class TestUserMdPlantedPaths:
         assert "TOP SECRET" not in captured
         assert json.loads(captured)["error"] == "user_md_outside_user_tree"
 
-    def test_an_ancestor_symlink_inside_the_users_own_tree_is_allowed(
+    def test_an_ancestor_symlink_inside_the_users_own_tree_is_refused_too(
         self, tmp_path, monkeypatch, capsys
     ):
-        # Containment is the user's own root, not the literal path. A link that
-        # stays inside the tree the sandbox binds read-write leads nowhere the
-        # user could not already reach, so refusing it would be stricter than
-        # the threat calls for — and would break a user who had reorganised
-        # their own config directory.
+        # Reversed by ISSUE-981: the read and the write walk from the user's
+        # root with no link followed, since a link that stays inside the tree
+        # cannot be told from one just repointed at another user's.
         user_md = _setup_user(tmp_path, monkeypatch)
         config_dir = user_md.parent
         real = config_dir.parent / "config.real"
         config_dir.rename(real)
         config_dir.symlink_to(real, target_is_directory=True)
+        before = (real / "USER.md").read_text() if (real / "USER.md").exists() else None
 
-        memory_main(["append", "--heading", "Notes", "--line", "a fact"])
-        assert json.loads(capsys.readouterr().out)["outcome"] == "applied"
-        assert "- a fact" in (real / "USER.md").read_text()
+        with pytest.raises(SystemExit):
+            memory_main(["append", "--heading", "Notes", "--line", "a fact"])
+        assert json.loads(capsys.readouterr().out)["error"] == "user_md_outside_user_tree"
+        after = (real / "USER.md").read_text() if (real / "USER.md").exists() else None
+        assert after == before
 
     def test_the_user_md_cap_matches_the_daemons(self):
         """`_MAX_USER_MD_READ_BYTES` is restated here rather than imported from
@@ -835,8 +836,8 @@ class TestUserMdPlantedPaths:
         user_md = _setup_user(tmp_path, monkeypatch)
         real_write = mem._atomic_write
 
-        def write_then_plant(path, text):
-            real_write(path, text)
+        def write_then_plant(path, text, walk=None):
+            real_write(path, text, walk)
             # Whatever the op did has landed. Now make the file unreadable
             # before the audit entry is composed.
             path.unlink()

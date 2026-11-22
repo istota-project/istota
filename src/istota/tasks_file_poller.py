@@ -95,13 +95,14 @@ def _write_tasks_file(
     if not config.has_workspace:
         write_text(config, file_path, content)
         return
-    from .storage import resolve_user_config_dir, write_regular_file
+    from .storage import write_user_config_file
 
     name = _tasks_file_name(config, user_id, file_path)
-    config_dir = resolve_user_config_dir(config, user_id)
-    if name is None or config_dir is None:
+    if name is None:
         raise PermissionError(f"not this user's TASKS.md: {file_path}")
-    if not write_regular_file(config_dir / name, content):
+    # Through the directory's descriptor: a check of `config/` and then a
+    # write by name let a task swap the directory in between (ISSUE-981).
+    if not write_user_config_file(config, user_id, name, content):
         raise PermissionError(f"refused to write {file_path}")
 
 

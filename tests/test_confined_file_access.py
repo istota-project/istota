@@ -16,9 +16,25 @@ this file fails when new code reaches for the unsafe idiom:
   walk takes it off.
 
 The scan is per function and reads the AST, so it misses a resolve in one
-function and a compare in its caller. It is a tripwire for the common shape,
-not a proof. It reads files off disk, which testmon cannot attribute, so it
-runs on a full or named run rather than under `scripts/qt`.
+function and a compare in its caller. Two more scans catch the shapes ISSUE-980
+and ISSUE-981 were (both per function too):
+
+- A function that calls one of the path-returning containment resolvers
+  (`resolve_user_config_dir` and its kin, `RESOLVERS`) and then reaches the
+  file system by name: an open, read, write, stat or listing with no
+  `dir_fd=`. That is a resolve in one function and an open in its caller,
+  which the first scan cannot see. The ones left are on
+  `RESOLVE_THEN_OPEN_ALLOWED`, each with its reason.
+- A function that tests `is_symlink()` and then `mkdir`s: the check-then-create
+  that ISSUE-980 bound by name seconds later (`SYMLINK_CHECK_THEN_MKDIR_ALLOWED`).
+
+Not done: an open with no resolve at all. Telling a user-controlled path from a
+daemon-composed one needs data flow the AST does not carry, and every attempt
+at it named hundreds of daemon-owned paths.
+
+It is a tripwire for the common shape, not a proof. It reads files off disk,
+which testmon cannot attribute, so it runs on a full or named run rather than
+under `scripts/qt`.
 """
 
 from __future__ import annotations
@@ -98,13 +114,66 @@ RESOLVE_THEN_COMPARE_ALLOWED = frozenset({
     "istota/webui/admin_logs.py::resolve_app_log_chain",
     "istota/webui/router_stubs.py::get_user_context",
     "istota/webui/router_stubs.py::make_get_user_context",
-    "istota/workspace/config_files.py::list_files",
+    "istota/workspace/config_files.py::_list_rows",
     "istota/workspace/reach.py::_mount_reach",
 })
 
 # The allowlist's size when the guard landed. Lower it as entries come off;
 # never raise it.
 ALLOWLIST_CEILING = 56
+
+#: Functions that return a containment-checked *path*, which a caller then has
+#: to walk again rather than open (ISSUE-981).
+RESOLVERS = frozenset({
+    "resolve_user_config_dir", "resolve_user_skill_overlays_dir", "resolve_user_scripts_dir",
+    "_contained_channel_dir", "_contained_under_user_root", "_contained_group_dir",
+    "_room_notes_dir", "room_notes_path", "contained_overlay_dir", "contained_group_dir",
+})
+_BY_NAME = frozenset({
+    "read_regular_file", "write_regular_file", "create_file_if_absent", "remove_regular_file",
+    "read_overlay_bytes", "read_text", "write_text", "read_bytes", "write_bytes", "open",
+    "mkdir", "lexists", "exists", "is_dir", "is_file", "lstat", "scandir", "iterdir",
+    "unlink", "rename", "replace",
+})
+
+# What is left of the shape after ISSUE-981, and why each may stay. Never add
+# one without a reason; take one off when its module is touched.
+RESOLVE_THEN_OPEN_ALLOWED = frozenset({
+    # `is_dir` as a precondition only; every read walks `open_overlay_dir`.
+    "istota/doctor.py::_overlay_dirs",
+    "istota/memory/search.py::reindex_skill_overlays",
+    "istota/memory/sleep_cycle.py::_skill_overlay_dir_state",
+    "istota/skills/skills/__init__.py::_resolve_overlay_dir",
+    "istota/maintenance/room_mount_reconcile.py::_rewrite_user",
+    # `Groups/<id>` and `Channels/<token>`: their parents are bound into no
+    # namespace, so a task can plant only below them, where the leaf is opened
+    # `O_NOFOLLOW` or the subdirectory walked.
+    "istota/groups/memory.py::retry_storage",
+    "istota/storage.py::ensure_channel_directories",
+    "istota/storage.py::read_channel_memory",
+    "istota/storage.py::init_channel_memory",
+    "istota/storage.py::ensure_group_directories",
+    # `scandir` on the walked descriptor, passed positionally.
+    "istota/storage.py::room_notes_tokens",
+    # Picks which notes file to name; the read and the write walk (Target.walk).
+    "istota/skills/memory/__init__.py::_room_notes_path",
+    # The `mkdir`s left are of `inbox/`, `memories/`, the bot dir and
+    # `shared/` directly under the user's root, the bind point a task cannot
+    # rename; an entry planted there is left as it is. Everything below the
+    # bot dir is made and written through descriptors.
+    "istota/storage.py::ensure_user_directories_v2",
+})
+RESOLVE_THEN_OPEN_CEILING = 13
+
+SYMLINK_CHECK_THEN_MKDIR_ALLOWED = frozenset({
+    # The per-user temp dir, whose parent is the temp root, bound at no path.
+    "istota/executor.py::ensure_task_temp_dir",
+    # Not reviewed under ISSUE-980: daemon-side directories, not task temp dirs.
+    "istota/devbox/proxy.py::_bind",
+    "istota/maintenance/bare_metal_import.py::_copy_entries",
+    "istota/setup_wizard.py::restore_rerun_snapshot",
+})
+SYMLINK_CHECK_THEN_MKDIR_CEILING = 4
 
 
 def _call_name(node: ast.Call) -> str | None:
@@ -168,6 +237,37 @@ def resolve_then_compare(source: str) -> list[str]:
     return found
 
 
+def _functions(source: str):
+    for fn in ast.walk(ast.parse(source)):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield fn, [n for n in ast.walk(fn) if isinstance(n, ast.Call)]
+
+
+def resolved_then_opened_by_name(source: str) -> list[str]:
+    """Functions that call a path-returning resolver and then reach the file
+    system by name, with no `dir_fd=`."""
+    found = []
+    for fn, calls in _functions(source):
+        if fn.name in RESOLVERS or not any(_call_name(c) in RESOLVERS for c in calls):
+            continue
+        if any(
+            _call_name(c) in _BY_NAME and not any(k.arg == "dir_fd" for k in c.keywords)
+            for c in calls
+        ):
+            found.append(fn.name)
+    return found
+
+
+def symlink_checked_then_made(source: str) -> list[str]:
+    """Functions that ask `is_symlink()` and then `mkdir`."""
+    found = []
+    for fn, calls in _functions(source):
+        names = {_call_name(c) for c in calls}
+        if "is_symlink" in names and names & {"mkdir", "makedirs"}:
+            found.append(fn.name)
+    return found
+
+
 def _sources() -> list[tuple[str, str]]:
     return [
         (path.relative_to(SRC).as_posix(), path.read_text(encoding="utf-8"))
@@ -210,6 +310,52 @@ class TestTheGuard:
         stale = sorted(RESOLVE_THEN_COMPARE_ALLOWED - found)
         assert stale == [], f"No longer resolve-then-compare; remove from the allowlist: {stale}"
         assert len(RESOLVE_THEN_COMPARE_ALLOWED) <= ALLOWLIST_CEILING
+
+
+class TestTheCheckThenUseGuards:
+    """ISSUE-981's extension: a resolve in one function and an open by name in
+    its caller, and ISSUE-980's check-then-mkdir."""
+
+    @pytest.mark.parametrize("scan, allowed, ceiling", [
+        (resolved_then_opened_by_name, RESOLVE_THEN_OPEN_ALLOWED, RESOLVE_THEN_OPEN_CEILING),
+        (symlink_checked_then_made, SYMLINK_CHECK_THEN_MKDIR_ALLOWED, SYMLINK_CHECK_THEN_MKDIR_CEILING),
+    ], ids=["resolve_then_open", "symlink_check_then_mkdir"])
+    def test_no_new_hit_and_no_stale_entry(self, scan, allowed, ceiling):
+        found = {f"{rel}::{name}" for rel, text in _sources() for name in scan(text)}
+        new = sorted(found - allowed)
+        assert new == [], (
+            "A path checked and then used by name is true only until a component "
+            "is swapped for a link. Walk it with sandbox.confined and pass the "
+            f"descriptor as dir_fd: {new}"
+        )
+        stale = sorted(allowed - found)
+        assert stale == [], f"No longer matches; remove from the allowlist: {stale}"
+        assert len(allowed) <= ceiling
+
+    def test_the_resolve_then_open_scan_flags_the_issue_981_shape(self):
+        source = (
+            "def write_cron(config, user_id, text):\n"
+            "    config_dir = resolve_user_config_dir(config, user_id)\n"
+            "    return write_regular_file(config_dir / 'CRON.md', text)\n"
+        )
+        assert resolved_then_opened_by_name(source) == ["write_cron"]
+
+    def test_a_descriptor_write_is_not_flagged(self):
+        source = (
+            "def write_cron(config, user_id, text, fd):\n"
+            "    path = resolve_user_config_dir(config, user_id)\n"
+            "    return write_regular_file(Path('CRON.md'), text, dir_fd=fd)\n"
+        )
+        assert resolved_then_opened_by_name(source) == []
+
+    def test_the_mkdir_scan_flags_the_issue_980_shape(self):
+        source = (
+            "def make(temp):\n"
+            "    if temp.is_symlink():\n"
+            "        raise OSError('link')\n"
+            "    temp.mkdir(parents=True, exist_ok=True)\n"
+        )
+        assert symlink_checked_then_made(source) == ["make"]
 
 
 class TestTheScanCanFail:

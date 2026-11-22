@@ -335,12 +335,10 @@ class TestPlaybooksConfigDefaults:
 
 class TestPinnedFrontmatterParsing:
     def test_variants(self, tmp_path):
-        from istota.memory.sleep_cycle import _playbook_is_pinned
+        from istota.memory.sleep_cycle import _playbook_text_is_pinned
 
         def pinned(text):
-            p = tmp_path / "x.md"
-            p.write_text(text)
-            return _playbook_is_pinned(p)
+            return _playbook_text_is_pinned(text)
 
         # Positive variants
         assert pinned("---\ntitle: t\npinned: true\n---\n\nbody")
@@ -542,9 +540,8 @@ class TestThePruneFailsClosed:
     def test_an_unreadable_playbook_is_not_deleted(self, pb_config):
         """The pin check fails open, and the prune's next statement is unlink.
 
-        `_playbook_is_pinned` answers False for an unreadable file, which is
-        right for the re-derivation caller (the cost is a regenerated playbook)
-        and wrong for this one. The prune loop's own `except OSError` cannot
+        The re-derivation caller treats an unreadable file as unpinned, which
+        is right there (the cost is a regenerated playbook) and wrong here. The prune loop's own `except OSError` cannot
         catch it, because the error is swallowed one frame down — so a transient
         read failure on the shared mount deleted a human-pinned playbook
         permanently, reported as nothing but a count.
@@ -555,14 +552,16 @@ class TestThePruneFailsClosed:
         pinned.write_text("---\npinned: true\n---\n\nbody")
         _backdate(pinned, 400)
 
-        real_read_text = Path.read_text
+        from istota.memory import sleep_cycle
 
-        def _fail_for_our_file(self, *a, **kw):
-            if self.name == "keep.md":
-                raise OSError("transient mount read failure")
-            return real_read_text(self, *a, **kw)
+        real_read = sleep_cycle.read_regular_file
 
-        with patch.object(Path, "read_text", _fail_for_our_file):
+        def _fail_for_our_file(path, *a, **kw):
+            if Path(path).name == "keep.md":
+                return None, "overlay_unreadable"
+            return real_read(path, *a, **kw)
+
+        with patch.object(sleep_cycle, "read_regular_file", _fail_for_our_file):
             deleted = cleanup_old_playbooks(pb_config, "alice", 30)
 
         assert deleted == 0
