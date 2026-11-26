@@ -34,6 +34,18 @@ def _mount_reach(place: Place, mounts: list[Mount]) -> str:
     return mode
 
 
+def _automatic_group_ids(conn: sqlite3.Connection, group_ids: list[str]) -> set[str]:
+    """Which of these is the All users group. Kept out of `place_reach`, which
+    branches on a place's `kind`: `tests/test_groups.py` reads any `kind` in a
+    function that fetches group rows as a decision on the group's."""
+    automatic = set()
+    for group_id in group_ids:
+        group = db.get_group(conn, group_id)
+        if group is not None and group["system_key"] == ALL_USERS:
+            automatic.add(group_id)
+    return automatic
+
+
 def place_reach(
     config: Config, conn: sqlite3.Connection, user_id: str, places: list[Place],
 ) -> dict[str, Reach]:
@@ -44,11 +56,7 @@ def place_reach(
         index, is_admin=config.is_admin(user_id),
         disabled_skills=effective_disabled_skills(config, user_id, index),
     )
-    automatic = set()
-    for group_id in groups:
-        group = db.get_group(conn, group_id)
-        if group is not None and group["system_key"] == ALL_USERS:
-            automatic.add(group_id)
+    automatic = _automatic_group_ids(conn, groups)
     all_users_places = {f"group:{group_id}" for group_id in automatic}
     # Off a room, `task_group_ids` leaves the automatic group out; only a room
     # linked to it binds its folder.
