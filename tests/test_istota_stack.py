@@ -5072,6 +5072,32 @@ class TestPlugins:
         assert call.endswith(f"plugins-sync /app/plugins/src/{WHEEL}")
         assert re.fullmatch(r"[0-9a-f]{64}\n", self._synced(pl).read_text())
 
+    def test_a_run_killed_between_the_two_renames_loses_no_tree(self, tmp_path):
+        """The one-shot's own body, run here with its two absolute paths replaced.
+
+        A run killed after `site` became `prev` and before `next` became `site`
+        leaves the last good tree as `prev` alone. The next run puts it back
+        before it removes anything, so a refused install still leaves a tree.
+        """
+        from tests.image import conftest as image_support
+
+        out = tmp_path / "installed"
+        (out / "prev").mkdir(parents=True)
+        (out / "prev" / "marker").write_text("last good")
+        refusing = tmp_path / "python"
+        refusing.write_text("#!/bin/sh\nexit 1\n")
+        refusing.chmod(0o755)
+        script = image_support.plugins_sync_script()
+        assert "out=/plugins-out" in script and "/app/.venv/bin/python" in script
+        script = script.replace("out=/plugins-out", f"out={out}")
+        script = script.replace("/app/.venv/bin/python", str(refusing))
+        result = subprocess.run(
+            ["sh", "-c", script, "plugins-sync"], capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode != 0, result.stdout + result.stderr
+        assert (out / "site" / "marker").read_text() == "last good"
+        assert not (out / "prev").exists()
+
     def test_an_unchanged_set_starts_nothing(self, pl):
         assert pl.run("plugins", "sync").returncode == 2
         pl.calls.unlink()

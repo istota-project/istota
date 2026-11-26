@@ -163,7 +163,10 @@ def check_tree(site_dir: Path, *, ignore: Iterable[str] = (PLUGIN_SITE_DIR,)) ->
     the venv already has, and one whose entry point names a package the venv
     already imports. The plugins directory is appended last on ``sys.path``,
     so in the last two the venv's copy wins and discovery cannot see the
-    plugin at all. Never raises.
+    plugin at all. Also refused: any top-level entry that is neither a
+    ``.dist-info`` directory nor a package an entry point names, since the tree
+    is on every interpreter's path and a ``sitecustomize.py`` there would run
+    in the web process, which otherwise imports no plugin code. Never raises.
     """
     site_dir = Path(site_dir)
     if not site_dir.is_dir():
@@ -178,6 +181,7 @@ def check_tree(site_dir: Path, *, ignore: Iterable[str] = (PLUGIN_SITE_DIR,)) ->
     except Exception as exc:
         return [f"{site_dir}: the venv's distributions could not be read ({type(exc).__name__})"]
     reasons = []
+    packages = set()
     for dist_info in sorted(site_dir.glob("*.dist-info")):
         dist = importlib.metadata.PathDistribution(dist_info)
         try:
@@ -195,11 +199,26 @@ def check_tree(site_dir: Path, *, ignore: Iterable[str] = (PLUGIN_SITE_DIR,)) ->
         if normalize_dist_name(name) in installed:
             reasons.append(f"{name}: the image's venv already has a distribution of this name, which would hide this one")
         for ep in entry_points:
-            if valid_plugin_value(ep.value) and _package_resolves(ep.value, search_path):
+            if not valid_plugin_value(ep.value):
+                continue
+            packages.add(ep.value)
+            if _package_resolves(ep.value, search_path):
                 reasons.append(
                     f"{name}: entry point {ep.name} names {ep.value}, which the image's venv already imports"
                     " and which would hide this one"
                 )
+    try:
+        entries = sorted(site_dir.iterdir())
+    except OSError as exc:
+        return [*reasons, f"{site_dir}: could not be listed ({type(exc).__name__})"]
+    for entry in entries:
+        is_dir = entry.is_dir() and not entry.is_symlink()
+        if is_dir and (entry.name.endswith(".dist-info") or entry.name in packages):
+            continue
+        reasons.append(
+            f"{entry.name}: not a plugin's package or its metadata; a plugin wheel puts one package"
+            " at the top level and nothing else (no second module, sitecustomize.py, .pth file or script)"
+        )
     return reasons
 
 

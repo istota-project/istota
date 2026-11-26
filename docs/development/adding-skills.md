@@ -192,7 +192,7 @@ The loader checks these rules each time it reads the skill index. A plugin that 
 - **`skill.md` sits in the package directory.** Without it the plugin is refused. A `skill.toml` there is ignored.
 - **`__main__.py` is the bundled template** from step 3: it imports `run_skill_main` from `istota.skills._cli` and calls it with `main`. A `cli: true` plugin without `__main__.py` loads, but its CLI cannot run, and `skills.plugins.entry` warns.
 - **The package `__init__` must be cheap and must not raise.** The daemon imports it on every task to look for `setup_env`, in the scheduler process, with the daemon's full environment. A plugin whose import raises is skipped with one ERROR line in the daemon log and not imported again until the daemon restarts, but its top-level code has already run once.
-- **No dependencies and no compiled code.** The wheel is installed with `--no-deps`, so a plugin runs on what the image's virtual environment already holds. Write `dependencies = []`, and do not declare `istota` itself. A wheel whose distribution name or package name the image already has is refused at sync, since the image's copy would hide it. If a plugin needs a library, the library has to become an optional extra of istota first.
+- **No dependencies and no compiled code.** The wheel is installed with `--no-deps`, so a plugin runs on what the image's virtual environment already holds. Write `dependencies = []`, and do not declare `istota` itself. A wheel whose distribution name or package name the image already has is refused at sync, since the image's copy would hide it. So is a wheel that installs anything beside its one package: a second top-level package or module, a script, a `.pth` file or a `sitecustomize.py`. The installed tree is on the path of every Python process in the image, the web process included, and nothing but the plugin's package belongs there. If a plugin needs a library, the library has to become an optional extra of istota first.
 
 ### What the manifest may say
 
@@ -254,7 +254,7 @@ The CLI convention is the bundled one: JSON envelopes on stdout, and `{"status":
 
 ### Developing and installing
 
-In a development checkout, `uv pip install -e path/to/example-plugin` puts the plugin in the virtual environment, where the loader finds it through the distribution's metadata. No `plugins/` directory is involved.
+In a development checkout, `uv pip install -e path/to/example-plugin` puts the plugin in the virtual environment, where the loader finds it through the distribution's metadata. An editable install keeps the package in your project directory, away from its metadata; the loader accepts that because the install records the project directory (`direct_url.json`), and still refuses a package of the same name found anywhere else (`shadowed`). No `plugins/` directory is involved.
 
 A plugin added, upgraded or removed takes effect when the daemon and web processes restart: each reads the skill index, and with it the proxy's list of skills, once. On the stack `istota-stack plugins sync` restarts both. In a development checkout, restart them yourself.
 

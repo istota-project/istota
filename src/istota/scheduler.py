@@ -2564,8 +2564,9 @@ def _purge_skill_jobs_at_startup(config: Config) -> None:
     """The boot purge, after one ERROR line per skill plugin that did not load.
 
     The loader logs a plugin problem at DEBUG only, since a `skills` subprocess
-    configures no logging; this is where the daemon says it once. A failure to
-    read the entry-point group is logged and keeps nothing.
+    configures no logging; this is where the daemon says it once. When the
+    entry-point group cannot be read, every plugin is missing from the index
+    and none can be told from a removed skill, so this boot purges nothing.
     """
     from .skills._loader import load_skill_index, plugin_problems
 
@@ -2573,8 +2574,8 @@ def _purge_skill_jobs_at_startup(config: Config) -> None:
     try:
         problems = plugin_problems(config.bundled_skills_dir)
     except Exception as e:  # noqa: BLE001
-        logger.error("Skill plugin discovery failed, no plugin skill jobs kept: %s", e)
-        problems = []
+        logger.error("Skill plugin discovery failed, skill jobs not purged at this start: %s", e)
+        return
     for problem in problems:
         logger.error(
             "Skill plugin %r (%s) not loaded: %s",

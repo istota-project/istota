@@ -351,6 +351,31 @@ class TestShadowing:
             (p.skill, f"{p.dist_name} {p.version}", "shadowed"),
         ]
 
+    @pytest.mark.parametrize("src_layout", [False, True], ids=["flat", "src"])
+    def test_an_editable_install_is_not_shadowed(self, tmp_path, plugin_builder, src_layout):
+        """`uv pip install -e` leaves the `.dist-info` in site-packages and the
+        package in the project, which `direct_url.json` names."""
+        p = plugin_builder.editable(src_layout=src_layout)
+        ops, bundled = _dirs(tmp_path)
+        meta = load_skill_index(ops, bundled)[p.skill]
+        assert meta.module == p.package
+        assert meta.plugin_dist == f"{p.dist_name} {p.version}"
+        assert plugin_problems(bundled) == []
+
+    def test_a_package_outside_an_editable_project_is_still_shadowed(self, tmp_path, plugin_builder):
+        p = plugin_builder.editable()
+        ops, bundled = _dirs(tmp_path)
+        assert p.skill in load_skill_index(ops, bundled)  # before the shadow
+        plugin_builder.shadow(p.package)
+        assert p.skill not in load_skill_index(ops, bundled)
+        assert [x.reason for x in plugin_problems(bundled)] == ["shadowed"]
+
+    def test_a_package_away_from_its_metadata_with_no_direct_url_is_shadowed(self, tmp_path, plugin_builder):
+        p = plugin_builder.editable(direct_url=False)
+        ops, bundled = _dirs(tmp_path)
+        assert p.skill not in load_skill_index(ops, bundled)
+        assert [x.reason for x in plugin_problems(bundled)] == ["shadowed"]
+
 
 class TestTheManifestFields:
     @pytest.mark.parametrize("extra", [

@@ -333,6 +333,27 @@ class PluginBuilder:
             archive.writestr(zipfile.ZipInfo(record_name, _ZIP_EPOCH), "\n".join(record) + "\n")
         return path
 
+    def editable(self, *, src_layout: bool = False, direct_url: bool = True, **kwargs) -> PluginPackage:
+        """An editable install: the ``.dist-info`` in one directory and the package
+        in a project directory the distribution's ``direct_url.json`` names.
+
+        ``src_layout`` puts the package under ``<project>/src/``;
+        ``direct_url=False`` leaves the file out, so nothing says where the
+        package belongs.
+        """
+        plugin = self.installed(**kwargs)
+        project = self.root / f"project_{secrets.token_hex(4)}"
+        source = project / "src" if src_layout else project
+        source.mkdir(parents=True)
+        (plugin.site / plugin.package).rename(source / plugin.package)
+        if direct_url:
+            dist_info = next(plugin.site.glob("*.dist-info"))
+            (dist_info / "direct_url.json").write_text(
+                json.dumps({"url": project.as_uri(), "dir_info": {"editable": True}})
+            )
+        self._activate(source, plugin.package)
+        return plugin
+
     def shadow(self, package: str) -> Path:
         """Another package of the same name, earlier on ``sys.path``."""
         site = self.root / f"shadow_{secrets.token_hex(4)}"

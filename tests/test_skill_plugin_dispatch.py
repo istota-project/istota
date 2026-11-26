@@ -495,9 +495,12 @@ class TestTheBootPurge:
         ]
         assert len(problems) == 1
 
-    def test_a_discovery_failure_does_not_stop_the_purge(
+    def test_a_discovery_failure_purges_nothing(
         self, tmp_path, db_path, monkeypatch, caplog,
     ):
+        """With the entry-point group unreadable every plugin is missing from the
+        index at once, and none can be told from a skill that was removed, so
+        this boot removes no skill job and no approval."""
         from istota.scheduler import _purge_skill_jobs_at_startup
         from istota.skills import _loader
 
@@ -506,12 +509,18 @@ class TestTheBootPurge:
 
         monkeypatch.setattr(_loader, "plugin_problems", broken)
         with db.get_db(db_path) as conn:
-            _job(conn, "orphan job", "example_never_installed")
+            _job(conn, "plugin job", "example_installed_but_unreadable")
+            task = _pending_task(conn, "example_installed_but_unreadable")
+            egress.add_grant(
+                conn, "alice", egress.cron_subject("plugin job"), "example.invalid", decided_via="web",
+            )
         config = Config(db_path=db_path, skills_dir=tmp_path / "operator-skills")
         with caplog.at_level(logging.ERROR, logger="istota.scheduler"):
             _purge_skill_jobs_at_startup(config)
         with db.get_db(db_path) as conn:
-            assert conn.execute("SELECT COUNT(*) FROM scheduled_jobs").fetchone()[0] == 0
+            assert [r[0] for r in conn.execute("SELECT name FROM scheduled_jobs")] == ["plugin job"]
+            assert conn.execute("SELECT status FROM tasks WHERE id = ?", (task,)).fetchone()[0] == "pending"
+            assert egress.grants_for(conn, "alice", egress.cron_subject("plugin job")) == {"example.invalid"}
         assert any("entry points unreadable" in r.getMessage() for r in caplog.records)
 
 
@@ -559,6 +568,22 @@ class TestTheTreeCheck:
         assert len(reasons) == 1, reasons
         for name in names:
             assert name in reasons[0], reasons
+
+    @pytest.mark.parametrize("extra", ["sitecustomize.py", "extra.pth", "example_library", "bin"])
+    def test_anything_beside_the_plugin_package_is_refused(self, plugin_builder, extra):
+        """The tree is on every interpreter's path through the `.pth`, so a
+        second top-level module is code or a library the daemon did not have:
+        `sitecustomize.py` would run in the web process at every start."""
+        plugin = plugin_builder.installed(activate=False)
+        stray = plugin.site / extra
+        if "." in extra:
+            stray.write_text("")
+        else:
+            stray.mkdir()
+            (stray / "__init__.py").write_text("")
+        reasons = skill_module.check_tree(plugin.site)
+        assert len(reasons) == 1, reasons
+        assert extra in reasons[0], reasons
 
     def test_the_artifact_tiers_wheel_unpacks_to_a_clean_tree(self, plugin_builder, tmp_path):
         """The wheel the image and vm tiers install: its filename, a RECORD whose

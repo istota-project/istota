@@ -4089,9 +4089,12 @@ PLUGINS_REMEDY="plugins/src/ holds root's wheels alone: remove it, or copy the w
 # What the one-shot runs as uid 10001, the wheels as its arguments. Every write
 # under installed/ is here, never root's on the host. One line, so a recorded
 # argv stays one line. uv leaves its lock file in the target, mode 0666, so it
-# is removed: nothing in the tree is writable by anyone but 10001.
+# is removed: nothing in the tree is writable by anyone but 10001. A prev with
+# no site is a run killed between the two renames, so prev goes back first.
 # shellcheck disable=SC2016
-PLUGINS_SYNC_SH='set -eu; out=/plugins-out; rm -rf "$out/next" "$out/prev"; mkdir "$out/next"; '\
+PLUGINS_SYNC_SH='set -eu; out=/plugins-out; '\
+'if [ ! -e "$out/site" ] && [ -e "$out/prev" ]; then mv "$out/prev" "$out/site"; fi; '\
+'rm -rf "$out/next" "$out/prev"; mkdir "$out/next"; '\
 'if [ "$#" -gt 0 ]; then uv pip install --python /app/.venv/bin/python --no-deps --no-index --no-cache'\
 ' --target "$out/next" "$@"; rm -f "$out/next/.lock"; fi; '\
 '/app/.venv/bin/python -P -m istota.lib.skill_module check-tree "$out/next"; '\

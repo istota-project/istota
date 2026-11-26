@@ -27,6 +27,7 @@ import os
 import re
 import stat
 import tomllib
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -400,6 +401,24 @@ def _forbidden_env_spec(skill: str, fm: dict) -> bool:
     return False
 
 
+def _editable_project(dist) -> Path | None:  # noqa: ANN001
+    """The project directory an editable install's `direct_url.json` names, or None.
+
+    `uv pip install -e` puts the `.dist-info` in site-packages and leaves the
+    package in the project, so the package is not beside its metadata.
+    """
+    try:
+        data = json.loads(dist.read_text("direct_url.json") or "")
+        if data["dir_info"]["editable"] is not True:
+            return None
+        url = urllib.parse.urlsplit(data["url"])
+        if url.scheme != "file" or url.netloc not in ("", "localhost"):
+            return None
+        return Path(urllib.parse.unquote(url.path)).resolve()
+    except Exception:
+        return None
+
+
 def _load_plugin(ep) -> tuple[SkillMeta | None, str | None]:  # noqa: ANN001
     """One validly named entry point: its meta, or the reason it has none.
 
@@ -426,7 +445,11 @@ def _load_plugin(ep) -> tuple[SkillMeta | None, str | None]:  # noqa: ANN001
         # The name resolved to some other package earlier on sys.path, which
         # would otherwise read as a misleading `no_skill_md`.
         try:
-            shadowed = Path(dist.locate_file("")).resolve() != pkg_dir.parent.resolve()
+            found_in = pkg_dir.parent.resolve()
+            shadowed = Path(dist.locate_file("")).resolve() != found_in
+            if shadowed:
+                project = _editable_project(dist)
+                shadowed = project is None or not found_in.is_relative_to(project)
         except Exception:
             shadowed = True
         if shadowed:
