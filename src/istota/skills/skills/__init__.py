@@ -450,12 +450,11 @@ def _overlay_path(name: str, ctx):
             hint="no overlay binds to this name",
         )
     # Index membership is the bound, but an index *key* is not guaranteed to be
-    # a plain filename component: `_discover_directory_skills` keys on the
-    # frontmatter `name`, so an operator override declaring `name: ../../USER`
-    # would pass the check above and then escape the join below. Not
-    # model-reachable — `config/` is bound into no sandbox — and the retired
-    # `_skill_overlay_path` carried the same gap, so this closes a hole the
-    # move inherited rather than one it opened.
+    # a plain filename component. Directory skills key on the directory name
+    # and plugins on a validated entry point name, but a legacy `_index.toml`
+    # table name is any TOML key, so `["../../USER"]` would pass the check
+    # above and then escape the join below. Not model-reachable — `config/` is
+    # bound into no sandbox.
     from pathlib import Path
 
     if name != Path(name).name or name in ("", ".", ".."):
