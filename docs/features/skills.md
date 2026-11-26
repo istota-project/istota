@@ -101,9 +101,10 @@ A skill with `cli: true` is also named in the prompt's "Skill CLI tools" list. T
 Skill discovery uses layered priority:
 
 1. Bundled `skill.md` directories in `src/istota/skills/*/` (base)
-2. Operator override directories in `config/skills/*/` (higher priority, `skill.md` or `skill.toml`)
+2. Skill plugins: skills in their own Python package, found through the `istota.skills` entry-point group. A plugin adds a skill and never replaces a bundled one. See [external skill packages](../development/adding-skills.md#external-skill-packages).
+3. Operator override directories in `config/skills/*/` (higher priority, `skill.md` or `skill.toml`)
 
-Operator overrides can replace or extend bundled skills.
+Operator overrides can replace or extend bundled skills and plugins.
 
 ## Per-skill user overlays
 
@@ -113,7 +114,7 @@ This is additive, and that is the difference from an operator override — an ov
 
 ## Fingerprinting
 
-Skills have a SHA-256 fingerprint (of all `skill.md` + `skill.toml` files). When the fingerprint changes between interactions, a "what's new" changelog is appended to the prompt for interactive tasks. Per-user overlays are deliberately not hashed: editing one must not fire a changelog notice that then says nothing about the edit that fired it.
+Skills have a SHA-256 fingerprint (of all `skill.md` + `skill.toml` files). When the fingerprint changes between interactions, a "what's new" changelog is appended to the prompt for interactive tasks. Skill plugins are not hashed, since the changelog says nothing about them, so installing one shows no notice. Per-user overlays are deliberately not hashed: editing one must not fire a changelog notice that then says nothing about the edit that fired it.
 
 ## Placeholder substitution
 

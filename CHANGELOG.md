@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Skills can live in their own Python package.** Copy a plugin's wheel into `/srv/app/istota/plugins/src/` and run `istota-stack plugins sync`, or list it in the management role's `istota_skill_plugins`; plugins survive updates and rollbacks. A plugin runs unsandboxed with the daemon's access. See docs/development/adding-skills.md.
+
 ### Changed
 
 - **Database backups are compressed.** Each daily snapshot is now written as a gzip file (`istota.db.gz`, `<module>.db.gz`), about a third of its old size. Restore, `istota-stack restore` and the bare-metal and standalone imports read both these and the plain snapshots kept from before. See docs/architecture/database.md. **Upgrade note:** an older release cannot read the new files, so after a rollback to one, or in a Mac app pinned to one, a restore picks the newest snapshot taken before the upgrade.

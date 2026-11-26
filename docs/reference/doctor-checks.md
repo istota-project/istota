@@ -2,7 +2,7 @@
 
 `istota doctor` runs every check below against the loaded config and reports each as `ok`, `warn`, `fail` or `skip`, with a remedy on everything that is not `ok`. It exits 1 on any `fail`. The same checks run at daemon start-up (silent unless something is wrong), every hour from the scheduler (`[scheduler] doctor_check_interval`), from the `self-check` [heartbeat](../features/heartbeat.md), and in Admin > Health, which shows the runs the daemon records. An hourly run that moves a check into `fail` alerts each admin's alerts channel.
 
-Select checks by name prefix with `--only` (`istota doctor --only security.` or `--only nextcloud.rclone_rc`). `--scope image` runs only the checks a bare `docker run` of the image can answer (marked *image* below); `--scope deployment` runs the rest. Two checks are opt-in: `sandbox.masks` runs with `--deep`, and `runtime.model_execution` runs only when named, since it calls a model.
+Select checks by name prefix with `--only` (`istota doctor --only security.` or `--only nextcloud.rclone_rc`). `--scope image` runs only the checks a bare `docker run` of the image can answer (marked *image* below); `--scope deployment` runs the rest. Three checks are opt-in: `sandbox.masks` and `skills.plugin_imports` run with `--deep`, and `runtime.model_execution` runs only when named, since it calls a model.
 
 A `skip` is not a pass. The forge checks skip when no forge token is configured, and most connection checks skip when their service is off, so a run with no `fail` says nothing about a feature whose checks skipped. Run inside a task, checks that need the daemon's environment skip rather than fail.
 
@@ -146,6 +146,8 @@ These skip when the developer skill has no forge token configured.
 | Check | What it answers |
 |---|---|
 | `config.skill_overlays` | Every per-skill user overlay loads, or is named with the reason it does not |
+| `skills.plugins` | Which [skill plugins](../development/adding-skills.md#external-skill-packages) loaded, with their distribution and package. `skills.plugins.problems` fails for an installed plugin that did not load, with the reason; `skills.plugins.wheels` fails for a wheel in `/app/plugins/src` that loaded as no plugin (never synced, or hidden by a distribution of the same name in the image); `skills.plugins.entry` warns for a `cli: true` plugin with no `__main__.py` |
+| `skills.plugin_imports` | With `--deep` only: each loaded plugin's package imports in a child process, one result per plugin (`skills.plugin_imports.<skill>`) |
 | `config.operator_persona` | Which persona is in force, and whether a shipped update is waiting to be merged |
 | `users.email_address_uniqueness` | No email address is held by more than one user |
 
