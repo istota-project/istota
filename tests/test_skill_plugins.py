@@ -1,7 +1,8 @@
 """Skill plugins: discovery, the manifest restrictions and the four-layer index.
 
-Spec: external-skill-packages, Stage 1. The dispatch, credential and registry
-cases are later stages' and live in their own files or classes.
+Spec: external-skill-packages, Stage 1; the secret registry and snapshot
+classes at the end are Stage 3's. The dispatch and credential-channel cases
+live in `tests/test_skill_plugin_dispatch.py`.
 """
 
 import importlib
@@ -559,3 +560,265 @@ class TestAPluginIsAnOrdinarySkill:
         p = plugin_builder.installed()
         assert p.skill in load_skill_index(ops, bundled)
         assert compute_skills_fingerprint(ops, bundled) == before
+
+
+def _install(tmp_path, monkeypatch):
+    """A config and framework DB for the `istota secret` and plan cases.
+
+    ``skills_dir`` is an operator layer of its own, so a test can put an
+    operator entry over an installed plugin; the bundled layer is the real one.
+    """
+    from istota import db, user_profiles
+    from istota.lib import toml_write
+
+    monkeypatch.delenv("ISTOTA_ADMINS_FILE", raising=False)
+    monkeypatch.setenv("ISTOTA_SECRET_KEY", "plugin-registry-key-" * 3)
+    database = tmp_path / "framework.db"
+    db.init_db(database)
+    ops = tmp_path / "ops"
+    ops.mkdir(exist_ok=True)
+    config = tmp_path / "config.toml"
+    config.write_text(toml_write.dumps({
+        "db_path": str(database), "temp_dir": str(tmp_path / "temp"),
+        "workspace_path": str(tmp_path / "workspace"), "skills_dir": str(ops),
+    }))
+    user_profiles.provision_user(database, "alice", {})
+    return config, database, ops
+
+
+def _operator_mail_account_override(ops: Path, skill: str) -> None:
+    """An operator entry over a plugin whose `env:` names a built-in service.
+
+    The operator layer's `env:` is not put through the plugin allowlist, so
+    only `plugin_service_keys`' own prefix filter keeps `mail_account` out.
+    """
+    _write_skill(ops, skill, {"description": "operator doc", "cli": True, "env": [
+        {"var": "OPS_MAIL", "from": "secret", "service": "mail_account",
+         "key": "1.imap_password", "sensitive": True},
+        {"var": "OPS_OTHER", "from": "secret", "service": "plugin_other", "key": "password"},
+    ]})
+
+
+def _secret_cli(monkeypatch, capsys, config, *argv, stdin="value-placeholder\n"):
+    import io
+
+    from istota import cli
+
+    monkeypatch.setattr("sys.stdin", io.StringIO(stdin))
+    monkeypatch.setattr("sys.argv", ["istota", "-c", str(config), "secret", *argv])
+    code = 0
+    try:
+        cli.main()
+    except SystemExit as exc:
+        code = exc.code
+    output = capsys.readouterr()
+    return code, output.out, output.err
+
+
+def _plan_secrets(config, declarations, values):
+    from istota.settings_plan import engine
+    from istota.settings_plan.schema import parse_plan, parse_sidecar
+
+    context = engine.Context(config, sidecar=parse_sidecar({"users": {"alice": values}}))
+    return engine.build_plan(parse_plan({"users": {"alice": {"secrets": declarations}}}),
+                             context, engine.Options())
+
+
+class TestTheSecretRegistry:
+    """A plugin's `from: secret` services join the writable registry (Stage 3).
+
+    Only when a caller hands the three schema functions an index: with none,
+    which is how the web settings routes call them, the registry is today's.
+    """
+
+    def test_plugin_service_keys_returns_the_plugins_pair(self, tmp_path, plugin_builder):
+        from istota.credentials.schema import plugin_service_keys
+
+        p = plugin_builder.injected()
+        assert plugin_service_keys(_index(tmp_path, [p.entry_point])) == {"plugin_example": ("token",)}
+
+    def test_the_bundled_index_holds_no_plugin_pair(self, tmp_path):
+        from istota.credentials.schema import plugin_service_keys
+
+        ops, _ = _dirs(tmp_path)
+        assert plugin_service_keys(load_skill_index(ops, plugin_entry_points=[])) == {}
+
+    def test_the_schema_functions_take_the_pair_only_with_an_index(self, tmp_path, plugin_builder):
+        from istota.credentials.schema import (
+            all_known_services,
+            known_service_keys,
+            service_accepts_key,
+        )
+
+        p = plugin_builder.installed()
+        index = _index(tmp_path, None)
+        assert p.skill in index
+        widened = all_known_services(index)["plugin_example"]
+        assert [field["key"] for field in widened["fields"]] == ["token"]
+        assert "key_rule" not in widened
+        assert known_service_keys(index)["plugin_example"] == frozenset({"token"})
+        assert service_accepts_key("plugin_example", "token", skill_index=index)
+        assert not service_accepts_key("plugin_example", "other", skill_index=index)
+        # No index: the static registry, whatever is installed.
+        assert "plugin_example" not in all_known_services()
+        assert "plugin_example" not in known_service_keys()
+        assert not service_accepts_key("plugin_example", "token")
+        assert set(all_known_services(index)) - set(all_known_services()) == {"plugin_example"}
+
+    def test_an_operator_entry_over_a_plugin_cannot_add_a_built_in_service(
+        self, tmp_path, plugin_builder,
+    ):
+        from istota.credentials.schema import all_known_services, plugin_service_keys
+
+        p = plugin_builder.injected()
+        ops, bundled = _dirs(tmp_path)
+        _operator_mail_account_override(ops, p.skill)
+        index = load_skill_index(ops, bundled, plugin_entry_points=[p.entry_point])
+        assert is_plugin(index[p.skill])
+        assert plugin_service_keys(index) == {"plugin_other": ("password",)}
+        assert "mail_account" not in all_known_services(index)
+
+    def test_a_non_plugin_entry_adds_nothing(self, tmp_path):
+        from istota.credentials.schema import plugin_service_keys
+
+        ops, bundled = _dirs(tmp_path)
+        _write_skill(ops, "local_only", {"description": "operator", "env": [
+            {"var": "LOCAL_TOKEN", "from": "secret", "service": "plugin_local", "key": "token"},
+        ]})
+        index = load_skill_index(ops, bundled, plugin_entry_points=[])
+        assert plugin_service_keys(index) == {}
+
+    def test_istota_secret_ensure_writes_a_plugin_service(
+        self, tmp_path, plugin_builder, monkeypatch, capsys,
+    ):
+        from istota.credentials import store
+
+        config, database, _ = _install(tmp_path, monkeypatch)
+        plugin_builder.installed()
+        code, out, err = _secret_cli(
+            monkeypatch, capsys, config, "ensure", "--user", "alice",
+            "--service", "plugin_example", "--key", "token", "--value-stdin",
+            stdin="plugin-token-placeholder\n",
+        )
+        assert code == 0, err
+        assert "STATE: created" in out
+        assert store.get_secret(database, "alice", "plugin_example", "token") == "plugin-token-placeholder"
+
+        code, out, err = _secret_cli(
+            monkeypatch, capsys, config, "ensure", "--user", "alice",
+            "--service", "plugin_example", "--key", "other", "--value-stdin",
+        )
+        assert code == 1
+        assert "unknown key 'other'" in err
+        assert store.get_secret(database, "alice", "plugin_example", "other") is None
+
+    def test_istota_secret_ensure_refuses_a_plugin_service_nothing_declares(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        config, _, _ = _install(tmp_path, monkeypatch)
+        code, _, err = _secret_cli(
+            monkeypatch, capsys, config, "ensure", "--user", "alice",
+            "--service", "plugin_example", "--key", "token", "--value-stdin",
+        )
+        assert code == 1
+        assert "unknown service 'plugin_example'" in err
+
+    def test_istota_secret_ensure_still_refuses_mail_account_under_an_override(
+        self, tmp_path, plugin_builder, monkeypatch, capsys,
+    ):
+        from istota.credentials import store
+
+        config, database, ops = _install(tmp_path, monkeypatch)
+        p = plugin_builder.installed()
+        _operator_mail_account_override(ops, p.skill)
+        code, _, err = _secret_cli(
+            monkeypatch, capsys, config, "ensure", "--user", "alice",
+            "--service", "mail_account", "--key", "1.imap_password", "--value-stdin",
+        )
+        assert code == 1
+        assert "unknown service 'mail_account'" in err
+        assert store.get_secret(database, "alice", "mail_account", "1.imap_password") is None
+
+    def test_a_plan_may_provision_a_plugin_service(self, tmp_path, plugin_builder, monkeypatch):
+        from istota.settings_plan.secrets import PROVISIONABLE_SERVICES, provisionable_keys
+
+        config, _, _ = _install(tmp_path, monkeypatch)
+        plugin_builder.installed()
+        index = _index(tmp_path, None)
+        assert provisionable_keys(index)["plugin_example"] == frozenset({"token"})
+        assert set(provisionable_keys()) == PROVISIONABLE_SERVICES
+        operations = _plan_secrets(config, [{"service": "plugin_example", "keys": ["token"]}],
+                                   {"plugin_example": {"token": "plugin-token-placeholder"}})
+        assert [(op.identity, op.action) for op in operations] == [("plugin_example.token", "create")]
+
+    def test_a_plan_naming_mail_account_is_still_refused_under_an_override(
+        self, tmp_path, plugin_builder, monkeypatch,
+    ):
+        from istota.settings_plan import engine
+
+        config, _, ops = _install(tmp_path, monkeypatch)
+        p = plugin_builder.installed()
+        _operator_mail_account_override(ops, p.skill)
+        with pytest.raises(engine.ExecutionError, match="secret_service_not_provisionable"):
+            _plan_secrets(config, [{"service": "mail_account", "keys": ["1.imap_password"]}],
+                          {"mail_account": {"1.imap_password": "placeholder"}})
+
+    def test_a_plan_naming_a_plugin_service_before_the_plugin_is_refused(
+        self, tmp_path, monkeypatch,
+    ):
+        from istota.settings_plan import engine
+
+        config, _, _ = _install(tmp_path, monkeypatch)
+        with pytest.raises(engine.ExecutionError, match="secret_service_not_provisionable"):
+            _plan_secrets(config, [{"service": "plugin_example", "keys": ["token"]}],
+                          {"plugin_example": {"token": "placeholder"}})
+
+
+class TestTheSnapshotKeepsAPluginSecret:
+    """Without the index a snapshot drops a plugin's declarations, and the apply
+    that follows it would lose them."""
+
+    def _stored(self, tmp_path, monkeypatch):
+        from istota.credentials import store
+
+        config, database, _ = _install(tmp_path, monkeypatch)
+        store.set_secret(database, "alice", "plugin_example", "token", "stored-placeholder")
+        store.set_secret(database, "alice", "karakeep", "api_key", "stored-placeholder")
+        return config, database
+
+    def _snapshot(self, database, **kwargs):
+        from contextlib import closing
+
+        from istota.lib.sqlite_util import connect_read_only
+        from istota.settings_plan.secrets import snapshot_secrets
+
+        warnings = []
+        with closing(connect_read_only(database)) as conn:
+            conn.execute("BEGIN")
+            declarations = snapshot_secrets(conn, "alice", warnings, **kwargs)
+        return declarations, warnings
+
+    def test_with_the_index_the_declaration_is_kept_and_unwarned(
+        self, tmp_path, plugin_builder, monkeypatch,
+    ):
+        _, database = self._stored(tmp_path, monkeypatch)
+        plugin_builder.installed()
+        declarations, warnings = self._snapshot(database, skill_index=_index(tmp_path, None))
+        assert {"service": "plugin_example", "keys": ["token"]} in declarations
+        assert warnings == []
+
+    def test_without_the_index_it_is_excluded_as_before(self, tmp_path, plugin_builder, monkeypatch):
+        _, database = self._stored(tmp_path, monkeypatch)
+        plugin_builder.installed()
+        declarations, warnings = self._snapshot(database)
+        assert declarations == [{"service": "karakeep", "keys": ["api_key"]}]
+        assert warnings and "non-provisionable" in warnings[0]
+
+    def test_istota_snapshot_passes_the_index(self, tmp_path, plugin_builder, monkeypatch):
+        from istota.settings_plan import snapshot
+
+        config, _ = self._stored(tmp_path, monkeypatch)
+        plugin_builder.installed()
+        document, warnings = snapshot.gather(config, users=["alice"])
+        assert {"service": "plugin_example", "keys": ["token"]} in document["users"]["alice"]["secrets"]
+        assert not any("non-provisionable" in warning for warning in warnings)

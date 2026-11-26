@@ -32,6 +32,12 @@ SKILL_NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
 #: `pkg/__init__.py`, and discovery must run no plugin code.
 MODULE_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
+#: A plugin's secret service: what the loader accepts in a plugin manifest and
+#: what `credentials.schema.plugin_service_keys` admits to the writable
+#: registry. A prefix rather than a denylist, because the registry does not
+#: list every service name the code stores under.
+PLUGIN_SERVICE_RE = re.compile(r"plugin_[a-z0-9_]+")
+
 #: `rooms.scopes.SYNTHETIC_SCOPES`, `sandbox.user_scope.ROOM_NOTES_WITHHELD`,
 #: `user_profiles.CORRESPONDENT_REFUSED_SCOPES`, and `web`.
 RESERVED_SKILL_NAMES = frozenset({

@@ -1169,7 +1169,11 @@ def cmd_secret(args):
         print("Error: --user, --service, and --key are required", file=sys.stderr)
         sys.exit(1)
 
-    schema = all_known_services()
+    # The index adds each skill plugin's `plugin_*` services to the registry.
+    from istota.skills._loader import load_skill_index
+
+    skill_index = load_skill_index(config.skills_dir, config.bundled_skills_dir)
+    schema = all_known_services(skill_index)
     if args.service not in schema:
         print(
             f"Error: unknown service {args.service!r} "
@@ -1178,7 +1182,7 @@ def cmd_secret(args):
         )
         sys.exit(1)
 
-    valid_keys = known_service_keys()[args.service]
+    valid_keys = known_service_keys(skill_index)[args.service]
     if not valid_keys:
         print(
             f"Error: service {args.service!r} has no operator-writable keys "
@@ -1188,7 +1192,7 @@ def cmd_secret(args):
         sys.exit(1)
     from istota.credentials.schema import service_accepts_key
 
-    if not service_accepts_key(args.service, args.key):
+    if not service_accepts_key(args.service, args.key, skill_index=skill_index):
         print(
             f"Error: unknown key {args.key!r} for service {args.service!r} "
             f"(known: {', '.join(sorted(valid_keys))})",

@@ -17,6 +17,12 @@ There are two flavors:
   appear on the matching per-module settings page and are gated by
   ``Config.is_module_enabled``.
 
+A skill plugin's ``plugin_*`` services are a third, dynamic set: a caller
+holding a skill index passes it to `all_known_services`, `known_service_keys`
+or `service_accepts_key` and they are added (`plugin_service_keys`). The
+``istota secret`` CLI and the settings plan do; the web settings routes do
+not, so a plugin's service has no settings card in v1.
+
 A field marked ``plain: True`` is a setting stored beside the credentials
 rather than a credential (ntfy's server URL and topic). The settings UI
 returns and shows its stored value; every other field stays write-only.
@@ -185,26 +191,86 @@ MODULE_SERVICE_SCHEMA: dict[str, dict[str, dict]] = {
 }
 
 
-def all_known_services() -> dict[str, dict]:
+def plugin_service_keys(skill_index: dict) -> dict[str, tuple[str, ...]]:
+    """The ``(service, keys)`` pairs a skill plugin's ``from: secret`` specs name.
+
+    Only entries ``is_plugin`` holds for, and only services matching
+    ``PLUGIN_SERVICE_RE``. The filter is here rather than left to the loader's
+    manifest check because an operator entry over a plugin is a plugin entry
+    too and its ``env:`` is not put through that check: without it a
+    ``config/skills/<plugin>/skill.md`` naming ``mail_account`` would make
+    that service writable (spec: external-skill-packages).
+
+    The imports are function-scoped: a caller with an index has already
+    loaded the skills package, and the callers with none (the web settings
+    routes, the config-load path) must not.
+    """
+    from istota.lib.skill_module import PLUGIN_SERVICE_RE
+    from istota.skills._types import is_plugin
+
+    pairs: dict[str, set[str]] = {}
+    for meta in skill_index.values():
+        if not is_plugin(meta):
+            continue
+        for spec in meta.env_specs:
+            if spec.source != "secret" or not spec.key:
+                continue
+            if PLUGIN_SERVICE_RE.fullmatch(spec.service) is None:
+                continue
+            pairs.setdefault(spec.service, set()).add(spec.key)
+    return {service: tuple(sorted(keys)) for service, keys in sorted(pairs.items())}
+
+
+def _plugin_service_schemas(skill_index: dict) -> dict[str, dict]:
+    """A minimal registry entry per plugin service, in the static entries' shape.
+
+    ``cli_only``: v1 has no settings card for a plugin, and the web routes
+    never pass an index anyway. No ``key_rule``: the declared keys are all.
+    """
+    used_by: dict[str, set[str]] = {}
+    for name, meta in skill_index.items():
+        for spec in meta.env_specs:
+            if spec.source == "secret":
+                used_by.setdefault(spec.service, set()).add(name)
+    return {
+        service: {
+            "label": service,
+            "used_by": tuple(sorted(used_by.get(service, ()))),
+            "cli_only": True,
+            "fields": [{"key": key, "label": key, "type": "password"} for key in keys],
+        }
+        for service, keys in plugin_service_keys(skill_index).items()
+    }
+
+
+def all_known_services(skill_index: dict | None = None) -> dict[str, dict]:
     """Union of connected + module-owned service schemas.
 
     Module-service schemas have no resource_types: they're gated by
     ``Config.is_module_enabled`` at request time, not by the schema.
+
+    With ``skill_index``, each skill plugin's secret services are added
+    (`plugin_service_keys`). With none, the static registry alone, which is
+    what the web settings routes ask for.
     """
     out: dict[str, dict] = dict(CONNECTED_SERVICE_SCHEMA)
     for mod_services in MODULE_SERVICE_SCHEMA.values():
         for service, schema in mod_services.items():
             out[service] = schema
+    if skill_index is not None:
+        for service, schema in _plugin_service_schemas(skill_index).items():
+            out.setdefault(service, schema)
     return out
 
 
-def service_accepts_key(service: str, key: str) -> bool:
+def service_accepts_key(service: str, key: str, skill_index: dict | None = None) -> bool:
     """Whether ``key`` may be written under ``service``.
 
     A listed field, or, for a service with ``key_rule = "provider_id"``, any
-    provider id (`llm.providers.is_provider_id`).
+    provider id (`llm.providers.is_provider_id`). ``skill_index`` as for
+    `all_known_services`.
     """
-    schema = all_known_services().get(service)
+    schema = all_known_services(skill_index).get(service)
     if not schema:
         return False
     if key in {f["key"] for f in schema.get("fields", [])}:
@@ -216,14 +282,15 @@ def service_accepts_key(service: str, key: str) -> bool:
     return False
 
 
-def known_service_keys() -> dict[str, frozenset[str]]:
+def known_service_keys(skill_index: dict | None = None) -> dict[str, frozenset[str]]:
     """Flat ``{service: {key, ...}}`` mapping for fast validation.
 
     The CLI uses this to reject typos before they reach the DB. Empty
     values (``"fields": []``) — e.g. OAuth-only services — yield an empty
-    frozenset, which signals "no operator-writable keys".
+    frozenset, which signals "no operator-writable keys". ``skill_index`` as
+    for `all_known_services`.
     """
     return {
         service: frozenset(f["key"] for f in schema.get("fields", []))
-        for service, schema in all_known_services().items()
+        for service, schema in all_known_services(skill_index).items()
     }

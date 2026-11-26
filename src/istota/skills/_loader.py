@@ -33,6 +33,7 @@ from pathlib import Path
 from istota.lib.markdown_headings import demote_headings
 from istota.lib.skill_module import (
     PLUGIN_GROUP,
+    PLUGIN_SERVICE_RE,
     bundled_skill_module,
     plugin_name_problem,
     valid_plugin_value,
@@ -313,10 +314,6 @@ def _load_legacy_index(skills_dir: Path) -> dict[str, SkillMeta]:
 # `proxy_only` reaches every skill CLI's env.
 _PLUGIN_ENV_SOURCES = frozenset({"secret", "setup_env", "user_id"})
 _PLUGIN_ENV_FIELDS = frozenset({"var", "from", "service", "key", "sensitive", "when"})
-
-#: A plugin's secret service. A prefix rather than a denylist, because the
-#: registry does not list every service name the code stores under.
-PLUGIN_SERVICE_RE = re.compile(r"plugin_[a-z0-9_]+")
 
 # Per-process: a plugin changes only across a restart. None until filled.
 _PLUGIN_DISCOVERY: "tuple[dict[str, SkillMeta], list[PluginProblem]] | None" = None
