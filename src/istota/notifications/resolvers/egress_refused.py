@@ -70,9 +70,9 @@ def write(conn: "sqlite3.Connection", user_id: str, subject: str) -> "RaiseResul
 
 def close(conn: "sqlite3.Connection", user_id: str, subject: str, *, by: str) -> int:
     """Close the row on the caller's transaction, for a subject that has ended."""
-    from istota.notifications.store import resolve_by_object
+    from istota.notifications.resolvers._common import resolve_for
 
-    return resolve_by_object(conn, user_id, SOURCE, OBJECT_TYPE, subject, by=by)
+    return resolve_for(conn, user_id, SOURCE, OBJECT_TYPE, subject, by=by)
 
 
 def resolve_if_settled(conn: "sqlite3.Connection", user_id: str, subject: str, *, by: str) -> None:
