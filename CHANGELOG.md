@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The feeds poll and other skill and command jobs no longer go into memory.** Their output was indexed as conversation memory every few minutes, turning up in recall and search and read by the nightly sleep cycle; on one install it had grown to about a third of the memory index. It is no longer indexed or read, and `istota memory purge-program-output` counts the feeds poll's output already there, and other jobs' output from the last week, then removes it with `--apply`.
 - **A database backup no longer loses a snapshot when renaming it into place fails.** On the Nextcloud mount the final rename of a snapshot could find no file to move, which skipped that database for the day and left a full-size copy under a hidden staging name. The rename is now retried once, and hidden copies left by earlier runs are removed.
 - The bare-metal and standalone imports refuse an export whose framework database cannot be opened, instead of stopping with a traceback, and no longer restore the `._` files a macOS tar adds as if they were databases.
+- A folder offer from another server with no recorded time no longer says it was offered just now; the line leaves the time out.
 
 ## [0.52.0] - 2026-11-21
 
