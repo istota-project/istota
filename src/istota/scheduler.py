@@ -2495,7 +2495,9 @@ def _deliver_deferred_email_output(
     deferred.unlink(path)
 
 
-def _purge_obsolete_skill_jobs(conn, skill_index: dict) -> None:
+def _purge_obsolete_skill_jobs(
+    conn, skill_index: dict, *, keep: frozenset[str] = frozenset(),
+) -> None:
     """Delete scheduled_jobs rows AND fail pending tasks rows whose
     ``skill`` field no longer exists in the skill index.
 
@@ -2504,6 +2506,12 @@ def _purge_obsolete_skill_jobs(conn, skill_index: dict) -> None:
     rows for skills that still exist on the next tick. Pending tasks
     rows are marked failed (not deleted) so audit / delivery state is
     preserved; rename is operator-driven and rare.
+
+    ``keep`` names skill plugins that are installed and failed to load (the
+    names in ``plugin_problems()``): their rows stay, since doctor already
+    reports the plugin. A plugin that is simply absent is purged like any
+    other skill, and ``db.delete_scheduled_job`` takes the job's network
+    approvals with it.
     """
     cur = conn.execute(
         "SELECT id, name, user_id, skill FROM scheduled_jobs "
@@ -2511,7 +2519,13 @@ def _purge_obsolete_skill_jobs(conn, skill_index: dict) -> None:
     )
     for row in cur.fetchall():
         skill = row["skill"] if hasattr(row, "keys") else row[3]
-        if skill not in skill_index:
+        if skill not in skill_index and skill in keep:
+            logger.warning(
+                "Keeping skill scheduled_job '%s' user=%s skill=%s "
+                "(skill plugin installed but not loaded)",
+                row["name"], row["user_id"], skill,
+            )
+        elif skill not in skill_index:
             logger.warning(
                 "Removing obsolete skill scheduled_job '%s' user=%s skill=%s "
                 "(skill no longer exists in index)",
@@ -2525,7 +2539,13 @@ def _purge_obsolete_skill_jobs(conn, skill_index: dict) -> None:
     )
     for row in cur.fetchall():
         skill = row["skill"] if hasattr(row, "keys") else row[2]
-        if skill not in skill_index:
+        if skill not in skill_index and skill in keep:
+            logger.warning(
+                "Keeping pending skill task #%d user=%s skill=%s "
+                "(skill plugin installed but not loaded)",
+                row["id"], row["user_id"], skill,
+            )
+        elif skill not in skill_index:
             logger.warning(
                 "Failing pending skill task #%d user=%s skill=%s "
                 "(skill no longer exists in index)",
@@ -2538,6 +2558,33 @@ def _purge_obsolete_skill_jobs(conn, skill_index: dict) -> None:
                 (f"unknown skill: {skill}", row["id"]),
             )
     conn.commit()
+
+
+def _purge_skill_jobs_at_startup(config: Config) -> None:
+    """The boot purge, after one ERROR line per skill plugin that did not load.
+
+    The loader logs a plugin problem at DEBUG only, since a `skills` subprocess
+    configures no logging; this is where the daemon says it once. When the
+    entry-point group cannot be read, every plugin is missing from the index
+    and none can be told from a removed skill, so this boot purges nothing.
+    """
+    from .skills._loader import load_skill_index, plugin_problems
+
+    skill_index = load_skill_index(config.skills_dir, config.bundled_skills_dir)
+    try:
+        problems = plugin_problems(config.bundled_skills_dir)
+    except Exception as e:  # noqa: BLE001
+        logger.error("Skill plugin discovery failed, skill jobs not purged at this start: %s", e)
+        return
+    for problem in problems:
+        logger.error(
+            "Skill plugin %r (%s) not loaded: %s",
+            problem.name, problem.dist or "-", problem.reason,
+        )
+    with db.get_db(config.db_path) as conn:
+        _purge_obsolete_skill_jobs(
+            conn, skill_index, keep=frozenset(problem.name for problem in problems),
+        )
 
 
 def _run_garmin_sync_inprocess(
@@ -2651,7 +2698,7 @@ def _execute_skill_task(
     from .skills._env import (
         EnvContext, build_skill_env, dispatch_setup_env_hooks, needs_discovered_calendars,
     )
-    from .skills._loader import load_skill_index
+    from .skills._loader import load_skill_index, resolve_skill_module
 
     skill_name = task.skill or ""
     try:
@@ -2810,7 +2857,7 @@ def _execute_skill_task(
 
         env[WITHHELD_SCOPES_VAR] = ",".join(sorted(reach.withheld))
 
-    cmd = [sys.executable, "-m", f"istota.skills.{skill_name}"] + skill_args
+    cmd = [sys.executable, "-m", resolve_skill_module(skill_name, skill_index)] + skill_args
     from istota.sandbox.host_paths import skill_file_env
 
     try:
@@ -6951,9 +6998,10 @@ def check_browser_instances(config: Config) -> None:
 def check_doctor_request(config: Config, state: dict) -> None:
     """Answer a run the Health pane asked for, on the tick after it asked.
 
-    A deep request also runs the checks that spawn a sandbox namespace. They run
-    here because the daemon's container is the one that has the sandbox; the
-    web process cannot answer for it.
+    A deep request also runs the checks that spawn a process: a sandbox
+    namespace and the plugin imports. They run here because the daemon's
+    container is the one that has the sandbox; the web process cannot answer
+    for it.
     """
     from . import doctor
 
@@ -12167,13 +12215,10 @@ def run_daemon(
     # Phase 1.3: purge orphan skill scheduled_jobs / pending skill tasks
     # whose skill name no longer exists in the index (e.g. operator
     # renamed `feeds` → `feed_reader`). Runs once per startup; the
-    # seeders re-populate fresh rows on the next sync tick.
+    # seeders re-populate fresh rows on the next sync tick. A skill plugin that
+    # is installed and failed to load keeps its rows.
     try:
-        from .skills._loader import load_skill_index as _lsi  # noqa: PLC0415
-
-        _idx = _lsi(config.skills_dir, config.bundled_skills_dir)
-        with db.get_db(config.db_path) as conn:
-            _purge_obsolete_skill_jobs(conn, _idx)
+        _purge_skill_jobs_at_startup(config)
     except Exception as e:  # noqa: BLE001
         logger.warning("Skill-job purge skipped: %s", e)
 

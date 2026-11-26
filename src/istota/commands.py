@@ -2892,6 +2892,7 @@ async def cmd_skills(ctx: CommandContext):
         get_skill_availability,
         load_skill_index,
     )
+    from .skills._types import is_plugin
 
     skills_dir = config.skills_dir
     bundled_dir = getattr(config, "bundled_skills_dir", None)
@@ -2941,6 +2942,8 @@ async def cmd_skills(ctx: CommandContext):
             tags.append(f"resources: {', '.join(meta.resource_types)}")
         if meta.source_types:
             tags.append(f"sources: {', '.join(meta.source_types)}")
+        if is_plugin(meta):
+            tags.append(f"plugin: {_plugin_label(meta)}")
         tag_str = f" ({'; '.join(tags)})" if tags else ""
         lines.append(f"- **{name}**: {meta.description}{tag_str}")
 
@@ -2948,7 +2951,11 @@ async def cmd_skills(ctx: CommandContext):
         lines.append("")
         lines.append("**Unavailable** (install to enable):")
         for name, meta, missing_dep in unavailable:
-            lines.append(f"- {name} — missing `{missing_dep}` (`uv sync --extra {name}`)")
+            # A plugin's name is no extra of this project, so there is no install line to give.
+            if is_plugin(meta):
+                lines.append(f"- {name} — missing `{missing_dep}` (plugin: {_plugin_label(meta)})")
+            else:
+                lines.append(f"- {name} — missing `{missing_dep}` (`uv sync --extra {name}`)")
 
     if disabled_skills:
         lines.append("")
@@ -2959,9 +2966,15 @@ async def cmd_skills(ctx: CommandContext):
     return "\n".join(lines)
 
 
+def _plugin_label(meta) -> str:
+    """``<dist> <version>``, or the package when the entry point had no distribution."""
+    return meta.plugin_dist or meta.module
+
+
 def _format_skill_detail(meta, name, disabled, is_admin):
     """Format detailed view for a single skill."""
     from .skills._loader import get_skill_availability
+    from .skills._types import is_plugin
 
     lines = [f"**{name}**: {meta.description}", ""]
 
@@ -2970,9 +2983,12 @@ def _format_skill_detail(meta, name, disabled, is_admin):
         lines.append("Status: disabled by config")
     elif status == "unavailable":
         lines.append(f"Status: unavailable (missing `{missing_dep}`)")
-        lines.append(f"Install: `uv sync --extra {name}`")
+        if not is_plugin(meta):
+            lines.append(f"Install: `uv sync --extra {name}`")
     else:
         lines.append("Status: available")
+    if is_plugin(meta):
+        lines.append(f"Plugin: {_plugin_label(meta)}")
 
     if meta.always_include:
         lines.append("Selection: always included")

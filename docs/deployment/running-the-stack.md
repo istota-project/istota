@@ -310,6 +310,56 @@ What each devbox gets, and nothing else:
 
 **Upgrading from a release that had a `devbox` profile in this file:** that container is not the one rendered here. Copy out or `docker commit` what you want from it, then remove it, its `docker_devbox_home` volume and its `docker_devbox-net` network by hand.
 
+## Skill plugins
+
+A skill plugin is a skill packaged as its own wheel, outside this repository; [External skill packages](../development/adding-skills.md#external-skill-packages) has the package contract and what a plugin can reach. Plugins live beside the image, never in it, so they need no build and survive `update` and `rollback` with no step of their own. A plugin is not sandboxed and can read whatever the daemon can, so put a wheel here only if you would run its code as the daemon.
+
+`provision.sh` makes the layout:
+
+| Path | Owner, mode | What it holds |
+|---|---|---|
+| `/srv/app/istota/plugins/` | root, 0755 | the two below and `.synced` |
+| `plugins/src/` | root, 0755 | the wheels, which you copy in as root |
+| `plugins/installed/` | uid 10001, 0755 | `site/`, the installed tree, written only by `plugins sync` |
+| `plugins/.synced` | root, 0644 | the digest of the wheels `site/` was built from |
+
+`istota-stack` binds `plugins/` read-only at `/app/plugins` into `daemon` and `web` alone (`docker/docker-compose.plugins.yml`), when `plugins/installed` exists and the release has that file. No task's sandbox binds it. A VM provisioned before this release gets the layout from the update that installs it, which runs `provision.sh`.
+
+To add a plugin, copy its wheel in and sync:
+
+```bash
+install -m 0644 -o root -g root example_plugin-0.1.0-py3-none-any.whl /srv/app/istota/plugins/src/
+istota-stack plugins sync
+istota doctor --only skills.plugins
+```
+
+To remove one, delete its wheel from `plugins/src/` and run `istota-stack plugins sync` again. To upgrade one, replace the wheel and sync. A plugin's secrets are written with `istota secret ensure` or an `istota apply` plan once it is synced ([External skill packages](../development/adding-skills.md#what-the-manifest-may-say)).
+
+`istota-stack plugins sync [--force] [--no-restart]` takes the stack lock and:
+
+1. Refuses, before any container starts, unless every entry in `plugins/src/` is a regular file named like a wheel (`NAME-VERSION-TAGS.whl`, of letters, digits and `_.!+-`, starting with a letter or a digit), owned by root and writable by root alone, and `plugins/` and `plugins/src/` are root's and writable by no one else. It also refuses when the layout is missing (run `provision.sh`) or the deployed release has no plugins overlay (update first).
+2. Hashes the wheels. When nothing changed since the last sync it prints `unchanged` and exits 0, unless `--force` is given.
+3. Installs the wheels in a one-shot container, as uid 10001, with the image's own `uv`: no index, no network and no dependencies (`--no-deps`), into `plugins/installed/next/`. It then refuses the tree if a wheel declares no `istota.skills` entry point, has a distribution name or package name the image's virtual environment already has, which would hide the plugin, or puts anything at the top level besides its one package and that package's metadata. Only then does the new tree replace `site/`. With no wheels the result is an empty `site/`. A run killed in the middle of that replacement leaves the old tree under another name, and the next sync puts it back before it does anything else.
+4. On a failure, prints what the one-shot printed and exits 1. `site/` and `.synced` stay as they were, and nothing restarts. Two wheels of one distribution at different versions fail here.
+5. Otherwise writes `.synced`, prints `changed`, restarts `daemon` and `web` if the stack is running, and exits 2. The other services do not read plugins and are not restarted, and a stack that is down stays down. If the restart fails after a good install, it exits 1 with `.synced` already written, and `istota-stack up` finishes the job.
+
+`--no-restart` skips step 5's restart. The management role uses it so that one play restarts the stack once. Do not use it by hand: until the next restart, a newly spawned plugin CLI runs the new tree, while the daemon's skill index and the proxy's list of skills are the old ones, so a removed plugin is still offered and fails when it runs.
+
+`istota-stack plugins status` takes no lock and prints each wheel in `plugins/src/`, then `synced` or `not synced`. It does not say what loaded: `istota doctor --only skills.plugins` does, and fails for a plugin that is installed and did not load or a wheel that loaded as no plugin.
+
+| `plugins sync` exit | Meaning |
+|---|---|
+| 0 | nothing changed |
+| 2 | the plugins changed and the stack restarted onto them |
+| 1 | a refused entry in `plugins/src/`, a missing layout, a failed install, or a failed restart |
+| 64 | a usage error |
+
+**Updates, rollbacks and restores.** `update` and `rollback` leave `plugins/` alone, and the new containers bind the same directory. If a later image gains a distribution with a plugin's name, that plugin stops loading at the next start with no error at load time; doctor's `skills.plugins.wheels` reports it. A rollback to a release from before plugins existed runs that release's `istota-stack`, which binds nothing: the plugins' skills are absent there, and the daemon removes their jobs at its start (below). `plugins/` is in none of the workspace backups and `istota-stack restore` does not bring it back, so keep the wheels with the rest of the deployment, and on a restored stack copy them into `plugins/src/` and run `istota-stack plugins sync` before you start the stack.
+
+**A plugin absent at a daemon start loses its jobs' network approvals.** At every start the daemon deletes the scheduled jobs that run a skill it does not have (a CRON.md `command: istota-skill <name> …` line runs as one) and fails their pending tasks, and a job's network approvals go with its row. When the plugin comes back, the CRON.md sync creates the job again from nothing, so a limited job has to be approved again, its `skill:` approval included. A plugin that is installed and fails to load (a problem doctor reports) keeps its jobs. When the daemon cannot read the list of installed plugins at all, it deletes no job at that start and says so in its log.
+
+The Mac app does not support plugins in this version. The Mac's `istota-stack` forwards `plugins` to the VM like any other verb, but nothing tests it there.
+
 ## Storage
 
 Two questions decide the storage: whether istota uses a Nextcloud (`[nextcloud] url`), and where the workspace lives (`workspace_mount_path`, when it is a mount). `STORAGE` in `host.env` says which mount, if any, the machine provides. `istota setup` writes all three from your answers:
@@ -465,6 +515,7 @@ Keep each of these somewhere that survives losing both the VM and the machine it
 - **The database snapshots** (`Backups/db/snapshots/<date>/`) and the workspace's files. A workspace on the lost VM's own disk is lost with it unless something copied it off ([Backing up a local install](#backing-up-a-local-install)). A Nextcloud or Mac workspace that survived helps only as far as its files and backups survived.
 - **The config copies** in `Backups/config/<date>/`: `config.toml`, `admins`, `stack.env` and `host.env`, which the stack writes only where the workspace is a mount. On a server also keep `rclone.conf` for a Nextcloud workspace and whatever you gave `provision.sh` and setup. The `.kdbx` holds none of these files and no admin list.
 - **The push signing key pair**, `[push] signing_key_path` (by default `/data/config/push/signing.pem`) and its `.pub`, when private push is on. No config copy and no database snapshot holds it. The `.kdbx` holds the private key in its `Push signing key` group; the `.pub` is written from it when the key is restored. A new key makes every enrolled phone enroll again before it shows private previews, while the key the phones enrolled under keeps them working, enrollments restored with the databases included.
+- **The skill plugin wheels** from `/srv/app/istota/plugins/src/`, if the install ran any. No backup holds them ([Skill plugins](#skill-plugins)).
 - **The rest of the deployment**: the release you ran, the storage mode and where the workspace lives, the hostname and DNS, the release signing key you trust, and how to get back into each outside account (model provider, mail, Nextcloud). The `.kdbx` records the application version, which does not say which database schema a snapshot needs.
 - **A way back into an admin account** without the old browser session or working mail. A restored database keeps the login identities, and the restored admins file keeps the list; `istota auth reset <user> --print-link` prints a password link on the host where `[web] auth` includes `email`. On a fresh database, setup makes the first admin.
 
@@ -485,6 +536,8 @@ Start from a new, stopped stack, and do not run setup against it: setup makes a 
 - **On a server**, run `provision.sh` with the `host.env` settings of the old install, `istota-stack update <tag>` with the release it ran, and set up the workspace mount (for Nextcloud, `rclone.conf`, with the app password from the `.kdbx`). Check that the workspace shows the old `Backups/`, stop the stack (`systemctl stop istota-stack`), then pass the master key on stdin: `istota-stack restore --hold < key-file`. It puts back the key, `config.toml`, `admins`, the `.env` and `host.env` copies and the databases, and leaves the stack stopped, though it may run `provision.sh`, which enables the stack to start at the next boot. Where the copies in `Backups/config/` are missing, `restore` refuses, and it does not take a `.kdbx` in their place. The steps are then manual, with the stack stopped: write `config.toml` and `admins` from your own copies (or `config.toml` from the configuration backup), the master key to `/data/.secret_key` (mode 0600, owned by uid 10001), and restore the snapshots with `python -m istota.maintenance.db_restore --all`. The `config.toml` in either backup has `"<unchanged>"` in place of each credential written in the file itself, such as a provider's `api_key`: copy each value from the `.kdbx`'s `Inline credentials` group before you start the stack. `db_restore --all` follows the users `config.toml` names, so a user known only to the database gets no module databases back.
 
 `restore` does not copy `secrets/` or the push signing key. Write the deployment credentials from the `.kdbx` with `istota-stack put-files`, which reads JSON on stdin, so no value goes on a command line: open the backup only while you build that JSON, and delete the file afterwards. Write the push key from its `Push signing key` entry with `istota-stack push-key import`, the key on stdin, or once the stack runs, restore it from Admin → Configuration as above. The Nextcloud app password also has to match the mount's `rclone.conf`. Written while the stack is stopped, they are read when it starts; on a running stack, restart it afterwards.
+
+If the old install ran skill plugins, copy their wheels into `/srv/app/istota/plugins/src/` and run `istota-stack plugins sync` while the stack is still stopped. A daemon that starts without a plugin deletes that plugin's scheduled jobs and their network approvals ([Skill plugins](#skill-plugins)).
 
 A restored stack polls mail, runs scheduled jobs and sends messages with whatever credentials work, as soon as it starts. Removing credentials is not enough, since the restored database holds working ones. Keep it quiet until you have checked it with the hold that `restore --hold` puts in (`restore --no-start` on a Mac passes it):
 

@@ -145,3 +145,119 @@ via `istota resource ensure`.
 | `proxy_only: true` | Withhold from Claude's env and hand to the proxy, *without* credential semantics: no auto-authorization, no manifest lookup, no per-skill scoping. For non-secret values the model still must not hold — today, paths to SQLite files (`HEALTH_DB_PATH`, `LOCATION_DB_PATH`). Mutually exclusive with `sensitive`; the credential split runs first, so a spec marked both routes as a credential |
 | `fallback_var: "FOO"` | Read `os.environ["FOO"]` if primary resolution fails. Honored on the value path only — auto-authorization disables fallbacks so an instance-wide `EnvironmentFile` value can't fan out to per-user auth |
 | `gate_has_discovered_calendars: true` | Only resolve when CalDAV discovery returned at least one calendar. A scheduled skill task runs discovery only for a skill that declares a spec with this flag |
+
+## External skill packages
+
+A skill can also live in its own Python distribution, outside this repository: a skill plugin. Istota finds it through an entry point, loads its `skill.md` like any other skill's, and runs its CLI as `python -m <package>`. Once loaded it is an ordinary skill: selection, `disabled_skills`, `admin_only`, `requires_capability`, `experimental`, companions, per-skill credential injection, per-user overlays and `skills show` treat it the same way. Where a plugin is treated differently, the rule is stricter, and every difference is listed below.
+
+On the stack, plugins are wheels in `/srv/app/istota/plugins/src/`, installed by `istota-stack plugins sync` ([Running the stack](../deployment/running-the-stack.md#skill-plugins)), or listed in the management role's `istota_skill_plugins` ([Ansible management role](../deployment/ansible.md)). The Mac app is not supported in this version: its VM runs the same stack, but nothing tests a plugin there and the app has no way to add one.
+
+### The package
+
+A plugin is one top-level regular package, shipped as a pure-Python wheel:
+
+```
+example-plugin/
+├── pyproject.toml
+└── example_plugin/
+    ├── __init__.py      # build_parser(), main(); optional setup_env(ctx)
+    ├── __main__.py      # the bundled template, unchanged
+    └── skill.md         # frontmatter and body, as for a bundled skill
+```
+
+`pyproject.toml` registers the skill in the `istota.skills` entry-point group:
+
+```toml
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "example-plugin"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.entry-points."istota.skills"]
+example = "example_plugin"
+```
+
+Hatchling ships every file inside the package directory, so `skill.md` needs no package-data table. `uv build --wheel` writes `dist/example_plugin-0.1.0-py3-none-any.whl`.
+
+The loader checks these rules each time it reads the skill index. A plugin that breaks one is left out of the index, and `istota doctor`'s `skills.plugins` names it with the reason ([Doctor checks](../reference/doctor-checks.md#users-and-configuration)):
+
+- **The entry point name is the skill name.** It matches `^[a-z][a-z0-9_]*$` and is none of the reserved names `files`, `memory`, `recall`, `memory_search`, `room_notes` and `web`. Skill names share a namespace with the scopes a shared room withholds by name, so a plugin called `room_notes` would be withheld on every restricted task and take the room's notes folder with it. A `name:` in the frontmatter is ignored, as it is for a bundled skill.
+- **A plugin never replaces a bundled skill.** A plugin named like one is refused (`clashes_with_bundled`) and the bundled skill stays. Two plugins with the same name are both refused (`duplicate_plugin`). To change a bundled skill's documentation, use `config/skills/<name>/skill.md`.
+- **The entry point value is one top-level package name**: `example_plugin`, never `example_plugin.cli` and never `example_plugin:main`. A plain module and a namespace package are refused too. The loader finds the package without importing it, and a dotted name would run the parent package's `__init__.py` on every load.
+- **`skill.md` sits in the package directory.** Without it the plugin is refused. A `skill.toml` there is ignored.
+- **`__main__.py` is the bundled template** from step 3: it imports `run_skill_main` from `istota.skills._cli` and calls it with `main`. A `cli: true` plugin without `__main__.py` loads, but its CLI cannot run, and `skills.plugins.entry` warns.
+- **The package `__init__` must be cheap and must not raise.** The daemon imports it on every task to look for `setup_env`, in the scheduler process, with the daemon's full environment. A plugin whose import raises is skipped with one ERROR line in the daemon log and not imported again until the daemon restarts, but its top-level code has already run once.
+- **No dependencies and no compiled code.** The wheel is installed with `--no-deps`, so a plugin runs on what the image's virtual environment already holds. Write `dependencies = []`, and do not declare `istota` itself. A wheel whose distribution name or package name the image already has is refused at sync, since the image's copy would hide it. So is a wheel that installs anything beside its one package: a second top-level package or module, a script, a `.pth` file or a `sitecustomize.py`. The installed tree is on the path of every Python process in the image, the web process included, and nothing but the plugin's package belongs there. If a plugin needs a library, the library has to become an optional extra of istota first.
+
+### What the manifest may say
+
+A plugin's frontmatter is a subset of a bundled skill's. A plugin is always `egress: external` and `shared_room: private`, which is what leaving both keys out gives. These fields are refused (`forbidden_manifest_field`):
+
+| Field | Why |
+|---|---|
+| `always_include: true` | with `exclude_skills`, it could take `sensitive_actions` out of every task's skill set |
+| `exclude_skills` | the same |
+| `egress: local` | it would skip the `skill:` approval a limited scheduled job needs, on the plugin's own word |
+| `shared_room` other than `private` | it would put the plugin on a guest's turn in a shared room |
+| `dependencies` | the daemon imports every name listed |
+
+So a limited scheduled job needs its owner to approve `skill:<name>` before it can run a plugin, as for any `external` skill.
+
+`env:` entries are held to an allowlist (`forbidden_env_spec`):
+
+- **Every variable is `PLUGIN_<NAME>_…`**, where `<NAME>` is the skill name in upper case: `PLUGIN_EXAMPLE_TOKEN` for the skill `example`. Credential values are kept in one table keyed by variable name across every skill, so a plugin that could name `KARAKEEP_API_KEY` would be handed the bookmarks key, or could replace another skill's value. Two plugins declaring the same variable are both refused (`duplicate_env_var`).
+- **`from:` is `secret`, `setup_env` or `user_id`.** Not `config`, which reads any configuration value, and not `template_file`.
+- **The only fields are `var`, `from`, `service`, `key`, `sensitive` and `when`.** Not `fallback_var`, which copies a variable from the daemon's environment, and not `proxy_only`, which hands a value to every skill CLI.
+- **Every secret service is `plugin_…`**: `plugin_example`, never `example` or a built-in service such as `karakeep`, `vault` or `mail_account`.
+
+```yaml
+env: [{"var":"PLUGIN_EXAMPLE_TOKEN","from":"secret","service":"plugin_example","key":"token","sensitive":true}]
+```
+
+A `setup_env(ctx)` hook may return only the variables its manifest declares with `from: setup_env`. Anything else is dropped, with one WARNING per plugin per daemon process.
+
+A plugin's secret is an ordinary row in the `secrets` table, written with `istota secret ensure -u alice --service plugin_example --key token --value-stdin`, or by an `istota apply` plan with the value in its sidecar ([Declarative settings](../configuration/declarative-settings.md)). Both accept a `plugin_*` service and key only while the plugin is loaded, so on the stack sync the plugin before a plan provisions its secret. The web settings page does not list a plugin's secrets.
+
+An operator's `config/skills/<name>/skill.md` over a plugin replaces its documentation and metadata. The skill still runs the plugin's package, every rule in the next section still applies, and the operator file's `env:` is not held to the allowlist above, since `config/` is the operator's file.
+
+### Credentials and security
+
+A plugin runs with the trust of a bundled skill, and installing one is that trust decision. The manifest rules above limit what a plugin can do by mistake and what reaches the model. They do not contain a plugin written to do harm.
+
+- **A plugin is not sandboxed, and can read whatever the daemon can.** Its CLI runs in the daemon container, outside the task's sandbox, as the daemon's user, with the daemon's network and filesystem, the databases and the master key (`/data/.secret_key`) included, whatever its manifest declares. Its package `__init__` runs inside the scheduler process on every task.
+- **A plugin's code is in no task's sandbox on the stack.** The installed tree is bound at `/app/plugins` into the daemon and web containers alone, and no sandbox binds it, so a task cannot read a plugin's source. In a development checkout a plugin installed into the virtual environment is readable to tasks, since every sandbox binds that environment read-only. Keep nothing secret in the package either way.
+- **A plugin's sensitive variables reach its own CLI alone, on the proxy path.** Tasks, CRON `command:` jobs and heartbeat shell checks run skill CLIs through the skill proxy, which hands each CLI only its own skill's credentials. A skill-task is the exception, for bundled skills and plugins alike: a CRON line `command: istota-skill example …` runs as one, its CLI receives every skill's credentials, and a plugin's variables reach every skill-task of a user who has the secret.
+- **A plugin's variables are never served by name.** `istota-credential env PLUGIN_EXAMPLE_TOKEN` is refused, with the credential broker on or off.
+- **A plugin gets no private credential channel.** A bundled skill's CLI gets a private socket for vault reads, wallet cards, one-time codes and mail account passwords; a plugin's does not. A plugin that needs a vault credential reads it through the public socket under the reveal policy, or declares its own `env:` secret. Credential-name arguments (`istota.skills._credref`) need that channel and do not work in a plugin.
+- **With the skill proxy off there is no credential split.** Under `[security] skill_proxy_enabled = false` every skill's secret variables, a plugin's included, are in the model's environment. Doctor's `security.skill_proxy` reports that configuration.
+- **`admin_only` hides a skill from the menu and does not stop a non-admin from running it.** The proxy runs any `cli: true` skill, and any user with a CRON.md can schedule `command: istota-skill example …`. A plugin whose verbs are for admins checks for itself with `load_config().is_admin(os.environ["ISTOTA_USER_ID"])`, as `skills/code_review` does. A proxied CLI has `ISTOTA_CONFIG_PATH` and `ISTOTA_ADMINS_FILE` in its environment. With an empty admins file `is_admin` is true only on a single-user install.
+- **Nothing enforces the host-path rule for a plugin** (below).
+
+On the stack the installed tree belongs to the daemon's uid and is read-only in the containers that use it, the protection `config/` has: the daemon and web processes cannot change plugin code. A process running as that uid on the VM itself, outside any container, could, and it could already read the master key.
+
+### The supported CLI surface
+
+A plugin may import these from istota and nothing else:
+
+- `istota.skills._cli`: `run_skill_main`, `run_skill_cli`, `emit`, `fail`, `error_envelope`, `parse_and_resolve`
+- `istota.skills._hostpath.host_path`
+- `istota.config.load_config`, and `Config.is_admin`
+
+The CLI convention is the bundled one: JSON envelopes on stdout, and `{"status": "error", ...}` with exit 1 on a failure.
+
+**Every path-shaped argument carries a `host_path` stamp, and the parser goes through `parse_and_resolve`.** A plugin's CLI runs with the daemon's view of the filesystem, so an unstamped path argument is a read or write anywhere the daemon can reach, at the model's choice. The stamp and `parse_and_resolve` scope it to the task's own places, as for a bundled skill (the modes are in `skills/_hostpath.py`). The tests that hold bundled skills to this rule (`tests/test_skill_host_paths_coverage.py`, `tests/test_skill_hostpath_declaration.py`, `tests/test_skill_host_paths_refusals.py` and `tests/test_skill_credential_refs.py`) walk the bundled directory and cannot see a plugin. Keeping the rule is the plugin author's job, and nothing checks it.
+
+### Developing and installing
+
+In a development checkout, `uv pip install -e path/to/example-plugin` puts the plugin in the virtual environment, where the loader finds it through the distribution's metadata. An editable install keeps the package in your project directory, away from its metadata; the loader accepts that because the install records the project directory (`direct_url.json`), and still refuses a package of the same name found anywhere else (`shadowed`). No `plugins/` directory is involved.
+
+A plugin added, upgraded or removed takes effect when the daemon and web processes restart: each reads the skill index, and with it the proxy's list of skills, once. On the stack `istota-stack plugins sync` restarts both. In a development checkout, restart them yourself.
+
+`istota doctor --only skills.plugins` says what loaded, and `istota doctor --deep --only skills.plugin_imports` imports each plugin's package in a child process, which finds a missing dependency. `istota-skill skills list` gives each skill's `origin` (`bundled`, `plugin`, `operator` or `legacy`) and, for a plugin, `plugin` with its distribution and version. `!skills` tags a plugin's line `plugin: <distribution> <version>`, and `!skills <name>` adds a `Plugin:` line.
+
+One known gap: when a `skill.md`'s frontmatter cannot be parsed, the shared frontmatter parser logs a WARNING of its own, for a plugin as for any skill. The loader records the plugin's problem at DEBUG, but in a `skills` subprocess, which configures no logging, the parser's line reaches stderr, once per process, where the model can see it in a tool result.

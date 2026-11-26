@@ -549,6 +549,11 @@ install -d -m 0711 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/data"
 # The web config editor's trigger, bound into web at /data/requests; its
 # existence is what makes istota-stack add docker-compose.config-apply.yml.
 install -d -m 0700 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/requests"
+# Skill plugins: wheels in src/ only root writes, since root hashes them, and the
+# tree `istota-stack plugins sync` installs them into, which only its uid 10001
+# one-shot writes. installed/ is what makes istota-stack add docker-compose.plugins.yml.
+install -d -m 0755 -o root -g root "${STACK}/plugins" "${STACK}/plugins/src"
+install -d -m 0755 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/plugins/installed"
 [ -f "${STACK}/.env" ] || install -m 0644 /dev/null "${STACK}/.env"
 
 # The checkout istota-stack builds from. Cloned from the checkout this script

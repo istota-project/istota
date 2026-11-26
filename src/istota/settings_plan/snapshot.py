@@ -118,6 +118,7 @@ def _gather(config_path, selected):
                     _refuse_credentials(definition["generation"], ["group_briefings", index, "generation"])
                 result["group_briefings"] = definitions
             result["users"] = {}
+            skill_index = secrets.config_skill_index(config)
             for user in wanted:
                 definition = profiles.snapshot_profile(stored[user])
                 definition["resources"] = resources.snapshot_resources(conn, user)
@@ -128,7 +129,8 @@ def _gather(config_path, selected):
                 heartbeat, heartbeat_revision = files.snapshot_heartbeat(config, user)
                 definition["scheduled_jobs"] = jobs
                 definition["heartbeat"] = heartbeat
-                definition["secrets"] = sorted(secrets.snapshot_secrets(conn, user, warnings),
+                definition["secrets"] = sorted(secrets.snapshot_secrets(conn, user, warnings,
+                                                                        skill_index=skill_index),
                                                 key=lambda item: item["service"])
                 result["users"][user] = definition
                 revisions[user] = [cron_revision, heartbeat_revision]

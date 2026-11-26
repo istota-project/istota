@@ -1868,6 +1868,50 @@ class TestTheConfigApplier:
                 in self.TEXT)
 
 
+class TestThePluginsLayout:
+    """Skill plugins (spec: external-skill-packages, Stage 5): `plugins/src/`
+    holds wheels only root writes, since root hashes them; `plugins/installed/`
+    is written by `istota-stack plugins sync`'s one-shot alone, as uid 10001.
+    The lines are run against a stub `install` that records its arguments."""
+
+    TEXT = PROVISION.read_text() if PROVISION.exists() else ""
+
+    def _made(self, tmp_path) -> dict[str, str]:
+        lines = [line for line in self.TEXT.splitlines()
+                 if line.startswith("install ") and '"${STACK}/plugins' in line]
+        assert lines, "provision.sh makes no plugins directory"
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        calls = tmp_path / "calls"
+        _stub(bindir, "install", f'echo "$*" >> {calls}\n')
+        result = subprocess.run(
+            ["bash", "-c", "set -euo pipefail\nISTOTA_UID=10001\nSTACK=/stack\n" + "\n".join(lines)],
+            env={"PATH": f"{bindir}:{os.environ['PATH']}"}, capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        made = {}
+        for call in calls.read_text().splitlines():
+            words = call.split()
+            options = " ".join(word for word in words if not word.startswith("/stack/"))
+            for path in (word for word in words if word.startswith("/stack/")):
+                made[path.removeprefix("/stack/")] = options
+        return made
+
+    def test_the_three_directories_with_their_owners_and_modes(self, tmp_path):
+        assert self._made(tmp_path) == {
+            "plugins": "-d -m 0755 -o root -g root",
+            "plugins/src": "-d -m 0755 -o root -g root",
+            "plugins/installed": "-d -m 0755 -o 10001 -g 10001",
+        }
+
+    def test_they_are_made_beside_the_rest_of_the_layout(self):
+        layout = self.TEXT.split("# --- /srv/app/istota ---", 1)[1].split("\n# ---", 1)[0]
+        assert '"${STACK}/plugins/installed"' in layout
+
+    def test_the_parent_comes_before_its_children(self):
+        assert self.TEXT.index('"${STACK}/plugins" ') < self.TEXT.index('"${STACK}/plugins/installed"')
+
+
 class TestTheSetupUnit:
     """`istota-setup.service` is how an unattended bootstrap starts the web
     setup: installed by provision.sh, started once by cloud-init, never enabled."""

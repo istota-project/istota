@@ -94,6 +94,16 @@ class Profile:
     image takes long enough under emulation that compose's own build would run
     past `up`'s timeout), the way `no-forge`'s image is."""
 
+    plugins_dir: str = ""
+    """A host `plugins/` directory laid out as `istota-stack` keeps it, with
+    `installed/site` already built.
+
+    Non-empty adds the shipped `docker-compose.plugins.yml` and sets
+    `ISTOTA_PLUGINS_DIR` to this path, which is what `istota-stack`'s
+    `compose()` does on a VM whose `plugins/installed` exists. Empty is every
+    other stack: no overlay, no bind, no plugins. Filled in by the fixture that
+    builds the tree before boot, the way `no-forge`'s image is."""
+
     web: bool = False
     """Whether a lean stack starts the shipped `web` and `nginx` services.
 
@@ -188,6 +198,12 @@ BROWSER = Profile(
 #: A public job refuses to run with no browser configured, and what it holds is
 #: the question here rather than what it browses, so no container is started.
 PUBLIC_JOB = Profile("public-job", config={"browser": {"enabled": True}})
+
+#: A skill plugin installed beside the image, as `istota-stack plugins sync`
+#: leaves one. Its own profile because the bind is a compose-level property and
+#: a plugin is in every task's skill index on the stack that has it. The tree is
+#: built before boot and its path filled in by the fixture that builds it.
+PLUGINS = Profile("plugins")
 
 # The negative control: the same profile on an image with the forge binaries
 # removed, reproducing ISSUE-263. The tag is empty here and filled in by the
@@ -332,6 +348,7 @@ ALL: tuple[Profile, ...] = (
     SIGNALING,
     BROWSER,
     PUBLIC_JOB,
+    PLUGINS,
     FULL,
 )
 

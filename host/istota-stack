@@ -71,6 +71,12 @@
 #                               write secrets/ and config/admins from JSON on stdin, as uid 10001
 #   istota-stack config-apply   apply what the web config editor requested (istota-config-apply.service)
 #   istota-stack check-image    exit 2 when the image lacks what config.toml needs (Claude Code)
+#   istota-stack plugins sync [--force] [--no-restart]
+#                               install the skill plugin wheels in plugins/src/ (root's,
+#                               pure-Python) into plugins/installed/site and restart the
+#                               daemon and web onto them; exits 0 when nothing changed,
+#                               2 when it did, 1 on a refused entry or a failed install
+#   istota-stack plugins status print the wheels in plugins/src/ and whether they are synced
 #   istota-stack push-key create|import [--force]
 #                               write the private push signing key, a new one or one on
 #                               stdin, as uid 10001; prints its key ID, never the key
@@ -180,6 +186,14 @@ LEGACY_DEVBOX_COMPOSE="${CONFIG_DIR}/compose.devbox.yml"
 # Where the Mac CLI's file arguments (`apply <plan>`, `import-bare-metal <dir>`)
 # are handed over: one fresh directory per call, removed after it.
 STAGING_DIR="${STACK}/staging"
+# Skill plugins: wheels in src/ (root's), the tree `plugins sync` installs them
+# into under installed/ (uid 10001's), and .synced, the digest that tree was
+# built from (root's). compose binds the directory at /app/plugins.
+PLUGINS_DIR="${STACK}/plugins"
+PLUGINS_SRC="${PLUGINS_DIR}/src"
+PLUGINS_INSTALLED="${PLUGINS_DIR}/installed"
+PLUGINS_SYNCED="${PLUGINS_DIR}/.synced"
+PLUGINS_OVERLAY=docker-compose.plugins.yml
 ISTOTA_UID=10001
 PROJECT=istota
 RECLAIM_LOG="${STACK}/reclaimed.log"
@@ -201,7 +215,7 @@ staging=""
 images_loaded=""
 # The SSH signature namespace of an images manifest, beside git's for tags.
 IMAGES_NAMESPACE=istota-images
-# Exit codes: 1 a failure, 2 `apply` changed something, 3 the older image
+# Exit codes: 1 a failure, 2 `apply` or `plugins sync` changed something, 3 the older image
 # refused the database (rollback), 64 usage, 65 a tag refused, 78 a secret
 # file `logs` cannot read.
 EXIT_REFUSED_TAG=65
@@ -420,11 +434,12 @@ cmd_hold() {
 # --- compose -----------------------------------------------------------------
 
 # Refuse a file this script would act on as root unless it is a regular file
-# (not a link) owned by the user running this, writable by nobody else.
+# (not a link) owned by the user running this, writable by nobody else. The
+# second argument is what the message tells the operator to do instead.
 require_own_file() {
-    local path="$1"
+    local path="$1" remedy="${2:-remove it and re-run \`istota-stack update <tag>\`.}"
     if [ -z "$(find -P "$path" -maxdepth 0 -type f -user "$(id -u)" ! -perm -g+w ! -perm -o+w 2>/dev/null)" ]; then
-        die "${path} is not a regular file owned by $(id -un) and writable by it alone; remove it and re-run \`istota-stack update <tag>\`."
+        die "${path} is not a regular file owned by $(id -un) and writable by it alone; ${remedy}"
     fi
 }
 
@@ -435,6 +450,12 @@ compose() {
     if [ -d "${STACK}/requests" ] && [ -f "${SRC}/docker/docker-compose.config-apply.yml" ]; then
         files+=(-f "${SRC}/docker/docker-compose.config-apply.yml")
         requests="${STACK}/requests"
+    fi
+    # The skill plugins tree, read-only into daemon and web, by the same rule.
+    local plugins=""
+    if [ -d "$PLUGINS_INSTALLED" ] && [ -f "${SRC}/docker/${PLUGINS_OVERLAY}" ]; then
+        files+=(-f "${SRC}/docker/${PLUGINS_OVERLAY}")
+        plugins="$PLUGINS_DIR"
     fi
     # The rclone mount's rc, into the daemon alone, where provision.sh made
     # it for the Nextcloud mount and the checkout has the file (#939).
@@ -509,6 +530,7 @@ compose() {
             unset ISTOTA_BUILD_REVISION ISTOTA_BUILD_TAG
         fi
         if [ -n "$requests" ]; then export ISTOTA_REQUESTS_DIR="$requests"; fi
+        if [ -n "$plugins" ]; then export ISTOTA_PLUGINS_DIR="$plugins"; fi
         if [ -n "$rclone_rc" ]; then
             export ISTOTA_RCLONE_RC_DIR="${STACK}/rclone-rc" ISTOTA_RCLONE_RC_ENV="${STACK}/rclone-rc.env"
         fi
@@ -4060,6 +4082,147 @@ cmd_logs() {
     exit 1
 }
 
+# --- skill plugins -------------------------------------------------------------
+
+PLUGINS_REMEDY="plugins/src/ holds root's wheels alone: remove it, or copy the wheel in again as root with mode 0644."
+
+# What the one-shot runs as uid 10001, the wheels as its arguments. Every write
+# under installed/ is here, never root's on the host. One line, so a recorded
+# argv stays one line. uv leaves its lock file in the target, mode 0666, so it
+# is removed: nothing in the tree is writable by anyone but 10001. A prev with
+# no site is a run killed between the two renames, so prev goes back first.
+# shellcheck disable=SC2016
+PLUGINS_SYNC_SH='set -eu; out=/plugins-out; '\
+'if [ ! -e "$out/site" ] && [ -e "$out/prev" ]; then mv "$out/prev" "$out/site"; fi; '\
+'rm -rf "$out/next" "$out/prev"; mkdir "$out/next"; '\
+'if [ "$#" -gt 0 ]; then uv pip install --python /app/.venv/bin/python --no-deps --no-index --no-cache'\
+' --target "$out/next" "$@"; rm -f "$out/next/.lock"; fi; '\
+'/app/.venv/bin/python -P -m istota.lib.skill_module check-tree "$out/next"; '\
+'if [ -e "$out/site" ]; then mv "$out/site" "$out/prev"; fi; mv "$out/next" "$out/site"; rm -rf "$out/prev"'
+
+# SHA-256 over each wheel's name and SHA-256, in the order given (sorted).
+PLUGINS_DIGEST_PY='
+import hashlib, os, sys
+digest = hashlib.sha256()
+for name in sys.argv[2:]:
+    wheel = hashlib.sha256()
+    with os.fdopen(os.open(os.path.join(sys.argv[1], name), os.O_RDONLY | os.O_NOFOLLOW), "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            wheel.update(block)
+    digest.update(name.encode() + b"\0" + wheel.hexdigest().encode() + b"\n")
+print(digest.hexdigest())
+'
+
+# Fills PLUGIN_WHEELS with the names in plugins/src/, sorted, or refuses (exit
+# 1) before anything reads them: root hashes these files, and root reads
+# nothing uid 10001 can write.
+PLUGIN_WHEELS=()
+plugin_wheels() {
+    local dir entry name names=()
+    for dir in "$PLUGINS_DIR" "$PLUGINS_SRC" "$PLUGINS_INSTALLED"; do
+        if [ -L "$dir" ] || [ ! -d "$dir" ]; then
+            die "no ${dir} directory: run ${SRC}/host/provision.sh, which makes the plugins layout."
+        fi
+    done
+    for dir in "$PLUGINS_DIR" "$PLUGINS_SRC"; do
+        if [ -z "$(find -P "$dir" -maxdepth 0 -type d -user "$(id -u)" ! -perm -g+w ! -perm -o+w 2>/dev/null)" ]; then
+            die "${dir} is not a directory owned by $(id -un) and writable by it alone; ${SRC}/host/provision.sh puts it back."
+        fi
+    done
+    while IFS= read -r -d '' entry; do
+        name="${entry##*/}"
+        [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.!+-]*\.whl$ ]] \
+            || die "${entry} is not a wheel (a file named NAME-VERSION-TAGS.whl); ${PLUGINS_REMEDY}"
+        require_own_file "$entry" "$PLUGINS_REMEDY"
+        names+=("$name")
+    done < <(find -P "$PLUGINS_SRC" -mindepth 1 -maxdepth 1 -print0)
+    PLUGIN_WHEELS=()
+    [ "${#names[@]}" -gt 0 ] || return 0
+    while IFS= read -r name; do
+        PLUGIN_WHEELS+=("$name")
+    done < <(printf '%s\n' "${names[@]}" | LC_ALL=C sort)
+}
+
+plugins_digest() {
+    python3 -I -c "$PLUGINS_DIGEST_PY" "$PLUGINS_SRC" ${PLUGIN_WHEELS[@]+"${PLUGIN_WHEELS[@]}"}
+}
+
+plugins_synced_digest() {
+    if [ -f "$PLUGINS_SYNCED" ]; then head -n 1 "$PLUGINS_SYNCED"; fi
+}
+
+cmd_plugins_status() {
+    [ "$#" -eq 0 ] || { usage >&2; exit 64; }
+    local name digest
+    plugin_wheels
+    for name in ${PLUGIN_WHEELS[@]+"${PLUGIN_WHEELS[@]}"}; do
+        echo "$name"
+    done
+    digest="$(plugins_digest)"
+    if [ "$digest" = "$(plugins_synced_digest)" ]; then echo synced; else echo "not synced"; fi
+}
+
+# Install the wheels in plugins/src/ when they changed since the last sync, then
+# bring a running stack onto them: daemon and web are the two services that
+# read plugins, so they alone restart, and .restart-owed is the config's and is
+# left alone. Exit 0 unchanged, 2 changed, 1 refused or failed.
+cmd_plugins_sync() {
+    local rebuild="" no_restart="" name digest service output wheels=()
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --force) rebuild=1 ;;
+            --no-restart) no_restart=1 ;;
+            *) usage >&2; exit 64 ;;
+        esac
+        shift
+    done
+    plugin_wheels
+    [ -f "${SRC}/docker/${PLUGINS_OVERLAY}" ] \
+        || die "the checkout in ${SRC} has no docker/${PLUGINS_OVERLAY}, so its stack binds no plugins; update the stack first."
+    digest="$(plugins_digest)" || die "could not read the wheels in ${PLUGINS_SRC}"
+    if [ -z "$rebuild" ] && [ "$digest" = "$(plugins_synced_digest)" ]; then
+        echo unchanged
+        return 0
+    fi
+    for name in ${PLUGIN_WHEELS[@]+"${PLUGIN_WHEELS[@]}"}; do
+        wheels+=("/app/plugins/src/${name}")
+    done
+    service="$(main_service)"
+    # ISTOTA_SECRETS_DIR=/nonexistent: istota-secrets exports nothing into the
+    # environment of a container whose only job is to unpack wheels.
+    if ! output="$(oneshot -e ISTOTA_SECRETS_DIR=/nonexistent -v "${PLUGINS_INSTALLED}:/plugins-out" \
+            "$service" sh -c "$PLUGINS_SYNC_SH" plugins-sync ${wheels[@]+"${wheels[@]}"} 2>&1)"; then
+        printf '%s\n' "$output" >&2
+        die "the plugins were not installed: plugins/installed/site and .synced are as they were, and nothing was restarted."
+    fi
+    printf '%s\n' "$digest" > "${PLUGINS_SYNCED}.tmp"
+    chmod 0644 "${PLUGINS_SYNCED}.tmp"
+    mv -f "${PLUGINS_SYNCED}.tmp" "$PLUGINS_SYNCED"
+    echo changed
+    if [ -n "$no_restart" ]; then
+        log "not restarted (--no-restart): the daemon and web load the new plugins when they next start."
+    elif [ -z "$(compose ps -q "$service" 2>/dev/null)" ]; then
+        log "the stack is not running; it starts on these plugins."
+    else
+        log "restarting ${service} and web onto the new plugins"
+        # up first: a stack started before plugins/installed existed has no bind.
+        if ! stack_up || ! compose restart "$service" web; then
+            die "the plugins are installed and .synced is written, but the stack did not restart onto them; \`istota-stack up\` finishes it."
+        fi
+    fi
+    return 2
+}
+
+cmd_plugins() {
+    local verb="${1:-}"
+    [ "$#" -gt 0 ] && shift
+    case "$verb" in
+        sync) cmd_plugins_sync "$@" ;;
+        status) cmd_plugins_status "$@" ;;
+        *) usage >&2; exit 64 ;;
+    esac
+}
+
 main() {
     local command="${1:-}"
     [ "$#" -gt 0 ] && shift
@@ -4099,6 +4262,9 @@ main() {
             esac ;;
         hold)
             [ "$#" -eq 0 ] || take_stack_lock hold ;;
+        # status is a read.
+        plugins)
+            [ "${1:-}" != sync ] || take_stack_lock "plugins sync" ;;
     esac
     case "$command" in
         update) cmd_update "$@" ;;
@@ -4123,6 +4289,7 @@ main() {
         up) cmd_up_verb ;;
         hold) cmd_hold "$@" ;;
         push-key) cmd_push_key "$@" ;;
+        plugins) cmd_plugins "$@" ;;
         down) compose down ;;
         exec) [ "$#" -gt 0 ] || { usage >&2; exit 64; }; stack_exec "$@" ;;
         compose) compose "$@" ;;

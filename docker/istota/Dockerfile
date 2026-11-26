@@ -217,6 +217,14 @@ COPY src/ src/
 COPY config/ config/
 RUN uv sync --frozen --no-dev --extra all
 
+# Skill plugins live beside the image, never in it: istota-stack binds the VM's
+# plugins/ at /app/plugins, and this .pth puts the tree `istota-stack plugins
+# sync` builds there on every interpreter of the venv (`site` skips a path that
+# does not exist). Not PYTHONPATH, which a skill CLI's constructed env lacks.
+RUN mkdir -p /app/plugins \
+    && echo /app/plugins/installed/site \
+        > "$(/app/.venv/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')/istota-plugins.pth"
+
 # Put the venv bin dir on the default PATH so the console scripts (istota,
 # istota-scheduler, istota-skill, money) resolve from any shell or subprocess
 # without relying on `uv run` or a per-process PATH injection.

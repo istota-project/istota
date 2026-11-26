@@ -188,6 +188,53 @@ class TestTheServarrKeys:
         assert reply.get("reason") == "not_authorized_credential"
 
 
+class TestTheSkillModules:
+    """The proxy is handed which package runs each skill it may run, one entry
+    per name, and refuses a name missing from it (spec: external-skill-packages)."""
+
+    def test_one_module_per_runnable_skill(self, tmp_path, runtime_inputs, monkeypatch):
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        plugin = SkillMeta(
+            name="example", description="x", cli=True, module="example_plugin", origin="plugin",
+        )
+        runtime_inputs = {**runtime_inputs, "skill_index": {
+            "kv": _skill("kv"), "example": plugin, "notes": _skill("notes", cli=False),
+        }}
+        proxy = task_env.build_task_runtime(_config(tmp_path), **runtime_inputs).proxy_ctx
+
+        assert proxy.skill_modules == {"kv": "istota.skills.kv", "example": "example_plugin"}
+        assert set(proxy.skill_modules) == proxy.allowed_skills
+
+    def test_a_withheld_skill_has_no_module(self, tmp_path, runtime_inputs, monkeypatch):
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        runtime_inputs = {
+            **runtime_inputs,
+            "skill_index": {"kv": _skill("kv"), "email": _skill("email")},
+            "withheld_scopes": frozenset({"email"}),
+        }
+        proxy = task_env.build_task_runtime(_config(tmp_path), **runtime_inputs).proxy_ctx
+
+        assert set(proxy.skill_modules) == proxy.allowed_skills == {"kv"}
+
+    def test_the_plugins_are_named_so_they_get_no_credential_channel(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        plugin = SkillMeta(
+            name="example", description="x", cli=True, module="example_plugin", origin="plugin",
+        )
+        overridden = SkillMeta(
+            name="example_two", description="x", cli=True, module="example_two_plugin",
+            origin="operator",
+        )
+        runtime_inputs = {**runtime_inputs, "skill_index": {
+            "kv": _skill("kv"), "example": plugin, "example_two": overridden,
+        }}
+        proxy = task_env.build_task_runtime(_config(tmp_path), **runtime_inputs).proxy_ctx
+
+        assert proxy.plugin_skills == frozenset({"example", "example_two"})
+
+
 class TestTheNativeReviewersProvider:
     """`code_review` builds the native brain from its own `load_config`, so its
     provider's key and headers reach it as `model_caller_env`'s copy, built

@@ -1,32 +1,47 @@
 """Skill discovery, manifest loading, and doc loading.
 
-Supports two discovery modes:
+Three ways a skill is described:
 1. Directory-based: each skill is a subdirectory with skill.md (YAML frontmatter
    for metadata). Optional skill.toml for backward compat / operator overrides.
-2. Legacy: flat _index.toml + *.md files in a single directory
+2. Plugin: a package another distribution installs, registered in the
+   ``istota.skills`` entry-point group, with skill.md in the package directory
+   and no skill.toml fallback (``discover_plugin_skills``).
+3. Legacy: flat _index.toml + *.md files in a single directory.
 
-Discovery order (later wins):
-1. Bundled skills: src/istota/skills/*/skill.md
-2. Operator overrides: config/skills/*/skill.md (or skill.toml)
-3. Legacy fallback: config/skills/_index.toml (lowest priority)
+Layers, lowest first (later wins, see ``load_skill_index`` for the exceptions):
+1. Legacy: config/skills/_index.toml
+2. Bundled: src/istota/skills/*/skill.md
+3. Plugins: the ``istota.skills`` entry points, never over a bundled name
+4. Operator: config/skills/*/skill.md (or skill.toml)
 """
 
+import copy
 import errno
 import hashlib
 import importlib
+import importlib.metadata
+import importlib.util
 import json
 import logging
 import os
 import re
 import stat
 import tomllib
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
 from istota.lib.markdown_headings import demote_headings
+from istota.lib.skill_module import (
+    PLUGIN_GROUP,
+    PLUGIN_SERVICE_RE,
+    bundled_skill_module,
+    plugin_name_problem,
+    valid_plugin_value,
+)
 from istota.sandbox.confined import open_dir as open_overlay_dir  # noqa: F401 - re-exported for its callers
 
-from ._types import EnvSpec, SkillMeta
+from ._types import EnvSpec, PluginProblem, SkillMeta, is_plugin
 
 logger = logging.getLogger("istota.skills_loader")
 
@@ -161,12 +176,15 @@ def _egress_value(raw: object) -> str:
     return "local" if raw == "local" else "external"
 
 
-def _load_skill_meta(skill_dir: Path) -> SkillMeta | None:
+def _load_skill_meta(skill_dir: Path, *, toml_fallback: bool = True) -> SkillMeta | None:
     """Load skill metadata from a directory.
 
     Primary source is YAML frontmatter in skill.md. Falls back to skill.toml
     for any fields not present in frontmatter (backward compat for operator
     overrides). Returns None if neither file exists.
+
+    ``toml_fallback=False`` reads no skill.toml at all, so a skill.md with no
+    frontmatter is None: a plugin package is described by its skill.md alone.
     """
     md_path = skill_dir / "skill.md"
     toml_path = skill_dir / "skill.toml"
@@ -174,7 +192,7 @@ def _load_skill_meta(skill_dir: Path) -> SkillMeta | None:
     fm = _parse_frontmatter(md_path)
     toml_data: dict = {}
 
-    if toml_path.exists():
+    if toml_fallback and toml_path.exists():
         try:
             with open(toml_path, "rb") as f:
                 toml_data = tomllib.load(f)
@@ -291,36 +309,358 @@ def _load_legacy_index(skills_dir: Path) -> dict[str, SkillMeta]:
     }
 
 
+# What a plugin's `env:` entry may say. An allowlist, so a field added to
+# EnvSpec later is refused until somebody decides otherwise: `config` reads any
+# Config path, `fallback_var` copies from the daemon's environment, and
+# `proxy_only` reaches every skill CLI's env.
+_PLUGIN_ENV_SOURCES = frozenset({"secret", "setup_env", "user_id"})
+_PLUGIN_ENV_FIELDS = frozenset({"var", "from", "service", "key", "sensitive", "when"})
+
+# Per-process: a plugin changes only across a restart. None until filled.
+_PLUGIN_DISCOVERY: "tuple[dict[str, SkillMeta], list[PluginProblem]] | None" = None
+
+
+def _reset_plugin_cache() -> None:
+    """Forget the cached discovery, for tests that install a plugin mid-process."""
+    global _PLUGIN_DISCOVERY
+    _PLUGIN_DISCOVERY = None
+
+
+def _dist_label(ep) -> str:  # noqa: ANN001
+    dist = getattr(ep, "dist", None)
+    if dist is None:
+        return ""
+    try:
+        return f"{dist.name} {dist.version}"
+    except Exception:
+        return ""
+
+
+def _truthy(value: object) -> bool:
+    """`_load_skill_meta`'s reading of a boolean key."""
+    return value is True or (isinstance(value, str) and value.lower() == "true")
+
+
+def _forbidden_manifest_field(fm: dict) -> str | None:
+    """The first menu or reach field a plugin may not set, or None.
+
+    Each is refused rather than overridden, so a manifest asking for what it
+    will not get fails visibly in doctor. `always_include` with
+    `exclude_skills` would drop `sensitive_actions` from every eager set,
+    `egress: local` would skip the `skill:` grant on the plugin's own word,
+    and the daemon imports every name in `dependencies`.
+    """
+    if _truthy(fm.get("always_include")):
+        return "always_include"
+    if fm.get("egress") == "local":
+        return "egress"
+    if "shared_room" in fm and fm["shared_room"] != "private":
+        return "shared_room"
+    if fm.get("exclude_skills"):
+        return "exclude_skills"
+    if fm.get("dependencies"):
+        return "dependencies"
+    return None
+
+
+def _forbidden_env_spec(skill: str, fm: dict) -> bool:
+    """Whether a plugin's `env:` asks for anything outside its own namespace.
+
+    Credential values are one dict keyed by variable name across every skill,
+    so a plugin naming another skill's variable would be handed its value.
+    Every variable is `PLUGIN_<NAME>_…` and every secret service `plugin_…`.
+    """
+    raw = fm.get("env", [])
+    if raw == "" or raw == []:
+        return False
+    if not isinstance(raw, list):
+        return True
+    var_re = re.compile(rf"PLUGIN_{re.escape(skill.upper())}_[A-Z0-9_]+")
+    for entry in raw:
+        if not isinstance(entry, dict) or set(entry) - _PLUGIN_ENV_FIELDS:
+            return True
+        source = entry.get("from")
+        if source not in _PLUGIN_ENV_SOURCES:
+            return True
+        var = entry.get("var")
+        if not isinstance(var, str) or var_re.fullmatch(var) is None:
+            return True
+        if source == "secret":
+            service, key = entry.get("service"), entry.get("key")
+            if not isinstance(service, str) or PLUGIN_SERVICE_RE.fullmatch(service) is None:
+                return True
+            if not isinstance(key, str) or not key:
+                return True
+        if "sensitive" in entry and not isinstance(entry["sensitive"], bool):
+            return True
+        when = entry.get("when", "")
+        if not isinstance(when, str) and not (
+            isinstance(when, list) and all(isinstance(w, str) for w in when)
+        ):
+            return True
+    return False
+
+
+def _editable_project(dist) -> Path | None:  # noqa: ANN001
+    """The project directory an editable install's `direct_url.json` names, or None.
+
+    `uv pip install -e` puts the `.dist-info` in site-packages and leaves the
+    package in the project, so the package is not beside its metadata.
+    """
+    try:
+        data = json.loads(dist.read_text("direct_url.json") or "")
+        if data["dir_info"]["editable"] is not True:
+            return None
+        url = urllib.parse.urlsplit(data["url"])
+        if url.scheme != "file" or url.netloc not in ("", "localhost"):
+            return None
+        return Path(urllib.parse.unquote(url.path)).resolve()
+    except Exception:
+        return None
+
+
+def _load_plugin(ep) -> tuple[SkillMeta | None, str | None]:  # noqa: ANN001
+    """One validly named entry point: its meta, or the reason it has none.
+
+    Locates the package without importing it. For a top-level name
+    `find_spec` executes nothing; a dotted value never gets this far.
+    """
+    value = ep.value
+    if not valid_plugin_value(value):
+        return None, "bad_value"
+    try:
+        spec = importlib.util.find_spec(value)
+    except Exception:
+        return None, "module_not_found"
+    if spec is None:
+        return None, "module_not_found"
+    if spec.submodule_search_locations is None:
+        return None, "not_a_package"
+    locations = list(spec.submodule_search_locations)
+    if spec.origin is None or len(locations) != 1:
+        return None, "namespace_package"
+    pkg_dir = Path(locations[0])
+    dist = getattr(ep, "dist", None)
+    if dist is not None:
+        # The name resolved to some other package earlier on sys.path, which
+        # would otherwise read as a misleading `no_skill_md`.
+        try:
+            found_in = pkg_dir.parent.resolve()
+            shadowed = Path(dist.locate_file("")).resolve() != found_in
+            if shadowed:
+                project = _editable_project(dist)
+                shadowed = project is None or not found_in.is_relative_to(project)
+        except Exception:
+            shadowed = True
+        if shadowed:
+            return None, "shadowed"
+    try:
+        md_path = pkg_dir / "skill.md"
+        if not md_path.is_file():
+            return None, "no_skill_md"
+        fm = _parse_frontmatter(md_path)
+        if not fm:
+            return None, "unparseable_skill_md"
+        if _forbidden_manifest_field(fm) is not None:
+            return None, "forbidden_manifest_field"
+        if _forbidden_env_spec(ep.name, fm):
+            return None, "forbidden_env_spec"
+        meta = _load_skill_meta(pkg_dir, toml_fallback=False)
+    except Exception:
+        return None, "unparseable_skill_md"
+    if meta is None:
+        return None, "unparseable_skill_md"
+    meta.name = ep.name
+    meta.module = value
+    meta.origin = "plugin"
+    meta.plugin_dist = _dist_label(ep)
+    return meta, None
+
+
+def _sorted_problems(problems: list[PluginProblem]) -> list[PluginProblem]:
+    return sorted(problems, key=lambda p: (p.name, p.reason, p.dist))
+
+
+def _discover_plugins(entry_points) -> tuple[dict[str, SkillMeta], list[PluginProblem]]:  # noqa: ANN001
+    problems: list[PluginProblem] = []
+    named = []
+    for ep in entry_points:
+        reason = plugin_name_problem(ep.name)
+        if reason is not None:
+            problems.append(PluginProblem(name=str(ep.name), dist=_dist_label(ep), reason=reason))
+        else:
+            named.append(ep)
+
+    counts: dict[str, int] = {}
+    for ep in named:
+        counts[ep.name] = counts.get(ep.name, 0) + 1
+
+    candidates: dict[str, SkillMeta] = {}
+    for ep in named:
+        if counts[ep.name] > 1:
+            # Picking one would depend on sys.path order.
+            problems.append(PluginProblem(name=ep.name, dist=_dist_label(ep), reason="duplicate_plugin"))
+            continue
+        meta, reason = _load_plugin(ep)
+        if meta is None:
+            problems.append(PluginProblem(name=ep.name, dist=_dist_label(ep), reason=reason or ""))
+            continue
+        candidates[ep.name] = meta
+
+    owners: dict[str, set[str]] = {}
+    for name, meta in candidates.items():
+        for spec in meta.env_specs:
+            owners.setdefault(spec.var, set()).add(name)
+    sharing: set[str] = set()
+    for names in owners.values():
+        if len(names) > 1:
+            sharing |= names
+
+    plugins: dict[str, SkillMeta] = {}
+    for name in sorted(candidates):
+        meta = candidates[name]
+        if name in sharing:
+            problems.append(PluginProblem(name=name, dist=meta.plugin_dist, reason="duplicate_env_var"))
+            continue
+        plugins[name] = meta
+
+    # DEBUG, never louder: a `skills` subprocess configures no logging, so a
+    # warning would reach the model's tool output through `lastResort`.
+    for problem in problems:
+        logger.debug(
+            "skill plugin %r (%s) not loaded: %s", problem.name, problem.dist or "-", problem.reason,
+        )
+    return plugins, _sorted_problems(problems)
+
+
+def discover_plugin_skills(
+    entry_points=None,  # noqa: ANN001
+) -> tuple[dict[str, SkillMeta], list[PluginProblem]]:
+    """The plugins in the ``istota.skills`` entry-point group, and the problems.
+
+    Every per-entry failure is a :class:`PluginProblem`; only reading the
+    group itself can raise. ``clashes_with_bundled`` is not computed here,
+    since it depends on the bundled directory (see :func:`plugin_problems`).
+
+    With ``entry_points=None`` the group is read once per process and cached;
+    an injected iterable always bypasses the cache. Callers get copies.
+    """
+    global _PLUGIN_DISCOVERY
+    if entry_points is not None:
+        return _discover_plugins(entry_points)
+    cached = _PLUGIN_DISCOVERY
+    if cached is None:
+        cached = _discover_plugins(importlib.metadata.entry_points(group=PLUGIN_GROUP))
+        _PLUGIN_DISCOVERY = cached
+    plugins, problems = cached
+    return copy.deepcopy(plugins), list(problems)
+
+
+def _accept_plugins(
+    plugins: dict[str, SkillMeta],
+    bundled_names,  # noqa: ANN001
+) -> tuple[dict[str, SkillMeta], list[PluginProblem]]:
+    """The one clash rule: a plugin never replaces a bundled skill."""
+    accepted: dict[str, SkillMeta] = {}
+    clashes: list[PluginProblem] = []
+    for name, meta in plugins.items():
+        if name in bundled_names:
+            clashes.append(PluginProblem(name=name, dist=meta.plugin_dist, reason="clashes_with_bundled"))
+        else:
+            accepted[name] = meta
+    return accepted, clashes
+
+
+def plugin_problems(
+    bundled_dir: Path | None = None,
+    *,
+    plugin_entry_points=None,  # noqa: ANN001
+) -> list[PluginProblem]:
+    """Every plugin that is installed and not in the index, with its reason.
+
+    The same discovery (cached) and the same clash rule as
+    :func:`load_skill_index`. Raises only when the entry-point group itself
+    cannot be read; a startup caller catches that.
+    """
+    if bundled_dir is None:
+        bundled_dir = _BUNDLED_SKILLS_DIR
+    plugins, problems = discover_plugin_skills(plugin_entry_points)
+    _, clashes = _accept_plugins(plugins, _discover_directory_skills(bundled_dir))
+    return _sorted_problems(problems + clashes)
+
+
 def load_skill_index(
     skills_dir: Path,
     bundled_dir: Path | None = None,
+    *,
+    plugin_entry_points=None,  # noqa: ANN001
 ) -> dict[str, SkillMeta]:
     """Load all skill metadata with layered discovery.
 
-    Discovery priority (later wins):
-    1. Legacy _index.toml in skills_dir (lowest priority)
-    2. Bundled skill.toml directories (in src/istota/skills/)
-    3. Operator skill.toml directories in skills_dir (highest priority)
+    Layers, lowest first; a later one wins, with two exceptions:
+    1. Legacy _index.toml in skills_dir.
+    2. Bundled skill directories (src/istota/skills/*/).
+    3. Plugins from the ``istota.skills`` entry points, except a name the
+       bundled layer has: the bundled skill stays and the plugin is a
+       ``clashes_with_bundled`` problem (:func:`plugin_problems`).
+    4. Operator skill directories in skills_dir (skill.md or skill.toml).
+       Over a plugin, the operator entry inherits ``module`` and
+       ``plugin_dist``, so dispatch still finds the plugin's package and
+       every plugin rule still applies; ``origin`` is ``"operator"``.
+
+    Never raises for a plugin: a plugin that cannot load is left out and
+    logged at DEBUG. ``origin`` is set on every entry.
 
     Args:
         skills_dir: Operator config skills directory (e.g. config/skills/).
         bundled_dir: Override for bundled skills directory (for testing).
+        plugin_entry_points: Entry points to use instead of the installed
+            ones (for testing); bypasses the per-process cache.
     """
     if bundled_dir is None:
         bundled_dir = _BUNDLED_SKILLS_DIR
 
-    # Layer 1: Legacy _index.toml (lowest priority)
     skills = _load_legacy_index(skills_dir)
+    for meta in skills.values():
+        meta.origin = "legacy"
 
-    # Layer 2: Bundled directory-based skills
     bundled = _discover_directory_skills(bundled_dir)
+    for meta in bundled.values():
+        meta.origin = "bundled"
     skills.update(bundled)
 
-    # Layer 3: Operator overrides from config/skills/*/skill.toml
+    try:
+        plugins, _ = discover_plugin_skills(plugin_entry_points)
+    except Exception as e:
+        logger.debug("skill plugin discovery failed: %s", e)
+        plugins = {}
+    accepted, clashes = _accept_plugins(plugins, bundled)
+    for problem in clashes:
+        logger.debug(
+            "skill plugin %r (%s) not loaded: %s", problem.name, problem.dist or "-", problem.reason,
+        )
+    skills.update(accepted)
+
     overrides = _discover_directory_skills(skills_dir)
+    for name, meta in overrides.items():
+        meta.origin = "operator"
+        lower = skills.get(name)
+        if lower is not None and is_plugin(lower):
+            meta.module = lower.module
+            meta.plugin_dist = lower.plugin_dist
     skills.update(overrides)
 
     return skills
+
+
+def resolve_skill_module(name: str, skill_index: dict[str, SkillMeta]) -> str:
+    """The importable package that runs skill ``name``.
+
+    A plugin's own package, inherited by an operator entry over it, else the
+    bundled ``istota.skills.<name>``. Raises ``KeyError`` for a name not in
+    the index; every caller has checked the name against it already.
+    """
+    return skill_index[name].module or bundled_skill_module(name)
 
 
 def _get_attachment_extensions(attachments: list[str] | None) -> set[str]:

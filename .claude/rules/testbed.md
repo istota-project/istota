@@ -51,6 +51,7 @@ A profile is a named shape plus the services it runs plus any extra config. `Sta
 | `signaling` | lean | model, signaling | the Talk signaling wire protocol against a real HPB |
 | `browser` | lean | model, signaling | parity row 17: the `browser` and `signaling` compose profiles booted from the shipped file |
 | `public-job` | lean | model | an approved public job and its subtask: `browser.enabled` set, since the job refuses to run without it, and no browser container, since what it holds is the question |
+| `plugins` | lean | model | a skill plugin run through a task's sandbox and the proxy (`tests/smoke/test_plugin_in_stack.py`): `Profile.plugins_dir` adds the shipped `docker-compose.plugins.yml` and sets `ISTOTA_PLUGINS_DIR`, as `istota-stack`'s `compose()` does, to a tree `tests/image/conftest.py` builds with the image's own `uv` before boot; no web, so the overlay's `web` bind is not exercised |
 | `email` | lean | model, mail, ntfy | the email suite: `confirm_sender_match = "verify"`, the default `untrusted` outbound floor |
 | `email-hold-all` | lean | model, mail, ntfy | the same with `ISTOTA_EMAIL_OUTBOUND_APPROVAL_FLOOR=all` |
 | `full` | full | model, nextcloud, mail, signaling, ntfy | provisioning, Talk, storage, attachments, the signaling event stream, email seen from the web app |

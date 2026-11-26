@@ -4291,7 +4291,7 @@ class TestTheStackLock:
         ("update",), ("rollback",), ("setup",), ("apply",), ("import-bare-metal",),
         ("restore",), ("import-standalone",), ("retire-bare-metal",), ("put-files",),
         ("localize-workspace",), ("up",), ("down",), ("host-env", "STORAGE=local"),
-        ("push-key", "create"), ("push-key", "import"),
+        ("push-key", "create"), ("push-key", "import"), ("plugins", "sync"),
     ])
     def test_every_writing_verb_is_locked(self, fx, args):
         before = (fx.stack / "host.env").read_text()
@@ -4927,6 +4927,290 @@ class TestTheRcloneRcComposeFile:
                      "docker-compose.browser-network.yml"):
             text = (REPO / "docker" / name).read_text()
             assert "rclone-rc" not in text and "istota-rclone" not in text, name
+
+
+#: Arms the plugins tests add in front of the docker stub's own: the sync's
+#: one-shot (its script names check-tree) fails on STUB_PLUGINS_RC, printing
+#: STUB_PLUGINS_OUTPUT, and the two-service restart fails on
+#: STUB_PLUGINS_RESTART_RC.
+PLUGINS_ARMS = r"""  *" check-tree "*)
+    [ -z "${STUB_PLUGINS_OUTPUT:-}" ] || echo "$STUB_PLUGINS_OUTPUT"
+    exit "${STUB_PLUGINS_RC:-0}" ;;
+  *" restart daemon web ") exit "${STUB_PLUGINS_RESTART_RC:-0}" ;;
+"""
+
+WHEEL = "example_plugin-0.1.0-py3-none-any.whl"
+
+
+class TestPlugins:
+    """`istota-stack plugins sync|status` (spec: external-skill-packages, Stage 5).
+
+    `sync` refuses anything in `plugins/src/` but root's own wheels before any
+    container starts, hashes them, and when the set changed runs one one-shot
+    as uid 10001 that installs them into `plugins/installed/next`, checks the
+    tree and renames it to `site`. Root writes `.synced` only after that
+    succeeded and touches nothing under `installed/`. A change restarts the
+    daemon and web, the two services that read plugins, and exits 2. Nothing
+    here runs a container: the docker stub records argv."""
+
+    @pytest.fixture
+    def pl(self, fx):
+        stub = Path(fx.env["PATH"].split(":")[0]) / "docker"
+        stub.write_text(DOCKER_STUB.replace('case "$args" in\n', 'case "$args" in\n' + PLUGINS_ARMS, 1))
+        shutil.copy(REPO / "docker" / "docker-compose.plugins.yml", fx.src / "docker")
+        for name in ("plugins", "plugins/src", "plugins/installed"):
+            (fx.stack / name).mkdir()
+            (fx.stack / name).chmod(0o755)
+        wheel = fx.stack / "plugins" / "src" / WHEEL
+        wheel.write_bytes(b"PK\x03\x04 example wheel")
+        wheel.chmod(0o644)
+        return fx
+
+    @staticmethod
+    def _src(fx) -> Path:
+        return fx.stack / "plugins" / "src"
+
+    @staticmethod
+    def _synced(fx) -> Path:
+        return fx.stack / "plugins" / ".synced"
+
+    @staticmethod
+    def _oneshots(fx) -> list[str]:
+        return [c for c in fx.docker_calls() if " run --rm " in c and " check-tree " in c]
+
+    @staticmethod
+    def _restarts(fx) -> list[str]:
+        return [c for c in fx.docker_calls() if re.search(r" restart( |$)", c)]
+
+    @staticmethod
+    def _ups(fx) -> list[str]:
+        return [c for c in fx.docker_calls() if " up -d " in f"{c} "]
+
+    # --- compose ---
+
+    PROBE = 'docker() { echo "plugins=${ISTOTA_PLUGINS_DIR-unset} $*"; }; compose ps'
+
+    def test_compose_adds_the_overlay_once_the_installed_tree_exists(self, fx):
+        shutil.copy(REPO / "docker" / "docker-compose.plugins.yml", fx.src / "docker")
+        without = _source(fx, self.PROBE)
+        assert without.returncode == 0, without.stderr
+        assert "docker-compose.plugins.yml" not in without.stdout
+        assert "plugins=unset" in without.stdout
+
+        (fx.stack / "plugins" / "installed").mkdir(parents=True)
+        with_tree = _source(fx, self.PROBE)
+        assert with_tree.returncode == 0, with_tree.stderr
+        assert f"-f {fx.src}/docker/docker-compose.plugins.yml" in with_tree.stdout
+        assert f"plugins={fx.stack}/plugins " in with_tree.stdout
+
+    def test_a_checkout_without_the_file_is_not_given_it(self, fx):
+        """A rollback to a release from before plugins."""
+        (fx.stack / "plugins" / "installed").mkdir(parents=True)
+        result = _source(fx, self.PROBE)
+        assert result.returncode == 0, result.stderr
+        assert "plugins.yml" not in result.stdout
+        assert "plugins=unset" in result.stdout
+
+    # --- refusals ---
+
+    @pytest.mark.parametrize("entry", ["not-a-wheel", "symlink", "directory", "group-writable",
+                                       "world-writable", "bad-name", "src-group-writable",
+                                       "foreign-owner"])
+    def test_a_bad_entry_is_refused_before_any_container(self, pl, entry):
+        src = self._src(pl)
+        if entry == "not-a-wheel":
+            (src / "README.txt").write_text("notes\n")
+        elif entry == "symlink":
+            (src / "link-0.1.0-py3-none-any.whl").symlink_to(src / WHEEL)
+        elif entry == "directory":
+            (src / "dir-0.1.0-py3-none-any.whl").mkdir()
+        elif entry == "group-writable":
+            (src / WHEEL).chmod(0o664)
+        elif entry == "world-writable":
+            (src / WHEEL).chmod(0o646)
+        elif entry == "bad-name":
+            (src / "a b-0.1.0-py3-none-any.whl").write_bytes(b"PK")
+            (src / "a b-0.1.0-py3-none-any.whl").chmod(0o644)
+        elif entry == "src-group-writable":
+            src.chmod(0o775)
+        elif entry == "foreign-owner":
+            # Every file then reads as somebody else's, as a file 10001 owns does to root.
+            bindir = Path(pl.env["PATH"].split(":")[0])
+            (bindir / "id").write_text('#!/bin/sh\ncase "$1" in -u) echo 4242 ;; -un) echo other ;; esac\n')
+            (bindir / "id").chmod(0o755)
+        result = pl.run("plugins", "sync")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "update" not in result.stderr, result.stderr
+        assert pl.docker_calls() == []
+        assert not self._synced(pl).exists()
+
+    def test_a_vm_without_the_layout_names_provision(self, fx):
+        result = fx.run("plugins", "sync")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "provision.sh" in result.stderr
+        assert fx.docker_calls() == []
+
+    # --- the one-shot ---
+
+    def test_a_change_runs_the_one_shot_writes_synced_and_exits_2(self, pl):
+        result = pl.run("plugins", "sync")
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert "changed" in result.stdout.splitlines()
+        [call] = self._oneshots(pl)
+        assert " -e ISTOTA_SECRETS_DIR=/nonexistent " in call
+        assert f" -v {pl.stack}/plugins/installed:/plugins-out " in call
+        assert " --entrypoint istota-drop " in call
+        assert f"-f {pl.src}/docker/docker-compose.plugins.yml" in call
+        install = ("uv pip install --python /app/.venv/bin/python --no-deps --no-index --no-cache"
+                   ' --target "$out/next" "$@"')
+        check = '/app/.venv/bin/python -P -m istota.lib.skill_module check-tree "$out/next"'
+        # uv leaves its lock in the target, mode 0666 (the image tier saw it).
+        unlock = 'rm -f "$out/next/.lock"'
+        assert install in call and check in call and unlock in call
+        assert (call.index(install) < call.index(unlock) < call.index(check)
+                < call.index('mv "$out/next" "$out/site"'))
+        assert call.endswith(f"plugins-sync /app/plugins/src/{WHEEL}")
+        assert re.fullmatch(r"[0-9a-f]{64}\n", self._synced(pl).read_text())
+
+    def test_a_run_killed_between_the_two_renames_loses_no_tree(self, tmp_path):
+        """The one-shot's own body, run here with its two absolute paths replaced.
+
+        A run killed after `site` became `prev` and before `next` became `site`
+        leaves the last good tree as `prev` alone. The next run puts it back
+        before it removes anything, so a refused install still leaves a tree.
+        """
+        from tests.image import conftest as image_support
+
+        out = tmp_path / "installed"
+        (out / "prev").mkdir(parents=True)
+        (out / "prev" / "marker").write_text("last good")
+        refusing = tmp_path / "python"
+        refusing.write_text("#!/bin/sh\nexit 1\n")
+        refusing.chmod(0o755)
+        script = image_support.plugins_sync_script()
+        assert "out=/plugins-out" in script and "/app/.venv/bin/python" in script
+        script = script.replace("out=/plugins-out", f"out={out}")
+        script = script.replace("/app/.venv/bin/python", str(refusing))
+        result = subprocess.run(
+            ["sh", "-c", script, "plugins-sync"], capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode != 0, result.stdout + result.stderr
+        assert (out / "site" / "marker").read_text() == "last good"
+        assert not (out / "prev").exists()
+
+    def test_an_unchanged_set_starts_nothing(self, pl):
+        assert pl.run("plugins", "sync").returncode == 2
+        pl.calls.unlink()
+        again = pl.run("plugins", "sync")
+        assert again.returncode == 0, again.stdout + again.stderr
+        assert "unchanged" in again.stdout.splitlines()
+        assert pl.docker_calls() == []
+
+    def test_a_changed_wheel_is_a_change(self, pl):
+        assert pl.run("plugins", "sync").returncode == 2
+        first = self._synced(pl).read_text()
+        (self._src(pl) / WHEEL).write_bytes(b"PK\x03\x04 a rebuilt wheel")
+        result = pl.run("plugins", "sync")
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert self._synced(pl).read_text() != first
+
+    def test_force_runs_the_one_shot_on_an_unchanged_set(self, pl):
+        assert pl.run("plugins", "sync").returncode == 2
+        result = pl.run("plugins", "sync", "--force")
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert len(self._oneshots(pl)) == 2
+
+    def test_an_empty_source_builds_an_empty_tree_once(self, pl):
+        (self._src(pl) / WHEEL).unlink()
+        result = pl.run("plugins", "sync")
+        assert result.returncode == 2, result.stdout + result.stderr
+        [call] = self._oneshots(pl)
+        assert call.endswith("plugins-sync")
+        assert pl.run("plugins", "sync").returncode == 0
+
+    def test_a_failed_one_shot_changes_nothing_root_owns_and_removes_nothing(self, pl):
+        installed = pl.stack / "plugins" / "installed"
+        (installed / "site").mkdir()
+        (installed / "site" / "kept").write_text("the running tree\n")
+        (installed / "next").mkdir()
+        (installed / "next" / "left").write_text("a killed run's\n")
+        self._synced(pl).write_text("earlier\n")
+        result = pl.run("plugins", "sync", STUB_PLUGINS_RC="1",
+                        STUB_PLUGINS_OUTPUT="example-plugin: declares no istota.skills entry point")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "declares no istota.skills entry point" in result.stderr
+        assert self._synced(pl).read_text() == "earlier\n"
+        assert (installed / "site" / "kept").is_file()
+        assert (installed / "next" / "left").is_file()
+        assert self._restarts(pl) == [] and self._ups(pl) == []
+        assert "changed" not in result.stdout.splitlines()
+
+    # --- the restart ---
+
+    def test_a_running_stack_restarts_the_daemon_and_web_alone(self, pl):
+        result = pl.run("plugins", "sync")
+        assert result.returncode == 2, result.stdout + result.stderr
+        restarts = self._restarts(pl)
+        assert len(restarts) == 1 and restarts[0].endswith(" restart daemon web"), restarts
+        ups = self._ups(pl)
+        assert ups, "stack_up brings the overlay onto a stack started without it"
+        calls = pl.docker_calls()
+        assert calls.index(ups[-1]) < calls.index(restarts[0])
+
+    def test_no_restart_restarts_nothing_and_leaves_the_owed_restart(self, pl):
+        owed = pl.stack / ".restart-owed"
+        owed.write_text("")
+        result = pl.run("plugins", "sync", "--no-restart")
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert self._restarts(pl) == [] and self._ups(pl) == []
+        assert owed.exists()
+        assert self._synced(pl).exists()
+
+    def test_a_stopped_stack_stays_stopped(self, pl):
+        result = pl.run("plugins", "sync", STUB_STACK_DOWN="1")
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert self._restarts(pl) == [] and self._ups(pl) == []
+
+    def test_a_failed_restart_is_1_with_the_install_kept(self, pl):
+        result = pl.run("plugins", "sync", STUB_PLUGINS_RESTART_RC="1")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert self._synced(pl).exists()
+        assert "istota-stack up" in result.stderr
+
+    # --- status, the lock, usage ---
+
+    def test_status_lists_the_wheels_and_whether_they_are_synced(self, pl):
+        before = pl.run("plugins", "status")
+        assert before.returncode == 0, before.stdout + before.stderr
+        assert before.stdout.splitlines() == [WHEEL, "not synced"]
+        assert pl.run("plugins", "sync").returncode == 2
+        after = pl.run("plugins", "status")
+        assert after.stdout.splitlines() == [WHEEL, "synced"]
+
+    def test_status_takes_no_lock(self, pl):
+        held = HeldLock(pl.stack / ".stack.lock", "update")
+        try:
+            result = pl.run("plugins", "status", ISTOTA_STACK_LOCK_WAIT="0")
+        finally:
+            held.release()
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert pl.docker_calls() == []
+
+    @pytest.mark.parametrize("args", [("plugins",), ("plugins", "install"), ("plugins", "sync", "--all"),
+                                      ("plugins", "status", "--force")])
+    def test_anything_else_is_a_usage_error(self, pl, args):
+        result = pl.run(*args)
+        assert result.returncode == 64, result.stdout + result.stderr
+        assert pl.docker_calls() == []
+
+    def test_the_usage_block_documents_both_and_the_exit_codes(self):
+        usage = SCRIPT.read_text().split("# --- end usage ---")[0]
+        assert "istota-stack plugins sync [--force] [--no-restart]" in usage
+        entry = usage[usage.index("istota-stack plugins sync"):]
+        entry = entry[:entry.index("#   istota-stack", 1)]
+        for code in ("0", "2", "1"):
+            assert re.search(rf"\b{code}\b", entry), code
+        assert "istota-stack plugins status" in usage
 
 
 class TestNeedsClaudeCode:

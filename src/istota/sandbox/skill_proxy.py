@@ -19,6 +19,7 @@ from time import monotonic, sleep, time
 
 from istota import skill_client
 from istota.lib.egress_log import EGRESS_LOG_VAR, append_refusal, refusal_advice
+from istota.lib.skill_module import bundled_skill_module
 from istota.sandbox import peer_process
 from istota.sandbox.host_paths import skill_file_env
 from istota.credentials.names import label_for_display
@@ -390,6 +391,8 @@ class SkillProxy:
         allowed_credentials: set[str] | None = None,
         skill_credential_map: dict[str, set[str]] | None = None,
         allowed_skills: frozenset[str] | None = None,
+        skill_modules: dict[str, str] | None = None,
+        plugin_skills: frozenset[str] = frozenset(),
         authorized_skills: frozenset[str] | None = None,
         task_id: int | None = None,
         vault_credentials: dict[str, str] | None = None,
@@ -429,6 +432,16 @@ class SkillProxy:
         self.allowed_credentials = allowed_credentials
         self.skill_credential_map = skill_credential_map
         self.allowed_skills = allowed_skills
+        # Which package runs each skill, from the index (`resolve_skill_module`).
+        # Exhaustive: a name missing from it is refused, never guessed at, since
+        # a guess would run a plugin as `istota.skills.<name>`. None, which only
+        # tests pass, means the bundled package for every name.
+        self.skill_modules = skill_modules
+        # Skills a plugin package runs (`is_plugin`). Spawned with no private
+        # credential channel: the fd serves vault reads past the reveal
+        # policy, wallet cards, OTP codes and mail account passwords, and a
+        # plugin's own code runs before anything could mark it non-inheritable.
+        self.plugin_skills = plugin_skills
         # Skills authorized for credential access this task. None = no filter
         # (back-compat for callers that don't pass it). Used purely for the
         # informative-rejection list returned to the client.
@@ -825,16 +838,20 @@ class SkillProxy:
                     "skill": skill,
                 })
                 return
-            if self.allowed_skills is not None and skill not in self.allowed_skills:
+            known = self.allowed_skills is None or skill in self.allowed_skills
+            if known and self.skill_modules is not None:
+                known = skill in self.skill_modules
+            if not known:
                 logger.warning(
                     "proxy_rejected task_id=%s type=skill skill=%s reason=unknown_skill",
                     self.task_id, skill,
                 )
-                authorized_list = (
-                    sorted(self.authorized_skills)
-                    if self.authorized_skills is not None
-                    else sorted(self.allowed_skills)
-                )
+                if self.authorized_skills is not None:
+                    authorized_list = sorted(self.authorized_skills)
+                elif self.allowed_skills is not None:
+                    authorized_list = sorted(self.allowed_skills)
+                else:
+                    authorized_list = sorted(self.skill_modules or ())
                 self._send_response(conn, {
                     "stdout": "",
                     "stderr": (
@@ -862,8 +879,11 @@ class SkillProxy:
             if skill_timeout != self.timeout:
                 conn.settimeout(skill_timeout + CONNECTION_SLACK_SECONDS)
 
-            # Build command
-            cmd = [sys.executable, "-m", f"istota.skills.{skill}"] + args
+            if self.skill_modules is not None:
+                module = self.skill_modules[skill]
+            else:
+                module = bundled_skill_module(skill)
+            cmd = [sys.executable, "-m", module] + args
 
             # Merge envs: base gets only the credentials this skill needs
             merged_env = dict(self.base_env)
@@ -905,18 +925,27 @@ class SkillProxy:
                     spawned.append(pid)
                     self.authorize_pid(pid)
 
+                if skill in self.plugin_skills:
+                    channel = nullcontext(None)
+                else:
+                    channel = self._credential_channel(skill_timeout, skill)
                 try:
-                    with self._credential_channel(skill_timeout, skill) as credential_fd, \
+                    with channel as credential_fd, \
                             task_cgroup.placement(self.task_cgroup) as place, \
                             peer_process.reporting_pid(_register, place) as preexec, \
                             skill_file_env(merged_env) as merged_env:
-                        merged_env["ISTOTA_CRED_FD"] = str(credential_fd)
+                        if credential_fd is None:
+                            merged_env.pop("ISTOTA_CRED_FD", None)
+                            pass_fds = ()
+                        else:
+                            merged_env["ISTOTA_CRED_FD"] = str(credential_fd)
+                            pass_fds = (credential_fd,)
                         result = run_capture(
                             cmd,
                             env=merged_env,
                             timeout=skill_timeout,
                             preexec_fn=preexec,
-                            pass_fds=(credential_fd,),
+                            pass_fds=pass_fds,
                             max_output_bytes=self.max_output_bytes,
                             on_spawn=self._track_child,
                         )

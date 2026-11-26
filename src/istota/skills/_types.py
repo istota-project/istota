@@ -104,3 +104,38 @@ class SkillMeta:
     experimental: bool = False
     # Where the skill was loaded from (for doc/code resolution)
     skill_dir: str = ""
+    # Importable package that holds the skill's CLI (`python -m <module>`) and
+    # optional setup_env hook. Empty means the bundled default istota.skills.<name>.
+    module: str = ""
+    # "bundled" | "plugin" | "operator" | "legacy": which discovery layer
+    # produced the entry that won. Reported by doctor and `skills list`.
+    origin: str = ""
+    # "<dist-name> <version>" for plugins, empty otherwise.
+    plugin_dist: str = ""
+
+
+def is_plugin(meta: SkillMeta) -> bool:
+    """Whether a plugin package runs this skill.
+
+    Keyed on ``module``, never on ``origin``: an operator entry over a plugin
+    has ``origin="operator"`` and inherits the module, and must keep every
+    rule a plugin is held to.
+    """
+    return meta.module != ""
+
+
+@dataclass(frozen=True)
+class PluginProblem:
+    """Why one ``istota.skills`` entry point is not in the index.
+
+    ``reason`` is one of ``bad_name``, ``reserved_name``, ``bad_value``,
+    ``module_not_found``, ``not_a_package``, ``namespace_package``,
+    ``shadowed``, ``no_skill_md``, ``unparseable_skill_md``,
+    ``forbidden_manifest_field``, ``forbidden_env_spec``, ``duplicate_plugin``,
+    ``duplicate_env_var``, ``clashes_with_bundled``. ``dist`` is
+    ``"<name> <version>"``, or empty for an entry point with no distribution.
+    """
+
+    name: str
+    dist: str
+    reason: str

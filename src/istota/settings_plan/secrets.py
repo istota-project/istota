@@ -110,18 +110,35 @@ def resolve_config(document: dict, config_path: Path, sidecar: Sidecar) -> dict:
 PROVISIONABLE_SERVICES = frozenset({"karakeep", "ntfy", "provider_keys", "feeds", "overland", "carto"})
 
 
-def provisionable_keys():
-    from istota.credentials.schema import known_service_keys
+def provisionable_keys(skill_index=None):
+    """The subset above, plus each skill plugin's `plugin_*` services when
+    ``skill_index`` is given (`credentials.schema.plugin_service_keys`)."""
+    from istota.credentials.schema import known_service_keys, plugin_service_keys
 
     registry = known_service_keys()
-    return {service: registry[service] for service in sorted(PROVISIONABLE_SERVICES)}
+    allowed = {service: registry[service] for service in sorted(PROVISIONABLE_SERVICES)}
+    if skill_index is not None:
+        for service, keys in plugin_service_keys(skill_index).items():
+            allowed.setdefault(service, frozenset(keys))
+    return allowed
 
 
-def snapshot_secrets(conn, user, warnings):
-    """Eligible stored slots only, without decrypting or disclosing other names."""
+def config_skill_index(config):
+    """The index the secrets adapter reads plugin services from."""
+    from istota.skills._loader import load_skill_index
+
+    return load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
+
+
+def snapshot_secrets(conn, user, warnings, *, skill_index=None):
+    """Eligible stored slots only, without decrypting or disclosing other names.
+
+    Without ``skill_index`` a plugin's slots are excluded, and an apply of the
+    snapshot would drop them; `istota snapshot` passes one.
+    """
     from istota.credentials import store
 
-    allowed = provisionable_keys()
+    allowed = provisionable_keys(skill_index)
     declarations = []
     excluded = False
     for service, entries in store.list_user_services(None, user, connection=conn).items():
@@ -148,7 +165,7 @@ def plan_secrets(plan, user, context, options):
     from istota.settings_plan.engine import ExecutionError, Operation, Unit, state_digest
 
     path = ["users", user, "secrets"]
-    allowed = provisionable_keys()
+    allowed = provisionable_keys(config_skill_index(context.config))
     declared = {}
     for index, entry in enumerate(plan.users[user].sections["secrets"]):
         service = entry["service"]
