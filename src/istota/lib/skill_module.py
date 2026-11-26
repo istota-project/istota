@@ -59,6 +59,26 @@ def valid_plugin_value(value: object) -> bool:
     return isinstance(value, str) and MODULE_NAME_RE.fullmatch(value) is not None
 
 
+def normalize_dist_name(name: str) -> str:
+    """A distribution name as PEP 503 compares it: lower case, runs of ``-_.`` as ``-``."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def wheel_dist_name(filename: str) -> str | None:
+    """The normalized distribution name a wheel's filename carries, or None.
+
+    The name is everything before the first ``-`` (PEP 427 escapes a ``-``
+    inside it to ``_``), so a filename with no ``-`` or ending other than
+    ``.whl`` names nothing.
+    """
+    if not filename.endswith(".whl"):
+        return None
+    head, sep, _ = filename[: -len(".whl")].partition("-")
+    if not head or not sep:
+        return None
+    return normalize_dist_name(head)
+
+
 def bundled_skill_module(name: str) -> str:
     """The package a bundled skill lives in."""
     return f"istota.skills.{name}"

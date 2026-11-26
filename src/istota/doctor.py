@@ -142,15 +142,18 @@ Check = Callable[["Config", bool], "CheckResult | list[CheckResult]"]
 # ---------------------------------------------------------------------------
 
 
-def _run(argv: list[str], *, timeout: int = PROBE_TIMEOUT) -> subprocess.CompletedProcess | None:
+def _run(
+    argv: list[str], *, timeout: int = PROBE_TIMEOUT, env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess | None:
     """Run `argv`, returning None on anything that stops it producing output.
 
     Every caller is a check, and a check that let an OSError out would take the
-    daemon's start-up path with it.
+    daemon's start-up path with it. ``env`` replaces the environment whole;
+    ``None`` inherits this process's.
     """
     try:
         return subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout, check=False
+            argv, capture_output=True, text=True, timeout=timeout, check=False, env=env,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -7949,6 +7952,231 @@ def _overlay_list(items: list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# skills.plugins, skills.plugin_imports
+# ---------------------------------------------------------------------------
+
+#: Where `istota-stack plugins sync` takes wheels from, as the daemon and web
+#: containers see it: the stack binds the parent, `/app/plugins`, read-only.
+PLUGIN_WHEEL_DIR = Path("/app/plugins/src")
+
+#: How long one plugin's import probe gets.
+PLUGIN_IMPORT_TIMEOUT = 30
+
+#: The only variables the import probe hands its child, taken from this
+#: process when set. Never the daemon's environment as a whole, which carries
+#: `ISTOTA_SECRET_KEY`, since the child runs the plugin's top-level code.
+PLUGIN_IMPORT_ENV = ("PATH", "HOME", "LANG", "PYTHONPATH")
+
+_PLUGIN_ITEM_CHARS = 120
+
+_PLUGIN_PROBLEM_REMEDY = (
+    "Fix the plugin, or remove its wheel from plugins/src/, then run "
+    "`istota-stack plugins sync`. clashes_with_bundled and duplicate_plugin "
+    "mean two packages claim one skill name: rename the entry point."
+)
+
+
+def _plugin_text(value: object) -> str:
+    return _probe_output_line(str(value), _PLUGIN_ITEM_CHARS)
+
+
+def _plugin_discovery(config: "Config"):
+    """``(accepted, every_plugin, problems)``; raises when the group cannot be read.
+
+    Discovery and the clash rule are the loader's own, so this and the index
+    agree about which plugin is in it. A fresh process fills its own cache.
+    """
+    from .skills._loader import discover_plugin_skills, plugin_problems  # noqa: PLC0415
+
+    plugins, _ = discover_plugin_skills()
+    problems = plugin_problems(config.bundled_skills_dir)
+    clashed = {p.name for p in problems if p.reason == "clashes_with_bundled"}
+    accepted = {name: meta for name, meta in plugins.items() if name not in clashed}
+    return accepted, plugins, problems
+
+
+def _plugin_line(name: str, meta) -> str:  # noqa: ANN001
+    dist = meta.plugin_dist or "no distribution metadata"
+    return _plugin_text(f"{name}: {dist} ({meta.module})")
+
+
+def _unloaded_wheels(wheel_dir: Path, plugins: dict, problems: list) -> list[str] | None:
+    """Wheel filenames in ``wheel_dir`` that no plugin and no problem came from.
+
+    ``None`` when the directory cannot be listed. Compared by normalized
+    distribution name, since a wheel's filename escapes the name's ``-``.
+    """
+    from .lib.skill_module import normalize_dist_name, wheel_dist_name  # noqa: PLC0415
+
+    known: set[str] = set()
+    labels = [meta.plugin_dist for meta in plugins.values()] + [p.dist for p in problems]
+    for label in labels:
+        dist_name = label.split(" ", 1)[0]
+        if dist_name:
+            known.add(normalize_dist_name(dist_name))
+    try:
+        filenames = sorted(entry.name for entry in os.scandir(wheel_dir))
+    except OSError:
+        return None
+    unloaded: list[str] = []
+    for filename in filenames:
+        if not filename.endswith(".whl"):
+            continue
+        if wheel_dist_name(filename) not in known:
+            unloaded.append(_plugin_text(filename))
+    return unloaded
+
+
+def check_skill_plugins(
+    config: "Config", probe: bool, *, wheel_dir: Path | None = None,
+) -> list[CheckResult]:
+    """Which skill plugins loaded, which did not and why, and which wheels went unseen.
+
+    The loader never raises for a plugin and logs its problems at DEBUG only,
+    so this is where a plugin that is installed and not running goes red.
+    ``clashes_with_bundled`` and ``duplicate_plugin`` are FAIL like the rest:
+    something the operator installed is not running.
+
+    **The wheel comparison covers what discovery cannot see.**
+    ``importlib.metadata`` returns only the first distribution of a name on
+    ``sys.path``, and the plugins directory comes last, so a plugin whose
+    distribution the image's venv already has is invisible: no entry point
+    and no problem. A wheel in ``wheel_dir`` (default ``PLUGIN_WHEEL_DIR``)
+    whose distribution produced neither is a FAIL. No result when the
+    directory is absent, which is every shape but the stack with plugins.
+
+    A ``cli: true`` plugin with no ``__main__.py`` WARNs: its CLI cannot run.
+    Imports no plugin and spawns nothing, so ``probe`` is unused; importing is
+    ``skills.plugin_imports``'s, under ``--deep``.
+    """
+    name = "skills.plugins"
+    if wheel_dir is None:
+        wheel_dir = PLUGIN_WHEEL_DIR
+    try:
+        accepted, plugins, problems = _plugin_discovery(config)
+    except Exception as exc:  # noqa: BLE001 - a check never raises
+        return [CheckResult(
+            name, FAIL,
+            f"the istota.skills entry points could not be read: {type(exc).__name__}: {_plugin_text(exc)}",
+            remedy="An installed distribution's metadata is unreadable. Remove the wheel "
+                   "from plugins/src/ and run `istota-stack plugins sync`.",
+        )]
+
+    results: list[CheckResult] = []
+    if accepted:
+        detail = "; ".join(_plugin_line(n, accepted[n]) for n in sorted(accepted))
+    else:
+        detail = "none loaded" if problems else "none installed"
+    results.append(CheckResult(name, OK, detail))
+
+    if problems:
+        shown = [
+            _plugin_text(f"{p.name} ({p.dist or 'no distribution metadata'}): {p.reason}")
+            for p in problems
+        ]
+        results.append(CheckResult(
+            f"{name}.problems", FAIL,
+            f"{len(problems)} installed plugin(s) not loaded: {'; '.join(shown)}",
+            remedy=_PLUGIN_PROBLEM_REMEDY,
+        ))
+
+    if wheel_dir.is_dir():
+        unloaded = _unloaded_wheels(wheel_dir, plugins, problems)
+        if unloaded is None:
+            results.append(CheckResult(
+                f"{name}.wheels", WARN, f"{wheel_dir} could not be listed",
+                remedy=f"Check that {wheel_dir} is a directory this process can read.",
+            ))
+        elif unloaded:
+            results.append(CheckResult(
+                f"{name}.wheels", FAIL,
+                f"{len(unloaded)} wheel(s) in {wheel_dir} load as no plugin: {', '.join(unloaded)}",
+                remedy="Run `istota-stack plugins sync`. If the wheel was synced, the image's "
+                       "venv already has a distribution of that name and it wins: rename the "
+                       "plugin's distribution.",
+            ))
+        else:
+            results.append(CheckResult(
+                f"{name}.wheels", OK, f"every wheel in {wheel_dir} is a loaded or reported plugin",
+            ))
+
+    no_main = [
+        _plugin_line(n, accepted[n]) for n in sorted(accepted)
+        if accepted[n].cli and not (Path(accepted[n].skill_dir) / "__main__.py").is_file()
+    ]
+    if no_main:
+        results.append(CheckResult(
+            f"{name}.entry", WARN,
+            f"cli: true with no __main__.py, so the CLI cannot run: {'; '.join(no_main)}",
+            remedy="Add the bundled __main__.py template to the package, rebuild the wheel "
+                   "and run `istota-stack plugins sync`.",
+        ))
+    return results
+
+
+def _plugin_import_env() -> dict[str, str]:
+    return {key: os.environ[key] for key in PLUGIN_IMPORT_ENV if key in os.environ}
+
+
+def check_skill_plugin_imports(config: "Config", probe: bool) -> CheckResult | list[CheckResult]:
+    """Whether each loaded plugin's package imports, in a child process.
+
+    Discovery locates a plugin without importing it, so a missing dependency
+    (a wheel is installed ``--no-deps``) or an ``__init__`` that raises shows
+    first when a task spawns the CLI. This imports each one with
+    ``sys.executable -P -c "import <module>"`` under ``PLUGIN_IMPORT_TIMEOUT``,
+    with an environment of ``PLUGIN_IMPORT_ENV`` alone, because the child runs
+    the plugin's top-level code and the daemon's environment holds the master
+    key. ``-P`` keeps the working directory off ``sys.path``.
+
+    In ``DEEP_CHECKS``: it spawns one process per plugin, so the boot run, the
+    hourly sweep and the self-check heartbeat never reach it. WARN, not FAIL:
+    the plugin is loaded and its CLI will fail with the same error, which the
+    proxy returns to the task.
+    """
+    from .lib.skill_module import valid_plugin_value  # noqa: PLC0415
+
+    name = "skills.plugin_imports"
+    if not probe:
+        return CheckResult(name, SKIP, "probe disabled: no plugin was imported")
+    try:
+        accepted, _, _ = _plugin_discovery(config)
+    except Exception:  # noqa: BLE001 - a check never raises
+        return CheckResult(name, SKIP, "the istota.skills entry points could not be read; "
+                                       "skills.plugins reports why")
+    if not accepted:
+        return CheckResult(name, OK, "none installed")
+
+    env = _plugin_import_env()
+    results: list[CheckResult] = []
+    for skill in sorted(accepted):
+        module = accepted[skill].module
+        result_name = f"{name}.{skill}"
+        if not valid_plugin_value(module):
+            results.append(CheckResult(result_name, SKIP, "not a single package name; not imported"))
+            continue
+        ran = _run([sys.executable, "-P", "-c", f"import {module}"],
+                   timeout=PLUGIN_IMPORT_TIMEOUT, env=env)
+        if ran is None:
+            results.append(CheckResult(
+                result_name, WARN,
+                f"import {module} did not finish within {PLUGIN_IMPORT_TIMEOUT}s or could not start",
+                remedy="Its CLI will fail the same way. Check the package's top-level code.",
+            ))
+        elif ran.returncode != 0:
+            lines = (ran.stderr or "").strip().splitlines()
+            last = _plugin_text(lines[-1]) if lines else f"exit {ran.returncode}, no output"
+            results.append(CheckResult(
+                result_name, WARN, f"import {module} failed: {last}",
+                remedy="A plugin is installed without dependencies and its package must import "
+                       "on what the image's venv holds. Fix the plugin and sync it again.",
+            ))
+        else:
+            results.append(CheckResult(result_name, OK, f"import {module} succeeded"))
+    return results
+
+
+# ---------------------------------------------------------------------------
 # talk.signaling.*
 # ---------------------------------------------------------------------------
 #
@@ -11493,6 +11721,8 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("web.avatar_import", check_avatar_import),
     ("web.config_applier", check_config_applier),
     ("config.skill_overlays", check_skill_overlays),
+    ("skills.plugins", check_skill_plugins),
+    ("skills.plugin_imports", check_skill_plugin_imports),
     ("config.operator_persona", check_operator_persona),
     ("users.email_address_uniqueness", check_email_address_uniqueness),
     ("email.confirmation_answers", check_email_confirmation_answers),
@@ -11503,15 +11733,16 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("sandbox.masks", check_sandbox_masks),
 )
 
-# Checks that spawn a namespace and are therefore opt-in. Kept as a set beside
-# the registry rather than as a flag on the tuple: the registry is a mapping of
-# name to function and stays readable as one.
-DEEP_CHECKS = frozenset({"sandbox.masks"})
+# Checks that spawn a process and are therefore opt-in: a namespace
+# (`sandbox.masks`) or a child importing plugin code (`skills.plugin_imports`).
+# Kept as a set beside the registry rather than as a flag on the tuple: the
+# registry is a mapping of name to function and stays readable as one.
+DEEP_CHECKS = frozenset({"sandbox.masks", "skills.plugin_imports"})
 
 LIVE_CHECKS = frozenset({"runtime.model_execution"})
 """Checks that reach a model, and therefore cost money.
 
-Separate from ``DEEP_CHECKS``, which means "spawns a namespace". The two axes
+Separate from ``DEEP_CHECKS``, which means "spawns a process". The two axes
 look alike and are not: ``sandbox.masks`` is free and slow, this is billed and
 slow, and no caller wants them selected by the same flag. ``web_app``'s deep
 phase in particular runs every ``DEEP_CHECKS`` member under a budget sized for
@@ -11678,6 +11909,10 @@ CHECK_SCOPES: dict[str, str] = {
     # Deployment: it walks the workspace mount, which a bare `docker run` has
     # none of.
     "config.skill_overlays": DEPLOYMENT,
+    # Deployment: plugins are what an install put beside the image, and the
+    # wheel directory is the stack's bind.
+    "skills.plugins": DEPLOYMENT,
+    "skills.plugin_imports": DEPLOYMENT,
     # Deployment: it reads the file root and the configured users' folders,
     # which a bare `docker run` has none of.
     "config.operator_persona": DEPLOYMENT,
@@ -11888,7 +12123,7 @@ def run_checks(
     ``only`` selects by registry-name prefix (all checks when empty); ``skip``
     excludes by the same kind of prefix and wins over ``only``, for a caller
     that wants nearly everything. ``scope`` narrows to ``IMAGE`` or
-    ``DEPLOYMENT``. ``deep`` opts into the checks that spawn a namespace, and
+    ``DEPLOYMENT``. ``deep`` opts into the checks that spawn a process, and
     ``live`` into the ones that reach a model and bill for it — two axes, not
     one, because no caller wants both from the same flag.
     ``probe=False`` forbids spawning anything: a check that would exec something

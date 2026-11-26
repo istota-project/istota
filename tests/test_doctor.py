@@ -1939,10 +1939,10 @@ class TestLiveChecks:
         did not reach here would disarm every guard in this file at once."""
         assert doctor._MODEL_PROBE_MARKER == _MODEL_MARKER
 
-    def test_deep_checks_is_exactly_the_mask_probe(self):
+    def test_deep_checks_is_exactly_the_mask_probe_and_the_plugin_imports(self):
         """The daemon's deep run (`scheduler.check_doctor_request`) is sized
-        for exactly one namespace spawn."""
-        assert DEEP_CHECKS == frozenset({"sandbox.masks"})
+        for one namespace spawn plus one import child per skill plugin."""
+        assert DEEP_CHECKS == frozenset({"sandbox.masks", "skills.plugin_imports"})
 
     @pytest.mark.parametrize(
         "flags,present,absent",

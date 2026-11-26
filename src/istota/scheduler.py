@@ -6997,9 +6997,10 @@ def check_browser_instances(config: Config) -> None:
 def check_doctor_request(config: Config, state: dict) -> None:
     """Answer a run the Health pane asked for, on the tick after it asked.
 
-    A deep request also runs the checks that spawn a sandbox namespace. They run
-    here because the daemon's container is the one that has the sandbox; the
-    web process cannot answer for it.
+    A deep request also runs the checks that spawn a process: a sandbox
+    namespace and the plugin imports. They run here because the daemon's
+    container is the one that has the sandbox; the web process cannot answer
+    for it.
     """
     from . import doctor
 
