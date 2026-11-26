@@ -6,7 +6,8 @@
 # Order matters on a first run: host.env before provision.sh (it reads the
 # release key and the storage mode from it), provision.sh before the secrets
 # (it installs istota-stack, which writes them) and the update
-# (allowed_signers), the update before the config (`istota apply` runs in the
+# (allowed_signers), the update before the skill plugins (the verb and
+# plugins/ come with it) and the config (`istota apply` runs in the
 # release's image), the config before the image check (a build reads the
 # config to decide whether Claude Code goes in), the stack healthy before the
 # user settings (they need the database the daemon's entrypoint initializes).
@@ -73,6 +74,24 @@
       needs istota_plan, istota_plan_prune needs istota_plan, and
       istota_plan_prune_secrets needs istota_plan_prune.
     quiet: true
+
+# Pure-Python wheels only, inside the name pattern `plugins sync` holds them
+# to, so the role never copies a wheel the sync then refuses.
+- name: Check the skill plugin wheels
+  ansible.builtin.assert:
+    that:
+      - istota_skill_plugins is not string and istota_skill_plugins is not mapping
+      - >-
+        istota_skill_plugins | map('basename') | select('match', _istota_plugin_wheel_pattern) | list | length
+        == istota_skill_plugins | length
+      - istota_skill_plugins | map('basename') | unique | list | length == istota_skill_plugins | length
+    fail_msg: >-
+      istota_skill_plugins must be a list of paths to pure-Python wheels, each
+      named NAME-VERSION-py3-none-any.whl with NAME starting with a letter or a
+      digit, and no two with the same file name.
+    quiet: true
+  vars:
+    _istota_plugin_wheel_pattern: '^[A-Za-z0-9][A-Za-z0-9_.]*-[A-Za-z0-9_.!+]+-py3-none-any[.]whl$'
 
 # Two role-vars envelopes for `istota apply --input-format role-vars`: the
 # config, which the stack needs before it can start, and everything else,
@@ -343,6 +362,88 @@
   changed_when: false
   failed_when: false
   check_mode: false
+
+# --- Skill plugins -------------------------------------------------------------
+# After the update and provision, so the VM's istota-stack has the verb and
+# provision.sh has made plugins/. plugins/src/ is root's, so root writes the
+# wheels there; the tree they are installed into is uid 10001's and only the
+# sync's one-shot writes it. The sync passes --no-restart and a change
+# notifies the role's restart, flushed below, so the user settings after it
+# (which may provision a plugin's secret) run against a stack that binds the
+# plugins. Under --check nothing is written or synced: plugins/src/ does not
+# exist on a VM whose release predates it, and one debug task reports instead.
+
+- name: Copy the skill plugin wheels
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ istota_stack_dir }}/plugins/src/{{ item | basename }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ istota_skill_plugins }}"
+  loop_control:
+    label: "{{ item | basename }}"
+  when: not ansible_check_mode
+
+- name: Find the skill plugin wheels on the VM
+  ansible.builtin.find:
+    paths: "{{ istota_stack_dir }}/plugins/src"
+    patterns: "*.whl"
+    file_type: any
+  register: _istota_plugins_found
+
+- name: Remove the skill plugin wheels the list does not name
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ _istota_plugins_found.files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  vars:
+    _istota_plugins_wanted: "{{ istota_skill_plugins | map('basename') | list }}"
+  register: _istota_plugins_pruned
+  when:
+    - not ansible_check_mode
+    - item.path | basename not in _istota_plugins_wanted
+
+# A play that died between the prune and the sync leaves nothing to prune on
+# the next one, so a VM that has synced before always syncs: an unchanged sync
+# exits 0 and restarts nothing.
+- name: Has a skill plugin sync run before
+  ansible.builtin.stat:
+    path: "{{ istota_stack_dir }}/plugins/.synced"
+  register: _istota_plugins_synced_before
+
+# By file name: a wheel rebuilt under the name it already has is not reported.
+- name: Report the plugins --check would change
+  ansible.builtin.debug:
+    msg: >-
+      would copy {{ _istota_plugins_new | join(', ') or 'nothing' }} into plugins/src/,
+      would remove {{ _istota_plugins_unlisted | join(', ') or 'nothing' }},
+      then run istota-stack plugins sync
+  changed_when: true
+  vars:
+    _istota_plugins_wanted: "{{ istota_skill_plugins | map('basename') | list }}"
+    _istota_plugins_present: "{{ _istota_plugins_found.files | map(attribute='path') | map('basename') | list }}"
+    _istota_plugins_new: "{{ _istota_plugins_wanted | difference(_istota_plugins_present) }}"
+    _istota_plugins_unlisted: "{{ _istota_plugins_present | difference(_istota_plugins_wanted) }}"
+  when:
+    - ansible_check_mode
+    - _istota_plugins_new | length > 0 or _istota_plugins_unlisted | length > 0
+
+- name: Install the skill plugins with istota-stack plugins sync
+  ansible.builtin.command:
+    argv: ["{{ istota_stack_command }}", plugins, sync, --no-restart]
+  register: _istota_plugins_synced
+  changed_when: _istota_plugins_synced.rc == 2
+  failed_when: _istota_plugins_synced.rc not in [0, 2] or _istota_plugins_synced.delta is not defined
+  notify: Restart the istota stack
+  when:
+    - not ansible_check_mode
+    - >-
+      istota_skill_plugins | length > 0
+      or _istota_plugins_pruned is changed
+      or _istota_plugins_synced_before.stat.exists
 
 # --- The config --------------------------------------------------------------------
 # `istota-stack apply` prints istota apply's JSON result document on stdout and

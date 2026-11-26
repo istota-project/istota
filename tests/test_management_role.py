@@ -741,8 +741,11 @@ def _assert_fails(task_name: str, variables: dict) -> list[str]:
     env = jinja2.Environment(undefined=jinja2.StrictUndefined)
     env.filters["difference"] = lambda a, b: [x for x in a if x not in b]
     env.filters["bool"] = _bool
+    env.filters["basename"] = lambda path: str(path).rsplit("/", 1)[-1]
+    # Ansible's `match` test is re.match: anchored at the start only.
+    env.tests["match"] = lambda value, pattern: re.match(pattern, str(value)) is not None
     task = _tasks()[_index(task_name)]
-    context = _render(_defaults() | variables)
+    context = _render(_defaults() | (task.get("vars") or {}) | variables)
     return [that for that in task["ansible.builtin.assert"]["that"] if not env.compile_expression(that)(**context)]
 
 
@@ -874,7 +877,7 @@ class TestAnExitTwoIsOnlyAChangeWhenTheCommandRan:
             found += 1
             register = task["register"]
             assert f"{register}.delta is not defined" in failed_when, task.get("name")
-        assert found >= 5
+        assert found >= 6
 
 
 # --- order --------------------------------------------------------------------
@@ -1180,3 +1183,219 @@ class TestTheProvisionDecisionIsDurable:
         when = str(task["when"])
         assert "_istota_provision_inputs.stdout" in when and "_istota_provisioned_with" in when
         assert "_istota_host_env is changed" not in when
+
+
+# --- skill plugins ------------------------------------------------------------
+
+PLUGIN_TASKS = {
+    "assert": "Check the skill plugin wheels",
+    "copy": "Copy the skill plugin wheels",
+    "find": "Find the skill plugin wheels on the VM",
+    "prune": "Remove the skill plugin wheels the list does not name",
+    "synced": "Has a skill plugin sync run before",
+    "report": "Report the plugins --check would change",
+    "sync": "Install the skill plugins with istota-stack plugins sync",
+}
+WHEEL = "example_plugin-0.1.0-py3-none-any.whl"
+
+
+def _plugin_env() -> jinja2.Environment:
+    """Plain Jinja with the Ansible filters and tests the plugin tasks use."""
+    env = jinja2.Environment(undefined=jinja2.ChainableUndefined)
+    env.filters["basename"] = lambda path: str(path).rsplit("/", 1)[-1]
+    env.filters["difference"] = lambda a, b: [x for x in a if x not in b]
+    env.filters["bool"] = _bool
+    env.tests["changed"] = lambda result: bool((result or {}).get("changed"))
+    return env
+
+
+def _plugin_context(task: dict, **variables) -> dict:
+    """`variables` plus the task's own vars, each a `{{ }}` expression,
+    evaluated over them."""
+    env = _plugin_env()
+    context = {"ansible_check_mode": False, "istota_skill_plugins": []} | variables
+    for name, template in (task.get("vars") or {}).items():
+        expression = str(template).strip()
+        assert expression.startswith("{{") and expression.endswith("}}"), name
+        context[name] = env.compile_expression(expression[2:-2])(**context)
+    return context
+
+
+def _plugin_when(task: dict, **variables) -> bool:
+    env = _plugin_env()
+    context = _plugin_context(task, **variables)
+    when = task.get("when", [])
+    return all(env.compile_expression(str(condition))(**context)
+               for condition in (when if isinstance(when, list) else [when]))
+
+
+def _found(*names: str) -> dict:
+    return {"files": [{"path": f"/srv/app/istota/plugins/src/{name}"} for name in names]}
+
+
+class TestTheSkillPlugins:
+    """`istota_skill_plugins` declares the wheels a VM runs (spec:
+    external-skill-packages, Stage 6). The role copies each into root's
+    `plugins/src/`, removes the wheels the list no longer names, and runs
+    `istota-stack plugins sync --no-restart`, whose exit 2 notifies the
+    role's one restart, so a play changing plugins and host.env restarts once."""
+
+    def _task(self, key: str) -> dict:
+        return _tasks()[_index(PLUGIN_TASKS[key])]
+
+    def test_the_list_starts_empty(self):
+        assert _defaults()["istota_skill_plugins"] == []
+
+    # The assert.
+
+    def test_an_empty_list_and_pure_python_wheels_pass(self):
+        name = PLUGIN_TASKS["assert"]
+        assert _assert_fails(name, {}) == []
+        assert _assert_fails(name, {"istota_skill_plugins": [f"/play/files/{WHEEL}"]}) == []
+        assert _assert_fails(name, {"istota_skill_plugins": [
+            f"files/{WHEEL}", "files/other_plugin-2.0.0.post1+local-py3-none-any.whl"]}) == []
+
+    @pytest.mark.parametrize("path", [
+        "files/example_plugin-0.1.0-cp312-cp312-manylinux_2_17_x86_64.whl",
+        "files/example_plugin-0.1.0-py2.py3-none-any.whl",
+        "files/example_plugin-0.1.0.tar.gz",
+        "files/example_plugin.whl",
+        "files/example-plugin-0.1.0-py3-none-any.whl",
+        "files/_example_plugin-0.1.0-py3-none-any.whl",
+        "files/.example_plugin-0.1.0-py3-none-any.whl",
+        "files/example plugin-0.1.0-py3-none-any.whl",
+        "files/example_plugin-0.1.0-py3-none-any.whl/",
+    ])
+    def test_anything_but_a_pure_python_wheel_is_refused(self, path):
+        assert _assert_fails(PLUGIN_TASKS["assert"], {"istota_skill_plugins": [path]}) != []
+
+    def test_two_entries_with_one_basename_are_refused(self):
+        """Both would land on one file in plugins/src/."""
+        assert _assert_fails(PLUGIN_TASKS["assert"], {
+            "istota_skill_plugins": [f"a/{WHEEL}", f"b/{WHEEL}"]}) != []
+
+    def test_a_string_or_a_mapping_is_refused(self):
+        for value in (f"files/{WHEEL}", {"example": f"files/{WHEEL}"}):
+            assert _assert_fails(PLUGIN_TASKS["assert"], {"istota_skill_plugins": value}) != [], value
+
+    def test_the_assert_runs_before_the_first_change(self):
+        assert _index(PLUGIN_TASKS["assert"]) < _index("Stack directories")
+
+    def test_every_name_the_role_accepts_is_one_plugins_sync_accepts(self):
+        """`plugins sync` refuses a wheel name outside its own pattern, so a
+        name the role copied and the sync then refused would fail the play
+        with the wheel already on the VM. Every position of the role's
+        pattern is tried with every printable ASCII character."""
+        role = self._task("assert")["vars"]["_istota_plugin_wheel_pattern"]
+        match = re.search(r'\[\[ "\$name" =~ (\S+) \]\]', ISTOTA_STACK.read_text())
+        assert match, "istota-stack's wheel name check is gone"
+        script = match.group(1)
+        accepted = 0
+        for code in range(32, 127):
+            c = chr(code)
+            for name in (f"{c}-1-py3-none-any.whl", f"a{c}-1-py3-none-any.whl",
+                         f"a-{c}-py3-none-any.whl", f"a-1{c}-py3-none-any.whl"):
+                if re.match(role, name):
+                    accepted += 1
+                    assert re.match(script, name), name
+        assert accepted > 100, "the role's pattern accepts almost nothing; the probe is broken"
+        assert re.match(role, WHEEL) and re.match(script, WHEEL)
+
+    # The writes.
+
+    def test_each_wheel_is_copied_into_roots_src_as_root(self):
+        task = self._task("copy")
+        body = task["ansible.builtin.copy"]
+        assert body["dest"] == "{{ istota_stack_dir }}/plugins/src/{{ item | basename }}"
+        assert body["src"] == "{{ item }}"
+        assert (body["owner"], body["group"], body["mode"]) == ("root", "root", "0644")
+        assert task["loop"] == "{{ istota_skill_plugins }}"
+
+    def test_the_prune_removes_only_wheels_the_list_does_not_name(self):
+        find = self._task("find")["ansible.builtin.find"]
+        assert find["paths"] == "{{ istota_stack_dir }}/plugins/src"
+        assert find["patterns"] == "*.whl"
+        task = self._task("prune")
+        assert task["ansible.builtin.file"] == {"path": "{{ item.path }}", "state": "absent"}
+        assert task["loop"] == "{{ _istota_plugins_found.files }}"
+        listed = [f"files/{WHEEL}"]
+        keep = {"path": f"/srv/app/istota/plugins/src/{WHEEL}"}
+        drop = {"path": "/srv/app/istota/plugins/src/old_plugin-0.1.0-py3-none-any.whl"}
+        assert not _plugin_when(task, istota_skill_plugins=listed, item=keep)
+        assert _plugin_when(task, istota_skill_plugins=listed, item=drop)
+        assert _plugin_when(task, istota_skill_plugins=[], item=keep), "an empty list removes them all"
+        assert _index(PLUGIN_TASKS["find"]) < _index(PLUGIN_TASKS["prune"])
+
+    def test_the_sync_is_the_roles_exit_two_shape_and_notifies_the_restart(self):
+        task = self._task("sync")
+        assert _command_argv(task) == [STACK_COMMAND, "plugins", "sync", "--no-restart"]
+        register = task["register"]
+        assert task["changed_when"] == f"{register}.rc == 2"
+        assert task["failed_when"] == f"{register}.rc not in [0, 2] or {register}.delta is not defined"
+        assert task["notify"] == "Restart the istota stack"
+        handlers = [t["name"] for t in _load("handlers/main.yml")]
+        assert "Restart the istota stack" in handlers
+
+    def test_the_sync_runs_when_there_is_something_to_sync(self):
+        task = self._task("sync")
+        nothing = {"_istota_plugins_pruned": {"changed": False},
+                   "_istota_plugins_synced_before": {"stat": {"exists": False}}}
+        assert not _plugin_when(task, **nothing)
+        assert _plugin_when(task, **nothing | {"istota_skill_plugins": [f"files/{WHEEL}"]})
+        assert _plugin_when(task, **nothing | {"_istota_plugins_pruned": {"changed": True}})
+        # A play that died between the prune and the sync leaves nothing to
+        # prune next time; a VM that has synced before syncs again, and an
+        # unchanged sync is exit 0 and restarts nothing.
+        assert _plugin_when(task, **nothing | {"_istota_plugins_synced_before": {"stat": {"exists": True}}})
+        synced = self._task("synced")["ansible.builtin.stat"]
+        assert synced["path"] == "{{ istota_stack_dir }}/plugins/.synced"
+
+    def test_the_three_writes_are_skipped_under_check(self):
+        listed = {"istota_skill_plugins": [f"files/{WHEEL}"], "_istota_plugins_pruned": {"changed": True},
+                  "item": {"path": "/srv/app/istota/plugins/src/old-0.1-py3-none-any.whl"}}
+        for key in ("copy", "prune", "sync"):
+            task = self._task(key)
+            assert "not ansible_check_mode" in _when(task), key
+            assert not _plugin_when(task, ansible_check_mode=True, **listed), key
+            assert _plugin_when(task, **listed), key
+
+    def test_check_mode_reports_what_would_be_copied_and_removed(self):
+        task = self._task("report")
+        assert "ansible.builtin.debug" in task and task.get("changed_when") is True
+        env = _plugin_env()
+        listed = [f"files/{WHEEL}", "files/new_plugin-1.0-py3-none-any.whl"]
+        found = _found(WHEEL, "old_plugin-0.1.0-py3-none-any.whl")
+        context = _plugin_context(task, ansible_check_mode=True, istota_skill_plugins=listed,
+                                  _istota_plugins_found=found)
+        assert _plugin_when(task, ansible_check_mode=True, istota_skill_plugins=listed,
+                            _istota_plugins_found=found)
+        message = env.from_string(task["ansible.builtin.debug"]["msg"]).render(context)
+        assert "new_plugin-1.0-py3-none-any.whl" in message and "old_plugin-0.1.0-py3-none-any.whl" in message
+        assert WHEEL not in message, message
+        same = {"istota_skill_plugins": [f"files/{WHEEL}"], "_istota_plugins_found": _found(WHEEL)}
+        assert not _plugin_when(task, ansible_check_mode=True, **same)
+        assert not _plugin_when(task, ansible_check_mode=False, istota_skill_plugins=listed,
+                                _istota_plugins_found=found)
+        # The find is read-only and has to answer under --check for the
+        # report to have anything to compare.
+        assert self._task("find").get("when") is None
+
+    def test_the_plugin_tasks_come_after_the_update_and_before_the_flush(self):
+        """The VM's istota-stack has to have the verb and provision.sh has to
+        have made plugins/, and the user settings (which may provision a
+        plugin's secret) come after the restart."""
+        on_the_vm = [_index(PLUGIN_TASKS[key]) for key in PLUGIN_TASKS if key != "assert"]
+        assert min(on_the_vm) > _index("Provision from the new release")
+        assert min(on_the_vm) > _index("Read the tag now deployed")
+        assert max(on_the_vm) < _index("Restart the stack now if an input changed")
+        for key in ("copy", "prune", "synced"):
+            assert _index(PLUGIN_TASKS[key]) < _index(PLUGIN_TASKS["sync"]), key
+
+    def test_plugins_joins_the_verb_parity(self):
+        called = {argv[1] for task in _tasks() if (argv := _command_argv(task)) and argv[0] == STACK_COMMAND}
+        assert "plugins" in called and "plugins" in _stack_verbs()
+        text = ISTOTA_STACK.read_text()
+        dispatch = text.split("\ncmd_plugins() {", 1)[1].split("\n}\n", 1)[0]
+        assert re.search(r"^\s+sync\) cmd_plugins_sync ", dispatch, re.M)
+        sync = text.split("\ncmd_plugins_sync() {", 1)[1].split("\n}\n", 1)[0]
+        assert re.search(r"^\s+--no-restart\)", sync, re.M)

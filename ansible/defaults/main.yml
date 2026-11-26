@@ -224,6 +224,16 @@ istota_plan_prune: false
 # names are touched.
 istota_plan_prune_secrets: false
 
+# --- Skill plugins -----------------------------------------------------------
+# Wheels on the controller, one path each. Each is copied to plugins/src/ on
+# the VM (root's, 0644) and installed by `istota-stack plugins sync`. Only
+# pure-Python wheels, NAME-VERSION-py3-none-any.whl, and no two with one file
+# name. A wheel in plugins/src/ the list does not name is removed, so an empty
+# list removes every plugin. A change restarts the stack once, together with
+# any other input that changed.
+istota_skill_plugins: []
+#  - "{{ playbook_dir }}/files/example_plugin-0.1.0-py3-none-any.whl"
+
 # --- Behaviour ---------------------------------------------------------------
 # provision.sh runs when what it acts on (host.env, rclone.conf, .env's
 # COMPOSE_PROFILES, the checkout's commit) differs from what its last
