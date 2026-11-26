@@ -529,7 +529,7 @@ class TestRestartWaitsForItsPorts:
             return self._ps(next(after))
 
         monkeypatch.setattr(stack_support, "_run", run)
-        monkeypatch.setattr(stack_support.time, "sleep", lambda _s: None)
+        sleep_spy(monkeypatch, stack_support, record=False)
         stack = stack_support.Stack(
             profile=profiles.SIGNALING, args=["docker", "compose"], services={}
         )

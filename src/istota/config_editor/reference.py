@@ -119,6 +119,7 @@ NOT_CREDENTIALS: dict[str, str] = {
     "email.authserv_id": "the id our MTA stamps its Authentication-Results headers with",
     "scheduler.credential_backup_interval": "seconds between encrypted credential backups",
     "developer.author_credit": "a line appended to commit messages",
+    "push.push_credentials_dir": "a directory; each device's send capability is a file in it",
     "security.credential_history_days": "retention for credential history, in days",
     "security.credential_audit_days": "retention for the credential audit log, in days",
     "security.credential_exports_per_day": "a rate limit on credential exports",

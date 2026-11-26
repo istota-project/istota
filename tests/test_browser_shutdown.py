@@ -41,7 +41,8 @@ def test_sigterm_runs_cleanup_on_the_main_thread(tmp_path, repeat_signal):
             cleaned.write_text("started")
             time.sleep(0.2)
             cleaned.write_text(str(threading.current_thread() is threading.main_thread()))
-        sys.modules['pool'] = types.SimpleNamespace(cleanup=cleanup)
+        sys.modules['pool'] = types.SimpleNamespace(
+            cleanup=cleanup, remove_retired_profiles=lambda: None)
         import browser_server
         make_server = browser_server.make_browser_server
         def make_test_server(app, token=""):

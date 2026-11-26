@@ -155,8 +155,8 @@
             ></span
           >
           <span class="caption"
-            >from {from ? `${from} · ` : ''}{offer.host} · offered
-            <Timestamp value={offer.created_at} format="relative" empty="just now" /></span
+            >from {from ? `${from} · ` : ''}{offer.host}{#if offer.created_at}
+              · offered <Timestamp value={offer.created_at} format="relative" />{/if}</span
           >
         </div>
         {#if offer.signed === false}

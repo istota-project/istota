@@ -130,8 +130,23 @@ def _venv_path(site_dir: Path, ignore: Iterable[str]) -> list[str]:
     The synced tree is on the path through the `.pth` while the next one is
     checked, and a re-sync installs what it already holds; it is not the venv.
     """
-    skip = {os.path.realpath(str(path)) for path in (site_dir, *ignore)}
-    return [entry for entry in sys.path if os.path.realpath(entry or os.curdir) not in skip]
+    skip = [str(path) for path in (site_dir, *ignore)]
+    return [
+        entry for entry in sys.path
+        if not any(same_dir(entry or os.curdir, path) for path in skip)
+    ]
+
+
+def same_dir(left: str | os.PathLike, right: str | os.PathLike) -> bool:
+    """Whether two names are one directory, asked of the file system.
+
+    False when either is missing. Not a comparison of resolved spellings,
+    which `tests/test_confined_file_access.py` refuses in new code.
+    """
+    try:
+        return os.path.samefile(left, right)
+    except (OSError, ValueError):
+        return False
 
 
 def _package_resolves(name: str, search_path: list[str]) -> bool:

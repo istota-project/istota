@@ -245,6 +245,10 @@ _NOT_A_COPY = {
     # The fixed .tmp suffix is part of pending()'s crash-recovery sweep.
     # atomic_writer uses random dot-prefixed names with no matching sweep.
     "transport/whatsapp/inbound_spool.py",
+    # Renames in a database `db_backup.plain_copy` decompressed and SQLite
+    # row-counted as a closed file; atomic_writer publishes an open handle
+    # unconditionally, and a refused or dry-run restore publishes nothing.
+    "maintenance/db_restore.py",
 }
 
 

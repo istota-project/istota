@@ -282,8 +282,10 @@ class TestTheFiveCases:
             passed, detail = runner.run_check(case, workdir, "", env=runner.task_env(workdir))
             assert passed is False, (case.name, detail)
 
-    def test_the_tool_grant_is_the_six_core_tools(self):
-        assert runner.core_tool_names() == ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
+    def test_the_tool_grant_is_the_eight_core_tools(self):
+        assert runner.core_tool_names() == [
+            "Read", "Write", "Edit", "Grep", "Glob", "Bash", "BashOutput", "KillShell",
+        ]
 
 
 class TestBudget:

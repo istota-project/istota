@@ -1,6 +1,7 @@
 <script lang="ts">
   import { SortHeader, sortAria } from '@minot/ui';
   import { cellParts, csvRows, type CsvRecords, type CsvSort } from '$lib/fileViewer/csv';
+  import { formatNumber } from '$lib/usageFormat';
   import ColumnResizeHandle from './ColumnResizeHandle.svelte';
 
   let { name, records }: { name: string; records: CsvRecords } = $props();
@@ -66,7 +67,7 @@
 </script>
 
 {#if rows.length < records.body.length}<p class="caption table-note">
-    Showing the first {rows.length.toLocaleString()} of {records.body.length.toLocaleString()}
+    Showing the first {formatNumber(rows.length)} of {formatNumber(records.body.length)}
     rows. The source view has the rest.
   </p>{/if}
 <div class="csv-scroll">
