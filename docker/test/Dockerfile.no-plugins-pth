@@ -1,0 +1,18 @@
+# Negative control for the skill plugins' image half: the shipped image with
+# the `.pth` that puts /app/plugins/installed/site on the venv's path removed.
+#
+# The sync one-shot does not need the `.pth` (it installs into a directory it
+# names), so the tree still builds; only what loads from it goes. That is the
+# split the control driver checks: the loading witnesses red, the sync green.
+#
+#   docker build -f docker/test/Dockerfile.no-plugins-pth --build-arg BASE=<image tag> \
+#       -t istota-test/no-plugins-pth:<suffix> docker/test
+#
+# Expected: tests/image/test_plugins.py::TestTheSyncedTreeLoads::
+# test_skills_list_shows_the_plugin fails, and nothing in TestTheSyncOneShot does.
+ARG BASE
+FROM ${BASE}
+
+RUN pth="$(/app/.venv/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')/istota-plugins.pth" \
+    && test -f "$pth" \
+    && rm "$pth"

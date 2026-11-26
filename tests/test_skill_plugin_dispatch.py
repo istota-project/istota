@@ -8,6 +8,8 @@ path and `dispatch_setup_env_hooks`. The credential cases (no private fd for a
 plugin, no lookup of its variables) are Stage 3's.
 """
 
+import base64
+import hashlib
 import inspect
 import json
 import logging
@@ -18,6 +20,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -556,6 +559,25 @@ class TestTheTreeCheck:
         assert len(reasons) == 1, reasons
         for name in names:
             assert name in reasons[0], reasons
+
+    def test_the_artifact_tiers_wheel_unpacks_to_a_clean_tree(self, plugin_builder, tmp_path):
+        """The wheel the image and vm tiers install: its filename, a RECORD whose
+        hashes match, and a tree `check_tree` passes once unpacked."""
+        wheel = plugin_builder.wheel(tmp_path / "wheels")
+        assert wheel.name == "example_plugin-0.1.0-py3-none-any.whl"
+        unpacked = tmp_path / "unpacked"
+        with zipfile.ZipFile(wheel) as archive:
+            archive.extractall(unpacked)
+        record = (unpacked / "example_plugin-0.1.0.dist-info" / "RECORD").read_text().splitlines()
+        hashed = [line.rsplit(",", 2) for line in record if not line.endswith(",,")]
+        assert {name for name, _, _ in hashed} >= {"example_plugin/__init__.py", "example_plugin/skill.md"}
+        for name, digest, size in hashed:
+            data = (unpacked / name).read_bytes()
+            expected = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+            assert (digest, int(size)) == (f"sha256={expected}", len(data)), name
+        assert skill_module.check_tree(unpacked) == []
+        assert "example = example_plugin" in (
+            unpacked / "example_plugin-0.1.0.dist-info" / "entry_points.txt").read_text()
 
     def test_the_synced_tree_the_venv_reads_is_not_the_venv(self, plugin_builder, tmp_path):
         """A re-sync installs plugins the current `site` already holds, and that

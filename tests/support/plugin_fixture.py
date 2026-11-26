@@ -8,6 +8,9 @@ Two builders over one minimal package (spec: external-skill-packages):
 - ``installed``: the same package plus a real ``.dist-info`` beside it, so
   ``importlib.metadata`` finds it with no injection. A subprocess sees it
   through ``PYTHONPATH=<site>``.
+- ``wheel``: the installed tree zipped into
+  ``example_plugin-0.1.0-py3-none-any.whl``, for the image, smoke and vm tiers.
+  The one builder with fixed names, since it never touches this process.
 
 **Every package name is unique** (``example_plugin_<8 hex>``, with the skill
 name and variable prefix derived from it). ``find_spec`` answers from
@@ -28,15 +31,28 @@ dict.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib
 import importlib.metadata
 import json
 import secrets
 import sys
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 SENTINEL_ENV = "EXAMPLE_PLUGIN_SENTINEL"
+
+#: The names :meth:`PluginBuilder.wheel` builds under.
+WHEEL_PACKAGE = "example_plugin"
+WHEEL_SKILL = "example"
+WHEEL_DIST = "example-plugin"
+WHEEL_VERSION = "0.1.0"
+WHEEL_NAME = f"{WHEEL_PACKAGE}-{WHEEL_VERSION}-py3-none-any.whl"
+
+# zipfile refuses a timestamp before 1980; a fixed one makes the bytes repeatable.
+_ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 
 #: The bundled `__main__.py` template, code lines byte for byte.
 MAIN_TEMPLATE = (
@@ -248,6 +264,7 @@ class PluginBuilder:
         with_main: bool = True,
         setup_env: dict | None = None,
         activate: bool = True,
+        dist_name: str | None = None,
     ) -> PluginPackage:
         """The package plus a ``.dist-info`` that ``importlib.metadata`` finds.
 
@@ -255,6 +272,7 @@ class PluginBuilder:
         reaches the tree through ``PYTHONPATH``.
         """
         package, skill, tag = self._names(skill, package)
+        dist_name = dist_name or f"example-plugin-{tag}"
         site = self.root / f"site_{tag}"
         self._write(
             site, package, skill, layout="package", frontmatter=frontmatter,
@@ -262,7 +280,6 @@ class PluginBuilder:
             skill_toml=None, init_raises=init_raises, with_main=with_main,
             setup_env=setup_env,
         )
-        dist_name = f"example-plugin-{tag}"
         dist_info = site / f"{dist_name.replace('-', '_')}-{version}.dist-info"
         dist_info.mkdir()
         (dist_info / "METADATA").write_text(
@@ -286,6 +303,36 @@ class PluginBuilder:
             self._activate(site, package)
         return plugin
 
+    def wheel(self, out_dir: Path) -> Path:
+        """The installed tree as ``example_plugin-0.1.0-py3-none-any.whl``, for the artifact tiers.
+
+        Fixed names rather than unique ones: a wheel's filename must match its
+        distribution, and the tiers install it into a tree of its own, never
+        into this process. Nothing is put on ``sys.path``.
+        """
+        plugin = self.installed(
+            skill=WHEEL_SKILL, package=WHEEL_PACKAGE, dist_name=WHEEL_DIST,
+            version=WHEEL_VERSION, activate=False,
+        )
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / WHEEL_NAME
+        dist_info = f"{WHEEL_PACKAGE}-{WHEEL_VERSION}.dist-info"
+        record_name = f"{dist_info}/RECORD"
+        files = sorted(
+            p.relative_to(plugin.site).as_posix()
+            for p in plugin.site.rglob("*")
+            if p.is_file() and p.relative_to(plugin.site).as_posix() != record_name
+        )
+        record = []
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name in files:
+                data = (plugin.site / name).read_bytes()
+                archive.writestr(zipfile.ZipInfo(name, _ZIP_EPOCH), data)
+                record.append(f"{name},sha256={_record_digest(data)},{len(data)}")
+            record.append(f"{record_name},,")
+            archive.writestr(zipfile.ZipInfo(record_name, _ZIP_EPOCH), "\n".join(record) + "\n")
+        return path
+
     def shadow(self, package: str) -> Path:
         """Another package of the same name, earlier on ``sys.path``."""
         site = self.root / f"shadow_{secrets.token_hex(4)}"
@@ -308,6 +355,11 @@ class PluginBuilder:
         self._packages.clear()
         importlib.invalidate_caches()
         _reset_loader_cache()
+
+
+def _record_digest(data: bytes) -> str:
+    """A RECORD hash: urlsafe base64 of the SHA-256, unpadded (PEP 376)."""
+    return base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
 
 
 def _reset_loader_cache() -> None:

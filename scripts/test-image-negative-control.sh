@@ -50,6 +50,7 @@
 #   scripts/test-image-negative-control.sh cli-witness
 #   scripts/test-image-negative-control.sh browser-console
 #   scripts/test-image-negative-control.sh browser-uid
+#   scripts/test-image-negative-control.sh plugins
 #
 # The second form runs only the third half, the daemon container's run
 # contract (the one-deployment-shape spec's parity rows 1, 2, 3, 4, 5, 6, 8,
@@ -80,7 +81,8 @@
 # The eleventh runs the browser image's console socket witness against an image
 # whose x11vnc has no `-unixsock` (needs the tier's browser image built). The
 # twelfth, `browser-uid`, runs #902's witnesses against the native browser image
-# with those changes taken back.
+# with those changes taken back. The thirteenth, `plugins`, runs the skill
+# plugins' image witnesses against an image without the plugins `.pth`.
 #
 # No arrays anywhere: macOS ships bash 3.2, where `"${empty[@]}"` under `set -u`
 # is fatal, and this script's whole audience is a developer machine.
@@ -142,6 +144,11 @@ fi
 only_browser_uid=""
 if [ "$platform" = "browser-uid" ]; then
     only_browser_uid=1
+fi
+only_plugins=""
+if [ "$platform" = "plugins" ]; then
+    only_plugins=1
+    platform=""
 fi
 only_browser_console=""
 if [ "$platform" = "browser-console" ]; then
@@ -830,6 +837,43 @@ print(_tag_for(ISTOTA_DOCKERFILE, "", "istota"))
     echo "[control] OK: web-setup turned the wrong-code witness red and Finish still ran."
 }
 
+# --------------------------------------------------------------------------
+# Skill plugins. The control image has no `.pth`, so the synced tree is not on
+# the venv's path: `skills list` must go red, and the sync one-shot must stay
+# green, which tells that red from a tree that was never built.
+
+PLUGINS_TESTS="tests/image/test_plugins.py"
+
+plugins_half() {
+    plugins_base="$(tier_istota_tag)"
+    require_tier_istota_image "$plugins_base"
+    echo
+    echo "[control] plugins: an image without the plugins .pth (base ${plugins_base})"
+    plugins_tag="istota-test/no-plugins-pth:${plugins_base##*:}"
+    docker build -q -f docker/test/Dockerfile.no-plugins-pth \
+        --build-arg "BASE=$plugins_base" -t "$plugins_tag" docker/test >/dev/null
+    plugins_out="$(mktemp)"
+    set +e
+    ISTOTA_IMAGE_TAG="$plugins_tag" \
+        uv run pytest -m image -n0 -q --no-header -rfE -p no:randomly "$PLUGINS_TESTS" 2>&1 | tee "$plugins_out"
+    set -e
+    plugins_node="${PLUGINS_TESTS}::TestTheSyncedTreeLoads::test_skills_list_shows_the_plugin"
+    if ! grep -Fq "FAILED ${plugins_node}" "$plugins_out"; then
+        rm -f "$plugins_out"
+        echo "[control] FAILED: plugins did not turn ${plugins_node} red."
+        exit 1
+    fi
+    if grep -Fq "FAILED ${PLUGINS_TESTS}::TestTheSyncOneShot" "$plugins_out" \
+            || grep -Fq "ERROR ${PLUGINS_TESTS}::TestTheSyncOneShot" "$plugins_out"; then
+        rm -f "$plugins_out"
+        echo "[control] FAILED: plugins broke the sync rather than the path;"
+        echo "[control]   TestTheSyncOneShot should still pass."
+        exit 1
+    fi
+    rm -f "$plugins_out"
+    echo "[control] OK: plugins turned the skills list witness red and the sync still ran."
+}
+
 DOCUMENT_RENDER_TESTS="tests/image/test_browser_image.py"
 
 # The share-map bundle with the name it registers its renderer under changed:
@@ -999,6 +1043,10 @@ if [ -n "$only_cli_witness" ]; then
 fi
 if [ -n "$only_web_setup" ]; then
     web_setup_half
+    exit 0
+fi
+if [ -n "$only_plugins" ]; then
+    plugins_half
     exit 0
 fi
 
@@ -1345,6 +1393,7 @@ if [ -z "$platform" ] && [ -z "$only_devbox" ]; then
     rendered_config_half
     group_rooms_half
     web_setup_half
+    plugins_half
     document_render_half
     browser_console_half
 fi
