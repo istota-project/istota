@@ -8,9 +8,12 @@ path and `dispatch_setup_env_hooks`. The credential cases (no private fd for a
 plugin, no lookup of its variables) are Stage 3's.
 """
 
+import inspect
 import json
 import logging
 import os
+import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -22,6 +25,7 @@ import pytest
 
 from istota import db
 from istota.config import Config, SchedulerConfig, UserConfig
+from istota.lib import skill_module
 from istota.lib.skill_module import resolve_unindexed_skill_module
 from istota.rooms import egress
 from istota.sandbox import skill_proxy
@@ -506,3 +510,91 @@ class TestTheBootPurge:
         with db.get_db(db_path) as conn:
             assert conn.execute("SELECT COUNT(*) FROM scheduled_jobs").fetchone()[0] == 0
         assert any("entry points unreadable" in r.getMessage() for r in caplog.records)
+
+
+def _dist_info(tree: Path, name: str, *, entry_points: str | None) -> Path:
+    """A `.dist-info` as `uv pip install --target` leaves one, with no package."""
+    tree.mkdir(parents=True, exist_ok=True)
+    dist_info = tree / f"{name.replace('-', '_')}-0.1.0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {name}\nVersion: 0.1.0\n")
+    if entry_points is not None:
+        (dist_info / "entry_points.txt").write_text(entry_points)
+    (dist_info / "RECORD").write_text(f"{dist_info.name}/RECORD,,\n")
+    return tree
+
+
+class TestTheTreeCheck:
+    """`check_tree`, which `istota-stack plugins sync` runs on the tree it has
+    just installed, before that tree becomes the one the venv reads (Stage 5).
+    It refuses the shadowing discovery cannot see: a distribution or a package
+    the image's venv already has wins over a plugin appended after it."""
+
+    def _bad_trees(self, tmp_path) -> dict[str, Path]:
+        tag = secrets.token_hex(4)
+        return {
+            "no-entry-point": _dist_info(tmp_path / "no-ep", f"example-library-{tag}", entry_points=None),
+            "installed-name": _dist_info(
+                tmp_path / "installed", "pytest",
+                entry_points=f"[istota.skills]\nexample_{tag} = example_{tag}\n"),
+            "importable-package": _dist_info(
+                tmp_path / "importable", f"example-plugin-{tag}",
+                entry_points=f"[istota.skills]\nexample_{tag} = json\n"),
+        }
+
+    def test_a_clean_tree_passes(self, plugin_builder):
+        plugin = plugin_builder.installed(activate=False)
+        assert skill_module.check_tree(plugin.site) == []
+
+    @pytest.mark.parametrize(("case", "names"), [
+        ("no-entry-point", ("example-library", "istota.skills")),
+        ("installed-name", ("pytest",)),
+        ("importable-package", ("json",)),
+    ])
+    def test_each_shadowing_case_is_one_reason(self, tmp_path, case, names):
+        reasons = skill_module.check_tree(self._bad_trees(tmp_path)[case])
+        assert len(reasons) == 1, reasons
+        for name in names:
+            assert name in reasons[0], reasons
+
+    def test_the_synced_tree_the_venv_reads_is_not_the_venv(self, plugin_builder, tmp_path):
+        """A re-sync installs plugins the current `site` already holds, and that
+        tree is on `sys.path` through the `.pth` while the one-shot checks the
+        next one. Counted as the venv, every re-sync would refuse itself."""
+        current = plugin_builder.installed()
+        upgrade = tmp_path / "next"
+        shutil.copytree(current.site, upgrade)
+        assert len(skill_module.check_tree(upgrade, ignore=())) == 2
+        assert skill_module.check_tree(upgrade, ignore=(str(current.site),)) == []
+
+    def test_the_default_exclusion_is_the_trees_place_in_the_image(self):
+        assert skill_module.PLUGIN_SITE_DIR == "/app/plugins/installed/site"
+        default = inspect.signature(skill_module.check_tree).parameters["ignore"].default
+        assert default == (skill_module.PLUGIN_SITE_DIR,)
+
+    def test_a_missing_tree_is_a_reason(self, tmp_path):
+        reasons = skill_module.check_tree(tmp_path / "absent")
+        assert len(reasons) == 1 and "not a directory" in reasons[0], reasons
+
+    def _main(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, "-P", "-m", "istota.lib.skill_module", *args],
+            capture_output=True, text=True, cwd=REPO,
+            env={**os.environ, "PYTHONPATH": str(REPO / "src")}, timeout=60,
+        )
+
+    def test_the_command_exits_0_on_a_clean_tree(self, plugin_builder):
+        plugin = plugin_builder.installed(activate=False)
+        result = self._main("check-tree", str(plugin.site))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert result.stdout == "" and result.stderr == ""
+
+    @pytest.mark.parametrize("case", ["no-entry-point", "installed-name", "importable-package"])
+    def test_the_command_exits_1_with_one_line_per_reason(self, tmp_path, case):
+        result = self._main("check-tree", str(self._bad_trees(tmp_path)[case]))
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert len(result.stderr.splitlines()) == 1, result.stderr
+
+    @pytest.mark.parametrize("args", [(), ("check-tree",), ("check", "/tmp"), ("check-tree", "a", "b")])
+    def test_anything_else_is_a_usage_error(self, args):
+        assert self._main(*args).returncode == 64
