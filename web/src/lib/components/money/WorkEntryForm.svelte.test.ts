@@ -253,24 +253,30 @@ describe('WorkEntryForm keyboard', () => {
 });
 
 describe('WorkEntryForm default date', () => {
-  it('defaults to the local date, not the UTC one', () => {
-    // Pick an hour that falls on a different UTC *day* than local, whichever
-    // side of Greenwich the runner sits on: late evening for a western
-    // offset, early morning for an eastern one.
-    const offsetMinutes = new Date(2026, 2, 1).getTimezoneOffset();
-    const hour = offsetMinutes > 0 ? 23 : 1;
-
+  // The zone is set here, not read from the runner: an hour picked from the
+  // runner's offset tested nothing at UTC and missed UTC+1, where only the
+  // first hour after midnight is on another UTC day (ISSUE-989).
+  it.each([
+    ['America/Los_Angeles', 23],
+    ['Europe/Berlin', 0],
+    ['Asia/Tokyo', 0],
+  ])('defaults to the local date, not the UTC one, in %s', (zone, hour) => {
+    const runnerZone = process.env.TZ;
+    process.env.TZ = zone;
     vi.useFakeTimers();
     try {
       vi.setSystemTime(new Date(2026, 2, 1, hour, 30, 0));
-      if (offsetMinutes !== 0) {
-        // Guard the guard: this only tests anything if the two disagree.
-        expect(new Date().toISOString().slice(0, 10)).not.toBe('2026-03-01');
-      }
+      // Guard the guard: this only tests anything if the two disagree.
+      expect(new Date().toISOString().slice(0, 10)).not.toBe('2026-03-01');
       mount();
       expect(screen.getByDisplayValue('2026-03-01')).toBeTruthy();
     } finally {
       vi.useRealTimers();
+      if (runnerZone === undefined) {
+        delete process.env.TZ;
+      } else {
+        process.env.TZ = runnerZone;
+      }
     }
   });
 });
