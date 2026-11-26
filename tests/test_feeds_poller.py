@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from tests.support.feed_server import FeedServer
+from tests.support.monotonic_spy import monotonic_spy
 
 pytest.importorskip("feedparser", reason="feeds extra not installed")
 
@@ -1768,7 +1769,7 @@ class TestUnreachableHosts:
         urls = [f"https://h{i}.example.org/feed.xml" for i in range(4)]
         path = self._db(tmp_path, urls)
         clock = [1000.0]
-        monkeypatch.setattr(poller.time, "monotonic", lambda: clock[0])
+        monotonic_spy(monkeypatch, poller, lambda: clock[0])
         fetched: list[str] = []
 
         def slow_get(url, *, headers):

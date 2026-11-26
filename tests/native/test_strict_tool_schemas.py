@@ -47,9 +47,11 @@ def _walk_objects(node):
 
 
 class TestStrictifyEveryNativeTool:
-    def test_the_seven_tools_are_all_here(self, tmp_path):
+    def test_the_nine_tools_are_all_here(self, tmp_path):
         names = {t.schema.name for t in _all_native_tools(tmp_path)}
-        assert names == {"Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebFetch"}
+        assert names == {
+            "Read", "Write", "Edit", "Grep", "Glob", "Bash", "BashOutput", "KillShell", "WebFetch",
+        }
 
     def test_every_tool_strictifies_or_degrades_to_none(self, tmp_path):
         # A future tool with a construct strictify does not handle must come

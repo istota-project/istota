@@ -1,6 +1,6 @@
 """Run one eval case through `NativeBrain.execute` and measure it.
 
-No executor and no scheduler: a `BrainRequest` with the six core tools, the
+No executor and no scheduler: a `BrainRequest` with the eight core tools, the
 case's fixture copied into a fresh working directory, sandboxing off (the
 unconfined native shape) and a session log enabled, so the metrics come from
 the transcript as well as from `BrainResult`. The transcript is read through
@@ -111,7 +111,7 @@ class EvalResult:
 
 
 def core_tool_names() -> list[str]:
-    """The six tools the native brain registers, in registration order."""
+    """The eight tools the native brain registers, in registration order."""
     return [tool.schema.name for tool in build_default_tools(ToolEnv(cwd=Path.cwd()))]
 
 
