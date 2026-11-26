@@ -984,7 +984,13 @@ STACK_ENV_KEYS = (
     "ISTOTA_TEST_BROWSER_IMAGE",
     "ISTOTA_TESTBED_DEFAULT_SUBNET",
     "ISTOTA_TESTBED_BROWSER_SUBNET",
+    "ISTOTA_PLUGINS_DIR",
 )
+
+#: The shipped skill plugins overlay, found beside the compose file as
+#: `istota-stack`'s `compose()` finds it. It binds `${ISTOTA_PLUGINS_DIR}` at
+#: `/app/plugins` read-only on daemon and web, and requires the variable.
+PLUGINS_OVERLAY_NAME = "docker-compose.plugins.yml"
 
 
 def taken_subnets() -> list[ipaddress.IPv4Network]:
@@ -1045,10 +1051,13 @@ def stack_env(
     nginx_port: int = 0,
     signaling_port: int = 0,
     browser_image: str = "",
+    plugins_dir: str = "",
 ) -> dict[str, str]:
     """What every stack's env-file carries: where its inputs are, which image
     runs, host ports that cannot collide with another stack's, and subnets for
     its networks (chosen blind here; a boot chooses again against what is taken).
+    `ISTOTA_PLUGINS_DIR` only for a profile with a plugins tree, since the
+    plugins overlay is added only then.
 
     The shipped file publishes nginx on `127.0.0.1:8080` and the browser and
     signaling servers on fixed loopback ports by default, which a developer's
@@ -1069,6 +1078,7 @@ def stack_env(
         "BROWSER_VNC_PORT": "0",
         "ISTOTA_TEST_BROWSER_IMAGE": browser_image or "istota-test/browser:unbuilt",
         **network_env(),
+        **({"ISTOTA_PLUGINS_DIR": plugins_dir} if plugins_dir else {}),
     }
 
 
@@ -1079,6 +1089,7 @@ def lean_env(
     config_dir: Path,
     secrets_dir: Path,
     browser_image: str = "",
+    plugins_dir: str = "",
 ) -> dict[str, str]:
     """The lean stack's env-file: the shared keys and each service's own.
 
@@ -1089,6 +1100,7 @@ def lean_env(
     """
     environment = stack_env(
         image=image, config_dir=config_dir, secrets_dir=secrets_dir, browser_image=browser_image,
+        plugins_dir=plugins_dir,
     )
     environment["ISTOTA_TALK_SIGNALING_BACKEND_URLS"] = "http://nextcloud"
     environment.update(compose_env(services, reserved=set(environment)))
@@ -1277,6 +1289,7 @@ def full_env(
     config_dir: Path,
     secrets_dir: Path,
     image: str = "",
+    plugins_dir: str = "",
 ) -> dict[str, str]:
     """Everything the full shape's compose env-file carries.
 
@@ -1305,6 +1318,7 @@ def full_env(
     environment = stack_env(
         image=image, config_dir=config_dir, secrets_dir=secrets_dir,
         nginx_port=credentials.nc_port, signaling_port=credentials.signaling_port,
+        plugins_dir=plugins_dir,
     )
     environment.update(FULL_IDENTITY)
     environment.update(credentials.as_env())
@@ -2471,12 +2485,13 @@ class StackPool:
                 environment = full_env(
                     services, credentials,
                     config_dir=config_dir, secrets_dir=secrets_dir, image=image,
+                    plugins_dir=profile.plugins_dir,
                 )
             else:
                 document, secret_values = lean_config(profile, services), lean_secrets()
                 environment = lean_env(
                     services, image=image, config_dir=config_dir, secrets_dir=secrets_dir,
-                    browser_image=profile.browser_image,
+                    browser_image=profile.browser_image, plugins_dir=profile.plugins_dir,
                 )
             write_config(config_dir, document)
             write_secrets(secrets_dir, secret_values)
@@ -2623,6 +2638,8 @@ class StackPool:
         """The compose prefix for one stack, and the env-file it rides in.
 
         The order of the `-f` files decides what wins: the shipped file, the
+        shipped plugins overlay when the profile has a plugins tree (the file
+        `istota-stack` adds, from beside the compose file it runs), the
         profile's own overlays (a mail server, say), the harness concessions,
         the Nextcloud fixture on the full shape (whose `/mnt/shared` has to win
         over the concessions' empty one), and last the negative controls,
@@ -2650,6 +2667,8 @@ class StackPool:
         else:
             project = owned_project(self.project_prefix)
         overlays = [*profile.compose_overlays, self.shape.overlay]
+        if profile.plugins_dir:
+            overlays.insert(0, self.shape.compose_file.with_name(PLUGINS_OVERLAY_NAME))
         if profile.shape == "full":
             overlays.append(self.shape.nextcloud_overlay)
         overlays.extend(self.shape.extra_overlays)

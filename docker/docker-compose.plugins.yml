@@ -7,9 +7,9 @@
 # istota-plugins.pth. The parent is bound, not site/, so a tree a sync replaces
 # is seen by the next process without recreating a container. daemon and web
 # load the skill index; nothing else does, and no task sandbox binds this. The
-# base compose file carries none of it, so a stack started any other way (the
-# testbed, Docker Desktop, an older istota-stack running a newer file) has no
-# plugins and no bind.
+# base compose file carries none of it, so a stack started any other way
+# (Docker Desktop, an older istota-stack running a newer file) has no plugins
+# and no bind. The testbed adds this file for its `plugins` profile alone.
 services:
   daemon:
     volumes:

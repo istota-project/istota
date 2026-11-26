@@ -1030,6 +1030,8 @@ def stack(request, stacks):
         profile = replace(profile, image=request.getfixturevalue("no_forge_image"))
     if profile.name == profiles.BROWSER.name:
         profile = replace(profile, browser_image=request.getfixturevalue("testbed_browser_image"))
+    if profile.name == profiles.PLUGINS.name:
+        profile = replace(profile, plugins_dir=request.getfixturevalue("plugins_tree"))
 
     running = stacks.get(profile, fresh=fresh)
     script_marker = request.node.get_closest_marker("script")

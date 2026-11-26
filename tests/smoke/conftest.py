@@ -58,6 +58,43 @@ from ..support import email_people as email_people_support
 NO_FORGE_DOCKERFILE = REPO / "docker" / "test" / "Dockerfile.no-forge"
 
 
+def _checkout_image(platform: str) -> image_support.BuiltImage:
+    """The shipped image, by the image tier's rule: `ISTOTA_IMAGE_TAG` first,
+    else a build of this checkout (a cache hit after the stack's own build)."""
+    preexisting = os.environ.get("ISTOTA_IMAGE_TAG")
+    if preexisting:
+        return image_support.BuiltImage(
+            tag=preexisting, dockerfile=image_support.ISTOTA_DOCKERFILE, platform=platform,
+        )
+    return image_support.build_image(
+        image_support.ISTOTA_DOCKERFILE, REPO, platform=platform, prefix="istota"
+    )
+
+
+@pytest.fixture(scope="session")
+def plugins_tree(pytestconfig, tmp_path_factory) -> str:
+    """A `plugins/` directory whose `installed/site` holds the fixture plugin.
+
+    Built before the `plugins` profile's stack boots, with the image's own `uv`
+    through `host/istota-stack`'s sync one-shot (`image_support.run_plugins_sync`,
+    the image tier's), since the overlay binds it read-only and the daemon reads
+    the skill index at start. The stack's own tag is not built until its `up`,
+    so the one-shot runs on the image tier's build of the same checkout.
+    """
+    _require_no_xdist(pytestconfig)
+    require_docker()
+    image = _checkout_image(resolve_platform(pytestconfig))
+    plugins = image_support.plugins_layout(tmp_path_factory.mktemp("plugins-layout"))
+    synced = image_support.run_plugins_sync(image, plugins)
+    if synced.returncode != 0:
+        pytest.fail(
+            f"the plugins sync one-shot exited {synced.returncode}:\n"
+            f"{synced.stdout}\n{synced.stderr}",
+            pytrace=False,
+        )
+    return str(plugins)
+
+
 @pytest.fixture(scope="session")
 def no_forge_image(pytestconfig) -> str:
     """The shipped image with the forge binaries removed.
@@ -80,13 +117,7 @@ def no_forge_image(pytestconfig) -> str:
     # correct-image half of the pair is whatever tag the environment named — so
     # the two differ by more than the forge binaries, and the control measures
     # the difference between two builds rather than the thing it exists for.
-    preexisting = os.environ.get("ISTOTA_IMAGE_TAG")
-    if preexisting:
-        base_tag = preexisting
-    else:
-        base_tag = image_support.build_image(
-            image_support.ISTOTA_DOCKERFILE, REPO, platform=platform, prefix="istota"
-        ).tag
+    base_tag = _checkout_image(platform).tag
     tag = f"istota-test/no-forge:{base_tag.rsplit(':', 1)[-1]}"
     argv = [
         "docker", "build",

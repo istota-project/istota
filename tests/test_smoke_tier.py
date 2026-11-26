@@ -369,6 +369,66 @@ class TestTheImage:
         assert calls[1]["skip"] == ("web", "nginx")
 
 
+class TestThePluginsProfile:
+    """A profile with a plugins tree boots with the shipped plugins overlay, as
+    `istota-stack` does on a VM with `plugins/installed`; every other one without."""
+
+    PLUGINS_OVERLAY = COMPOSE_FILE.with_name("docker-compose.plugins.yml")
+
+    def _booted(self, tmp_path, monkeypatch, profile) -> tuple[list[str], str]:
+        pool = compose_support.StackPool(
+            workdir=tmp_path,
+            shape=compose_support.Shape(compose_file=COMPOSE_FILE, image="istota-test/lean:unit"),
+        )
+        seen: list[tuple[list[str], str]] = []
+
+        def fake_up(args, *, platform="", env=None, build=True, skip=()):
+            env_file = args[args.index("--env-file") + 1]
+            seen.append((args, Path(env_file).read_text()))
+            raise compose_support.StackError("stop here")
+
+        monkeypatch.setattr(compose_support, "up", fake_up)
+        monkeypatch.setattr(compose_support, "down", lambda *a, **k: None)
+        monkeypatch.setattr(compose_support, "taken_subnets", lambda: [])
+        with pytest.raises(compose_support.StackError):
+            pool.get(profile)
+        return seen[0]
+
+    def test_a_tree_adds_the_overlay_and_its_variable(self, tmp_path, monkeypatch):
+        tree = tmp_path / "plugins"
+        profile = dataclasses.replace(profiles.PLUGINS, plugins_dir=str(tree))
+        args, env_file = self._booted(tmp_path, monkeypatch, profile)
+
+        files = [args[i + 1] for i, arg in enumerate(args) if arg == "-f"]
+        assert files[:2] == [str(COMPOSE_FILE), str(self.PLUGINS_OVERLAY)]
+        assert f"ISTOTA_PLUGINS_DIR={tree}" in env_file.splitlines()
+
+    def test_no_tree_adds_neither(self, tmp_path, monkeypatch):
+        args, env_file = self._booted(tmp_path, monkeypatch, profiles.PLUGINS)
+
+        assert str(self.PLUGINS_OVERLAY) not in args
+        assert "ISTOTA_PLUGINS_DIR" not in env_file
+
+    def test_the_merged_daemon_binds_the_tree_read_only(self, tmp_path):
+        _require_compose_cli()
+        tree = tmp_path / "plugins"
+        tree.mkdir()
+        args = compose_support.compose_args(
+            COMPOSE_FILE, project="p",
+            env_file=_lean_env_file(tmp_path, ISTOTA_PLUGINS_DIR=str(tree)),
+            overlays=[self.PLUGINS_OVERLAY, TESTBED_OVERLAY],
+        )
+        result = subprocess.run(
+            args + ["config", "--format", "json"], capture_output=True, text=True,
+            timeout=60, env=_MINIMAL_ENV,
+        )
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        volumes = json.loads(result.stdout)["services"]["daemon"]["volumes"]
+        binds = [v for v in volumes if v.get("target") == "/app/plugins"]
+        assert len(binds) == 1, volumes
+        assert binds[0]["source"] == str(tree) and binds[0]["read_only"] is True, binds
+
+
 class TestNoUnconfinedGrantInAnyComposeFile:
     """The sandbox grant is the shipped profile pair, never `unconfined`.
 
