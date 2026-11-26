@@ -29,7 +29,7 @@ Subsystems:
 - `prompts.md` — the two halves of a task prompt, and the control directory that hands them over
 - `scheduler.md` — daemon loop, worker pool, DB tables, deferred ops
 - `config.md` — the config rules that are not obvious from the dataclasses, and the TOML mapping
-- `skills.md` — skill metadata, single-axis selection (eager vs menu), per-skill user overlays, CLI modules
+- `skills.md` — skill metadata, skill plugins, single-axis selection (eager vs menu), per-skill user overlays, CLI modules
 - `transport.md` — Transport seam over messaging surfaces (Talk, email, web chat, SMS and WhatsApp ship; Matrix designed-for), plus the room model, phone rooms (SMS and private WhatsApp: mint, transcript writes, backfill) and multiplayer rooms (speech gate, participants, host and guests, audience, epochs, shared-room delivery refusal)
 - `sms.md` — provider-neutral SMS surface, Twilio and Telnyx adapters, delivery states, switching, and the user's private SMS room
 - `whatsapp.md` — WhatsApp surface behind a provider seam: the common half (adapter-native identity, the one-send ledger, parked status, opt-out, the private chat's room), Meta's Cloud API adapter (signed webhook, 24-hour window, templates, cost controls) and the Baileys adapter (paired session, Node sidecar, QR pairing)
@@ -254,6 +254,7 @@ src/istota/
 │   ├── rate_limit.py     # A sliding-window hit counter per key, in bounded memory, for public routes with no table behind them → leaf-modules.md
 │   ├── browser_console.py  # A user's browser console socket name, shared by the browser pool and the web relay; vendored into the browser image → leaf-modules.md
 │   ├── egress_log.py     # `egress-refused.jsonl`: what a task was refused, on its way from a seam with no database to the table → leaf-modules.md
+│   ├── skill_module.py   # A skill plugin's name and value rules, which package runs a skill with no index, and the tree check `istota-stack plugins sync` runs → leaf-modules.md
 │   └── unix_connect.py   # Connecting to a Unix socket without following a symlink at its leaf → leaf-modules.md
 ├── briefings/            # Personal/group briefings — source grants, generation, edition/delivery ledger, reader/settings routes (group operations in `group_service.py`, HTTP-free, so a skill CLI can call them) and migration → briefings.md
 ├── feeds/                # Native RSS/Atom/Tumblr/Are.na — poller, SQLite, routes, OPML, image_dedupe
