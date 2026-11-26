@@ -14,7 +14,8 @@ import pytest
 from PIL import Image
 
 from .conftest import (
-    REPO, BuiltImage, _require_no_xdist, assert_ok, build_image, require_docker, run_in,
+    REPO, BuiltImage, _require_no_xdist, _tag_for, assert_ok, build_image, images,
+    require_docker, run_in,
 )
 
 pytestmark = pytest.mark.image
@@ -531,12 +532,16 @@ def test_chrome_runs_in_the_layer(browser_chrome_layer, chrome_stable):
 def test_a_chrome_that_is_not_the_version_asked_for_fails_the_build(browser_base):
     """The other side of the key (#930): a .deb that is not CHROME_VERSION is
     refused rather than cached under that version's name."""
+    tag = _tag_for(BROWSER_DOCKERFILE, "", "browser-wrong-chrome")
     result = subprocess.run(
-        ["docker", "build", "-f", str(BROWSER_DOCKERFILE), "--target", "chrome",
+        ["docker", "build", "-f", str(BROWSER_DOCKERFILE), "--target", "chrome", "-t", tag,
          "--build-arg", f"BROWSER_BASE={browser_base.tag}", "--build-arg", "CHROME_VERSION=1.0.0.1",
          str(BROWSER_DOCKERFILE.parent)],
         capture_output=True, text=True, timeout=1800,
     )
+    if result.returncode == 0:
+        # The failure this test exists for leaves an image; a refused build leaves none.
+        images.record(tag)
     assert result.returncode != 0
     assert "not stable 1.0.0.1" in result.stdout + result.stderr
 
