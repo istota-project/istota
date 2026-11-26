@@ -779,7 +779,7 @@ LEAN_BASE_CONFIG: dict = {
     },
     "site": {"hostname": "localhost"},
     "scheduler": {"cron_max_staleness_minutes": 720},
-    "users": {"testuser": {"display_name": "testuser", "timezone": "UTC"}},
+    "users": {"testuser": {"display_name": "testuser"}},
 }
 
 #: Where every stack this tier boots departs from `istota setup`'s output, each
