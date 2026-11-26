@@ -359,6 +359,70 @@ def assert_ok(result: subprocess.CompletedProcess, what: str) -> str:
     return result.stdout
 
 
+# -- skill plugins: the `plugins sync` one-shot ------------------------------
+#
+# Here rather than in `test_plugins.py` because the smoke tier builds its
+# pre-boot plugins tree with the same one-shot (spec: external-skill-packages).
+
+PLUGINS_MOUNT = "/app/plugins"
+ISTOTA_DROP = "/usr/local/bin/istota-drop"
+STACK_SCRIPT = REPO / "host" / "istota-stack"
+
+#: What the sync's one-shot adds on top of `docker run`: the shipped daemon
+#: service is read-only with a /tmp tmpfs, and nothing here needs the network.
+LOCKED_DOWN = ["--read-only", "--tmpfs", "/tmp", "--network", "none"]
+
+
+def plugins_layout(root: Path) -> Path:
+    """A VM's `plugins/` layout under `root` holding the fixture wheel, before any sync."""
+    from ..support.plugin_fixture import PluginBuilder
+
+    plugins = root / "plugins"
+    (plugins / "src").mkdir(parents=True)
+    installed = plugins / "installed"
+    installed.mkdir()
+    # The container writes as uid 10001, which owns installed/ on the VM.
+    installed.chmod(0o777)
+    PluginBuilder(root / "build").wheel(plugins / "src")
+    return plugins
+
+
+def plugins_sync_script() -> str:
+    """`PLUGINS_SYNC_SH` as `host/istota-stack` defines it, parsed by bash.
+
+    The assignment is the line that starts it through the first line that does
+    not continue, evaluated by bash on its own, so the quoting is bash's.
+    """
+    lines = STACK_SCRIPT.read_text().splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("PLUGINS_SYNC_SH="))
+    end = start
+    while lines[end].endswith("\\"):
+        end += 1
+    assignment = "\n".join(lines[start:end + 1])
+    result = subprocess.run(
+        ["bash", "-c", assignment + '\nprintf %s "$PLUGINS_SYNC_SH"'],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0 and "uv pip install" in result.stdout, (
+        f"could not read PLUGINS_SYNC_SH out of {STACK_SCRIPT}: {result.stderr}"
+    )
+    return result.stdout
+
+
+def run_plugins_sync(image: BuiltImage, plugins: Path) -> subprocess.CompletedProcess:
+    """One `plugins sync` one-shot over `plugins/src/`, as istota-stack runs it."""
+    wheels = sorted(p.name for p in (plugins / "src").iterdir() if p.name.endswith(".whl"))
+    return run_in(
+        image,
+        ["sh", "-c", plugins_sync_script(), "plugins-sync",
+         *(f"{PLUGINS_MOUNT}/src/{name}" for name in wheels)],
+        entrypoint=ISTOTA_DROP,
+        env={"ISTOTA_SECRETS_DIR": "/nonexistent"},
+        volumes=[(plugins, PLUGINS_MOUNT, "ro"), (plugins / "installed", "/plugins-out", "rw")],
+        docker_args=LOCKED_DOWN,
+    )
+
+
 @pytest.fixture(scope="session")
 def platform(pytestconfig) -> str:
     return resolve_platform(pytestconfig)

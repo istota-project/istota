@@ -37,10 +37,17 @@ from tests.support.plugin_fixture import (
     WHEEL_PACKAGE,
     WHEEL_SKILL,
     WHEEL_VERSION,
-    PluginBuilder,
 )
 
-from .conftest import REPO, assert_ok, run_in, sh
+from .conftest import (
+    ISTOTA_DROP,
+    LOCKED_DOWN,
+    assert_ok,
+    plugins_layout,
+    run_in,
+    run_plugins_sync,
+    sh,
+)
 
 pytestmark = pytest.mark.image
 
@@ -48,49 +55,8 @@ pytestmark = pytest.mark.image
 PLUGINS = "/app/plugins"
 SITE = "/app/plugins/installed/site"
 PTH = "istota-plugins.pth"
-ISTOTA_DROP = "/usr/local/bin/istota-drop"
-STACK_SCRIPT = REPO / "host" / "istota-stack"
 CONFIG = "/tmp/data/config/config.toml"
 SETUP = "istota setup --yes --data-dir /tmp/data --user testuser >/tmp/setup.log 2>&1 || { cat /tmp/setup.log; exit 1; }"
-
-# What the sync's one-shot adds on top of `docker run`: the shipped daemon
-# service is read-only with a /tmp tmpfs, and nothing here needs the network.
-LOCKED_DOWN = ["--read-only", "--tmpfs", "/tmp", "--network", "none"]
-
-
-def sync_script() -> str:
-    """`PLUGINS_SYNC_SH` as `host/istota-stack` defines it, parsed by bash.
-
-    The assignment is the line that starts it through the first line that does
-    not continue, evaluated by bash on its own, so the quoting is bash's.
-    """
-    lines = STACK_SCRIPT.read_text().splitlines()
-    start = next(i for i, line in enumerate(lines) if line.startswith("PLUGINS_SYNC_SH="))
-    end = start
-    while lines[end].endswith("\\"):
-        end += 1
-    assignment = "\n".join(lines[start:end + 1])
-    result = subprocess.run(
-        ["bash", "-c", assignment + '\nprintf %s "$PLUGINS_SYNC_SH"'],
-        capture_output=True, text=True, timeout=30,
-    )
-    assert result.returncode == 0 and "uv pip install" in result.stdout, (
-        f"could not read PLUGINS_SYNC_SH out of {STACK_SCRIPT}: {result.stderr}"
-    )
-    return result.stdout
-
-
-def run_sync(image, plugins: Path) -> subprocess.CompletedProcess:
-    """One `plugins sync` one-shot over `plugins/src/`, as istota-stack runs it."""
-    wheels = sorted(p.name for p in (plugins / "src").iterdir() if p.name.endswith(".whl"))
-    return run_in(
-        image,
-        ["sh", "-c", sync_script(), "plugins-sync", *(f"{PLUGINS}/src/{name}" for name in wheels)],
-        entrypoint=ISTOTA_DROP,
-        env={"ISTOTA_SECRETS_DIR": "/nonexistent"},
-        volumes=[(plugins, PLUGINS, "ro"), (plugins / "installed", "/plugins-out", "rw")],
-        docker_args=LOCKED_DOWN,
-    )
 
 
 def with_plugins(image, plugins: Path, script: str) -> subprocess.CompletedProcess:
@@ -110,21 +76,12 @@ def with_plugins(image, plugins: Path, script: str) -> subprocess.CompletedProce
 @pytest.fixture(scope="module")
 def plugins(tmp_path_factory) -> Path:
     """A VM's `plugins/` layout holding the fixture wheel, before any sync."""
-    root = tmp_path_factory.mktemp("plugins-layout")
-    plugins = root / "plugins"
-    (plugins / "src").mkdir(parents=True)
-    installed = plugins / "installed"
-    installed.mkdir()
-    # The container writes as uid 10001, which owns installed/ on the VM.
-    installed.chmod(0o777)
-    builder = PluginBuilder(root / "build")
-    builder.wheel(plugins / "src")
-    return plugins
+    return plugins_layout(tmp_path_factory.mktemp("plugins-layout"))
 
 
 @pytest.fixture(scope="module")
 def first_sync(istota_image, plugins) -> subprocess.CompletedProcess:
-    return run_sync(istota_image, plugins)
+    return run_plugins_sync(istota_image, plugins)
 
 
 @pytest.fixture(scope="module")
@@ -180,7 +137,7 @@ class TestTheSyncOneShot:
 
     def test_a_second_sync_with_the_tree_live_succeeds(self, istota_image, synced):
         """The live `site` is on `sys.path` in the one-shot; check-tree must leave it out."""
-        again = run_sync(istota_image, synced)
+        again = run_plugins_sync(istota_image, synced)
         assert_ok(again, "the second plugins sync one-shot")
         assert sorted(p.name for p in (synced / "installed").iterdir()) == ["site"]
         assert (synced / "installed" / "site" / WHEEL_PACKAGE / "__init__.py").is_file()
