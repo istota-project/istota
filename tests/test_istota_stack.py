@@ -5064,8 +5064,11 @@ class TestPlugins:
         install = ("uv pip install --python /app/.venv/bin/python --no-deps --no-index --no-cache"
                    ' --target "$out/next" "$@"')
         check = '/app/.venv/bin/python -P -m istota.lib.skill_module check-tree "$out/next"'
-        assert install in call and check in call
-        assert call.index(install) < call.index(check) < call.index('mv "$out/next" "$out/site"')
+        # uv leaves its lock in the target, mode 0666 (the image tier saw it).
+        unlock = 'rm -f "$out/next/.lock"'
+        assert install in call and check in call and unlock in call
+        assert (call.index(install) < call.index(unlock) < call.index(check)
+                < call.index('mv "$out/next" "$out/site"'))
         assert call.endswith(f"plugins-sync /app/plugins/src/{WHEEL}")
         assert re.fullmatch(r"[0-9a-f]{64}\n", self._synced(pl).read_text())
 
