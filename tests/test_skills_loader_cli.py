@@ -7,6 +7,12 @@ import os
 import pytest
 
 from istota.config import Config, UserConfig
+from tests.support.plugin_fixture import build_plugins
+
+
+@pytest.fixture
+def plugin_builder(tmp_path):
+    yield from build_plugins(tmp_path)
 
 
 def _write_skill(bundled, name, body, *, admin_only=False, experimental=False, cli=True, dependencies=None, resource_types=None, companion_skills=None, requires_capability=None):
@@ -154,6 +160,33 @@ class TestList:
         payload = json.loads(capsys.readouterr().out)
         names = {s["name"] for s in payload["skills"]}
         assert "secret_admin" in names
+
+    def test_each_entry_names_its_origin_and_a_plugin_its_distribution(
+        self, ctx, capsys, plugin_builder,
+    ):
+        plugin = plugin_builder.installed()
+        from istota.skills.skills import cmd_list
+
+        cmd_list(argparse.Namespace())
+        entries = {s["name"]: s for s in json.loads(capsys.readouterr().out)["skills"]}
+        assert entries["developer"]["origin"] == "bundled"
+        assert "plugin" not in entries["developer"]
+        assert entries[plugin.skill]["origin"] == "plugin"
+        assert entries[plugin.skill]["plugin"] == f"{plugin.dist_name} 0.1.0"
+
+    def test_an_operator_entry_over_a_plugin_still_names_the_distribution(
+        self, ctx, capsys, plugin_builder,
+    ):
+        plugin = plugin_builder.installed()
+        ops = ctx.skills_dir / plugin.skill
+        ops.mkdir(parents=True)
+        (ops / "skill.md").write_text("---\ndescription: operator docs\ncli: true\n---\n# Ops\n")
+        from istota.skills.skills import cmd_list
+
+        cmd_list(argparse.Namespace())
+        entry = {s["name"]: s for s in json.loads(capsys.readouterr().out)["skills"]}[plugin.skill]
+        assert entry["origin"] == "operator"
+        assert entry["plugin"] == f"{plugin.dist_name} 0.1.0"
 
 
 class TestDevboxFold:

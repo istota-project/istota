@@ -30,6 +30,7 @@ from istota.config import Config, NextcloudConfig, SchedulerConfig, TalkConfig, 
 from istota.mail import sender_flags
 from istota.memory.knowledge_graph import add_fact, ensure_table
 
+from .support.plugin_fixture import build_plugins
 from .support.rooms import plain_talk_room
 
 # The root conftest neutralizes `subscription_usage.get_snapshot` for the whole
@@ -38,6 +39,11 @@ from .support.rooms import plain_talk_room
 # wants the real policy, so the real function is captured at import — before that
 # autouse fixture ever runs — and reinstated for that test alone.
 _REAL_GET_SNAPSHOT = _subscription_usage.get_snapshot
+
+
+@pytest.fixture
+def plugin_builder(tmp_path):
+    yield from build_plugins(tmp_path)
 
 
 @pytest.fixture
@@ -1748,6 +1754,34 @@ class TestCmdSkills:
         assert "**calendar**" in result
         assert "Status:" in result
         assert "Dependencies: caldav" in result
+
+    async def test_a_plugin_line_carries_its_distribution(self, make_config, plugin_builder):
+        plugin = plugin_builder.installed()
+        result = await _skills(make_config())
+        line = next(ln for ln in result.splitlines() if ln.startswith(f"- **{plugin.skill}**:"))
+        assert f"plugin: {plugin.dist_name} 0.1.0" in line
+        calendar = next(ln for ln in result.splitlines() if ln.startswith("- **calendar**:"))
+        assert "plugin:" not in calendar
+
+    async def test_an_unavailable_plugin_gets_no_install_hint(self, make_config, plugin_builder):
+        plugin = plugin_builder.installed()
+
+        def side_effect(meta):
+            if meta.name in (plugin.skill, "whisper"):
+                return ("unavailable", "example-dependency")
+            return ("available", None)
+
+        with patch("istota.skills._loader.get_skill_availability", side_effect=side_effect):
+            listing = await _skills(make_config())
+            detail = await _skills(make_config(), plugin.skill)
+
+        plugin_line = next(ln for ln in listing.splitlines() if ln.startswith(f"- {plugin.skill} —"))
+        assert "uv sync" not in plugin_line
+        assert f"plugin: {plugin.dist_name} 0.1.0" in plugin_line
+        # The control: a bundled skill keeps its extra.
+        assert "`uv sync --extra whisper`" in listing
+        assert "Install:" not in detail
+        assert f"Plugin: {plugin.dist_name} 0.1.0" in detail
 
 
 # =============================================================================

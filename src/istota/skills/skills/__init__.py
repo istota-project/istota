@@ -21,6 +21,7 @@ import os
 import sys
 
 from istota.skills._cli import emit, error_envelope, parse_and_resolve
+from istota.skills._types import is_plugin
 
 
 def _output_error(msg: str, **extra) -> None:
@@ -318,11 +319,15 @@ def cmd_list(args) -> None:
         if _guard_skill(name, ctx) is not None:
             continue
         meta = skill_index[name]
-        skills.append({
+        entry = {
             "name": name,
             "description": meta.description,
             "cli": meta.cli,
-        })
+            "origin": meta.origin,
+        }
+        if is_plugin(meta):
+            entry["plugin"] = meta.plugin_dist
+        skills.append(entry)
     print(json.dumps({"status": "ok", "skills": skills}, indent=2, ensure_ascii=False))
 
 
