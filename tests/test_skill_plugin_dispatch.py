@@ -4,7 +4,8 @@ Spec: external-skill-packages, Stage 2. Every place that runs a skill asks one
 resolver which package holds it: the skill proxy (through the `skill_modules`
 dict `build_task_runtime` hands it), `skill_client._run_direct` (no index, so
 `lib/skill_module.resolve_unindexed_skill_module`), the scheduler's skill-task
-path and `dispatch_setup_env_hooks`. The credential cases are Stage 3's.
+path and `dispatch_setup_env_hooks`. The credential cases (no private fd for a
+plugin, no lookup of its variables) are Stage 3's.
 """
 
 import json
@@ -155,6 +156,110 @@ class TestTheProxy:
         with SkillProxy(sock_path, {}, {"PATH": "/usr/bin"}, allowed_skills=frozenset({"kv"})):
             _request(sock_path, {"skill": "kv", "args": ["namespaces"]})
         assert seen and seen[0][1:4] == ["-m", "istota.skills.kv", "namespaces"]
+
+
+class TestNoCredentialChannelForAPlugin:
+    """The private fd serves vault reads past the reveal policy, wallet cards,
+    OTP codes and mail account passwords. A plugin gets none of it (Stage 3)."""
+
+    def test_a_plugin_sees_no_fd_and_the_same_code_outside_plugin_skills_does(
+        self, plugin_builder, sock_path,
+    ):
+        # Two copies of one package through one proxy: the only difference is
+        # membership of `plugin_skills`, so the second half is the control
+        # that shows the first half can fail.
+        plugin = plugin_builder.installed(activate=False)
+        bundled_style = plugin_builder.installed(activate=False)
+        base_env = {
+            "PATH": os.environ["PATH"],
+            "PYTHONPATH": _pythonpath(plugin.site, bundled_style.site),
+        }
+        with SkillProxy(
+            sock_path, {}, base_env,
+            allowed_skills=frozenset({plugin.skill, bundled_style.skill}),
+            skill_modules={
+                plugin.skill: plugin.package, bundled_style.skill: bundled_style.package,
+            },
+            plugin_skills=frozenset({plugin.skill}),
+        ):
+            as_plugin = _request(sock_path, {"skill": plugin.skill, "args": ["ping"]})
+            as_bundled = _request(sock_path, {"skill": bundled_style.skill, "args": ["ping"]})
+        assert as_plugin["returncode"] == 0, as_plugin["stderr"]
+        assert as_bundled["returncode"] == 0, as_bundled["stderr"]
+        assert json.loads(as_plugin["stdout"]) == {"status": "ok", "cred_fd": False}
+        assert json.loads(as_bundled["stdout"]) == {"status": "ok", "cred_fd": True}
+
+    def test_no_fd_is_passed_and_the_plugins_own_credential_still_is(
+        self, sock_path, monkeypatch,
+    ):
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+        monkeypatch.setattr(skill_proxy, "run_capture", fake_run)
+        with SkillProxy(
+            sock_path,
+            {"PLUGIN_EXAMPLE_TOKEN": "plugin-placeholder", "KV_TOKEN": "kv-placeholder"},
+            # A stray value in the base env must not reach a plugin either.
+            {"PATH": "/usr/bin", "ISTOTA_CRED_FD": "7"},
+            skill_credential_map={"example": {"PLUGIN_EXAMPLE_TOKEN"}, "kv": {"KV_TOKEN"}},
+            allowed_skills=frozenset({"example", "kv"}),
+            skill_modules={"example": "example_plugin", "kv": "istota.skills.kv"},
+            plugin_skills=frozenset({"example"}),
+        ):
+            _request(sock_path, {"skill": "example", "args": ["ping"]})
+            _request(sock_path, {"skill": "kv", "args": ["namespaces"]})
+        (plugin_cmd, plugin_call), (_, bundled_call) = calls
+        assert plugin_cmd[1:3] == ["-m", "example_plugin"]
+        assert plugin_call["pass_fds"] == ()
+        assert "ISTOTA_CRED_FD" not in plugin_call["env"]
+        assert plugin_call["env"]["PLUGIN_EXAMPLE_TOKEN"] == "plugin-placeholder"
+        assert "KV_TOKEN" not in plugin_call["env"]
+        assert len(bundled_call["pass_fds"]) == 1
+        assert bundled_call["env"]["ISTOTA_CRED_FD"] == str(bundled_call["pass_fds"][0])
+
+
+def _secret_meta(name, var, service, *, module="", origin="bundled"):
+    from istota.skills._types import EnvSpec
+
+    return SkillMeta(
+        name=name, description="x", cli=True, module=module, origin=origin,
+        env_specs=[EnvSpec(var=var, source="secret", service=service, key="token", sensitive=True)],
+    )
+
+
+class TestTheLookupAllowlist:
+    """`istota-credential env NAME` never serves a plugin's variable, broker on
+    or off; the plugin's own CLI still gets it injected (Stage 3)."""
+
+    def _index(self, origin="plugin"):
+        return {
+            "bookmarks": _secret_meta("bookmarks", "KARAKEEP_API_KEY", "karakeep"),
+            "example": _secret_meta(
+                "example", "PLUGIN_EXAMPLE_TOKEN", "plugin_example",
+                module="example_plugin", origin=origin,
+            ),
+        }
+
+    def test_a_plugins_variable_is_not_fetchable_by_name(self):
+        from istota.executor import derive_lookup_allowlist
+
+        assert derive_lookup_allowlist(["bookmarks", "example"], self._index()) == {"KARAKEEP_API_KEY"}
+
+    def test_nor_under_an_operator_entry_over_the_plugin(self):
+        from istota.executor import derive_lookup_allowlist
+
+        index = self._index(origin="operator")
+        assert derive_lookup_allowlist(["bookmarks", "example"], index) == {"KARAKEEP_API_KEY"}
+
+    def test_the_plugins_cli_still_gets_its_variable(self):
+        from istota.executor import derive_skill_credential_map
+
+        assert derive_skill_credential_map(["example"], self._index()) == {
+            "example": {"PLUGIN_EXAMPLE_TOKEN"},
+        }
 
 
 class TestTheDirectRun:

@@ -509,7 +509,10 @@ def build_task_runtime(
         )
         # One package per name the proxy may run; it refuses a name missing here.
         from istota.skills._loader import resolve_skill_module
+        from istota.skills._types import is_plugin
         skill_modules = {name: resolve_skill_module(name, reach_index) for name in cli_skills}
+        # Spawned with no private credential channel.
+        plugin_skills = frozenset(name for name in cli_skills if is_plugin(reach_index[name]))
         logger.info(
             "proxy_authorization task_id=%d selected=%d authorized=%d "
             "selected_skills=%s authorized_skills=%s",
@@ -654,6 +657,7 @@ def build_task_runtime(
             skill_credential_map=skill_cred_map,
             allowed_skills=cli_skills,
             skill_modules=skill_modules,
+            plugin_skills=plugin_skills,
             authorized_skills=frozenset(authorized_skills),
             egress_withheld=egress_withheld,
             egress_subject=egress_subject,

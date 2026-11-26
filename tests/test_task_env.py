@@ -216,6 +216,24 @@ class TestTheSkillModules:
 
         assert set(proxy.skill_modules) == proxy.allowed_skills == {"kv"}
 
+    def test_the_plugins_are_named_so_they_get_no_credential_channel(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        plugin = SkillMeta(
+            name="example", description="x", cli=True, module="example_plugin", origin="plugin",
+        )
+        overridden = SkillMeta(
+            name="example_two", description="x", cli=True, module="example_two_plugin",
+            origin="operator",
+        )
+        runtime_inputs = {**runtime_inputs, "skill_index": {
+            "kv": _skill("kv"), "example": plugin, "example_two": overridden,
+        }}
+        proxy = task_env.build_task_runtime(_config(tmp_path), **runtime_inputs).proxy_ctx
+
+        assert proxy.plugin_skills == frozenset({"example", "example_two"})
+
 
 class TestTheNativeReviewersProvider:
     """`code_review` builds the native brain from its own `load_config`, so its

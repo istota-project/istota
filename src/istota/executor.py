@@ -4734,9 +4734,18 @@ def derive_lookup_allowlist(
     Replaces ``_allowed_credentials_for_skills``. Subtracts
     ``_PROXY_LOOKUP_BLOCKED`` as a defense-in-depth hard-reject list
     (today: ``ISTOTA_SECRET_KEY`` and the model credentials).
+
+    A skill plugin's variables are never served by name (spec:
+    external-skill-packages), whether or not the broker would refuse the
+    read: they reach the plugin's own CLI through the per-skill map alone.
     """
+    from .skills._types import is_plugin  # noqa: PLC0415
+
     allowed: set[str] = set()
-    for creds in derive_skill_credential_map(authorized_skills, skill_index).values():
+    credential_map = derive_skill_credential_map(authorized_skills, skill_index)
+    for skill, creds in credential_map.items():
+        if is_plugin(skill_index[skill]):
+            continue
         allowed |= creds
     return {
         name for name in allowed - _PROXY_LOOKUP_BLOCKED
