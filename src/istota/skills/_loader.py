@@ -37,6 +37,7 @@ from istota.lib.skill_module import (
     PLUGIN_SERVICE_RE,
     bundled_skill_module,
     plugin_name_problem,
+    same_dir,
     valid_plugin_value,
 )
 from istota.sandbox.confined import open_dir as open_overlay_dir  # noqa: F401 - re-exported for its callers
@@ -445,11 +446,13 @@ def _load_plugin(ep) -> tuple[SkillMeta | None, str | None]:  # noqa: ANN001
         # The name resolved to some other package earlier on sys.path, which
         # would otherwise read as a misleading `no_skill_md`.
         try:
-            found_in = pkg_dir.parent.resolve()
-            shadowed = Path(dist.locate_file("")).resolve() != found_in
+            found_in = pkg_dir.parent
+            shadowed = not same_dir(dist.locate_file(""), found_in)
             if shadowed:
                 project = _editable_project(dist)
-                shadowed = project is None or not found_in.is_relative_to(project)
+                shadowed = project is None or not any(
+                    same_dir(ancestor, project) for ancestor in (found_in, *found_in.parents)
+                )
         except Exception:
             shadowed = True
         if shadowed:
