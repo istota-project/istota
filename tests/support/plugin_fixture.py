@@ -21,7 +21,9 @@ Teardown removes each ``sys.path`` entry, pops each package from
 discovery cache, so the next test in the worker sees no plugin.
 
 The package's ``__init__`` appends a line to the file named by
-``SENTINEL_ENV`` when it is imported, so a test can assert it was not.
+``SENTINEL_ENV`` when it is imported, so a test can assert it was not. With
+``setup_env`` given, it also defines a ``setup_env(ctx)`` hook returning that
+dict.
 """
 
 from __future__ import annotations
@@ -58,6 +60,7 @@ if _sentinel:
     with open(_sentinel, "a") as _f:
         _f.write("imported\\n")
 {raise_line}
+{setup_env_block}
 
 def build_parser():
     parser = argparse.ArgumentParser(prog="istota-skill {skill}")
@@ -147,6 +150,7 @@ class PluginBuilder:
         skill_toml: str | None,
         init_raises: bool,
         with_main: bool,
+        setup_env: dict | None = None,
     ) -> None:
         site.mkdir(parents=True, exist_ok=True)
         if layout == "module":
@@ -156,8 +160,13 @@ class PluginBuilder:
         pkg_dir.mkdir()
         if layout == "package":
             raise_line = 'raise RuntimeError("example plugin refused to import")' if init_raises else ""
+            setup_env_block = (
+                f"\n\ndef setup_env(ctx):\n    return {setup_env!r}\n"
+                if setup_env is not None else ""
+            )
             (pkg_dir / "__init__.py").write_text(_INIT_TEMPLATE.format(
                 sentinel_env=SENTINEL_ENV, raise_line=raise_line, skill=skill,
+                setup_env_block=setup_env_block,
             ))
             if with_main:
                 (pkg_dir / "__main__.py").write_text(MAIN_TEMPLATE)
@@ -200,6 +209,7 @@ class PluginBuilder:
         skill_toml: str | None = None,
         init_raises: bool = False,
         with_main: bool = True,
+        setup_env: dict | None = None,
         write: bool = True,
     ) -> PluginPackage:
         """A package on ``sys.path`` and an entry point naming it, with no ``dist``.
@@ -214,6 +224,7 @@ class PluginBuilder:
                 site, package, skill, layout=layout, frontmatter=frontmatter,
                 extra=extra, env=env, skill_md=skill_md, write_skill_md=write_skill_md,
                 skill_toml=skill_toml, init_raises=init_raises, with_main=with_main,
+                setup_env=setup_env,
             )
         else:
             site.mkdir(parents=True, exist_ok=True)
@@ -235,6 +246,7 @@ class PluginBuilder:
         env: list[dict] | None = None,
         init_raises: bool = False,
         with_main: bool = True,
+        setup_env: dict | None = None,
         activate: bool = True,
     ) -> PluginPackage:
         """The package plus a ``.dist-info`` that ``importlib.metadata`` finds.
@@ -248,6 +260,7 @@ class PluginBuilder:
             site, package, skill, layout="package", frontmatter=frontmatter,
             extra=extra, env=env, skill_md=None, write_skill_md=True,
             skill_toml=None, init_raises=init_raises, with_main=with_main,
+            setup_env=setup_env,
         )
         dist_name = f"example-plugin-{tag}"
         dist_info = site / f"{dist_name.replace('-', '_')}-{version}.dist-info"

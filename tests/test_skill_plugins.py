@@ -29,6 +29,7 @@ from istota.skills._loader import (
     expand_companions,
     load_skill_index,
     plugin_problems,
+    resolve_skill_module,
 )
 from istota.skills._types import PluginProblem, SkillMeta, is_plugin
 from tests.support.plugin_fixture import SENTINEL_ENV, build_plugins, render_skill_md
@@ -455,6 +456,32 @@ class TestTheOperatorLayer:
         _write_skill(ops, "thing", {"description": "operator"})
         meta = load_skill_index(ops, bundled, plugin_entry_points=[])["thing"]
         assert (meta.origin, meta.module, meta.description) == ("operator", "", "operator")
+
+
+class TestTheModuleResolver:
+    """`resolve_skill_module`: which package runs a skill (Stage 2)."""
+
+    def test_a_bundled_skill(self, tmp_path):
+        ops, bundled = _dirs(tmp_path)
+        _write_skill(bundled, "thing", {"description": "bundled"})
+        index = load_skill_index(ops, bundled, plugin_entry_points=[])
+        assert resolve_skill_module("thing", index) == "istota.skills.thing"
+
+    def test_a_plugin(self, tmp_path, plugin_builder):
+        p = plugin_builder.injected()
+        index = _index(tmp_path, [p.entry_point])
+        assert resolve_skill_module(p.skill, index) == p.package
+
+    def test_an_operator_entry_over_a_plugin(self, tmp_path, plugin_builder):
+        p = plugin_builder.injected()
+        ops, bundled = _dirs(tmp_path)
+        _write_skill(ops, p.skill, {"description": "operator doc", "cli": True})
+        index = load_skill_index(ops, bundled, plugin_entry_points=[p.entry_point])
+        assert resolve_skill_module(p.skill, index) == p.package
+
+    def test_an_unknown_name_raises(self):
+        with pytest.raises(KeyError):
+            resolve_skill_module("nothing_here", {})
 
 
 class TestOrigins:

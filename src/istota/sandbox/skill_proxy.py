@@ -19,6 +19,7 @@ from time import monotonic, sleep, time
 
 from istota import skill_client
 from istota.lib.egress_log import EGRESS_LOG_VAR, append_refusal, refusal_advice
+from istota.lib.skill_module import bundled_skill_module
 from istota.sandbox import peer_process
 from istota.sandbox.host_paths import skill_file_env
 from istota.credentials.names import label_for_display
@@ -390,6 +391,7 @@ class SkillProxy:
         allowed_credentials: set[str] | None = None,
         skill_credential_map: dict[str, set[str]] | None = None,
         allowed_skills: frozenset[str] | None = None,
+        skill_modules: dict[str, str] | None = None,
         authorized_skills: frozenset[str] | None = None,
         task_id: int | None = None,
         vault_credentials: dict[str, str] | None = None,
@@ -429,6 +431,11 @@ class SkillProxy:
         self.allowed_credentials = allowed_credentials
         self.skill_credential_map = skill_credential_map
         self.allowed_skills = allowed_skills
+        # Which package runs each skill, from the index (`resolve_skill_module`).
+        # Exhaustive: a name missing from it is refused, never guessed at, since
+        # a guess would run a plugin as `istota.skills.<name>`. None, which only
+        # tests pass, means the bundled package for every name.
+        self.skill_modules = skill_modules
         # Skills authorized for credential access this task. None = no filter
         # (back-compat for callers that don't pass it). Used purely for the
         # informative-rejection list returned to the client.
@@ -825,16 +832,20 @@ class SkillProxy:
                     "skill": skill,
                 })
                 return
-            if self.allowed_skills is not None and skill not in self.allowed_skills:
+            known = self.allowed_skills is None or skill in self.allowed_skills
+            if known and self.skill_modules is not None:
+                known = skill in self.skill_modules
+            if not known:
                 logger.warning(
                     "proxy_rejected task_id=%s type=skill skill=%s reason=unknown_skill",
                     self.task_id, skill,
                 )
-                authorized_list = (
-                    sorted(self.authorized_skills)
-                    if self.authorized_skills is not None
-                    else sorted(self.allowed_skills)
-                )
+                if self.authorized_skills is not None:
+                    authorized_list = sorted(self.authorized_skills)
+                elif self.allowed_skills is not None:
+                    authorized_list = sorted(self.allowed_skills)
+                else:
+                    authorized_list = sorted(self.skill_modules or ())
                 self._send_response(conn, {
                     "stdout": "",
                     "stderr": (
@@ -862,8 +873,11 @@ class SkillProxy:
             if skill_timeout != self.timeout:
                 conn.settimeout(skill_timeout + CONNECTION_SLACK_SECONDS)
 
-            # Build command
-            cmd = [sys.executable, "-m", f"istota.skills.{skill}"] + args
+            if self.skill_modules is not None:
+                module = self.skill_modules[skill]
+            else:
+                module = bundled_skill_module(skill)
+            cmd = [sys.executable, "-m", module] + args
 
             # Merge envs: base gets only the credentials this skill needs
             merged_env = dict(self.base_env)

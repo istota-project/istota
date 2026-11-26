@@ -414,3 +414,44 @@ class TestEveryMainModuleIsOneShape:
         # both `skill_client._run_direct` and `skill_proxy` spawn
         # `python -m istota.skills.<name>`.
         assert len(list(SKILLS_DIR.glob("*/__main__.py"))) == 35
+
+
+#: The two modules that may spell a bundled skill's package themselves: the
+#: resolver over the index and the no-index one (spec: external-skill-packages).
+MODULE_PATH_BUILDERS = {"skills/_loader.py", "lib/skill_module.py"}
+
+#: An f-string, a concatenation or a `%` / `.format` spelling of the package path.
+MODULE_PATH_SPELLING = re.compile(
+    r"""f["']istota\.skills\.\{"""
+    r"""|["']istota\.skills\.["']\s*\+"""
+    r"""|["']istota\.skills\.(?:%s|\{\})["']"""
+)
+
+
+class TestOneModuleResolver:
+    """Every place that runs a skill asks the resolver which package holds it.
+
+    A fifth dispatch site spelling `istota.skills.<name>` itself would run a
+    plugin skill as a module that does not exist. This reads files off disk, so
+    testmon cannot select it: name it in any closing run that touches dispatch.
+    """
+
+    def test_no_dispatch_site_builds_the_module_path_itself(self):
+        found = sorted(
+            str(path.relative_to(SRC_DIR))
+            for path in SRC_DIR.rglob("*.py")
+            if MODULE_PATH_SPELLING.search(path.read_text())
+        )
+        assert set(found) <= MODULE_PATH_BUILDERS, (
+            f"build the module path through the resolver instead: "
+            f"{sorted(set(found) - MODULE_PATH_BUILDERS)}"
+        )
+
+    @pytest.mark.parametrize("text", [
+        'cmd = [sys.executable, "-m", f"istota.skills.{skill}"]',
+        "name = 'istota.skills.' + skill",
+        'name = "istota.skills.%s" % skill',
+        'name = "istota.skills.{}".format(skill)',
+    ])
+    def test_the_pattern_sees_each_spelling(self, text):
+        assert MODULE_PATH_SPELLING.search(text)

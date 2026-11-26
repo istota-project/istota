@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ._types import EnvSpec, SkillMeta
+from ._types import EnvSpec, SkillMeta, is_plugin
 
 logger = logging.getLogger("istota.skills_env")
 
@@ -342,29 +342,76 @@ def dispatch_setup_env_hooks(
     can bind them), but what they return is dropped: ``HEALTH_DB_PATH`` and its
     siblings come from here, over the whole index, so no authorization gate
     downstream would otherwise remove them.
+
+    A plugin (``is_plugin``) is held tighter, since its package is not ours: an
+    import that raises anything is logged at ERROR and the skill skipped, and
+    the module is not imported again in this process (Python drops a failed
+    module from ``sys.modules``, so each task would otherwise re-run its
+    top-level code with the daemon's environment). Its hook output keeps only
+    the variables its manifest declares ``from: setup_env``: the merge is one
+    dict, so an undeclared key could replace a bundled skill's value or reach
+    the model's env. A bundled module's non-``ImportError`` still propagates.
     """
     import importlib
+
+    from ._loader import resolve_skill_module
 
     env = {}
     for skill_name, meta in skill_index.items():
         if not meta or not meta.skill_dir:
             continue
 
-        # Try to import the skill's Python package
-        module_name = f"istota.skills.{skill_name}"
-        try:
-            mod = importlib.import_module(module_name)
-        except ImportError:
-            continue
+        module_name = resolve_skill_module(skill_name, skill_index)
+        plugin = is_plugin(meta)
+        if plugin:
+            if module_name in _FAILED_PLUGIN_MODULES:
+                continue
+            try:
+                mod = importlib.import_module(module_name)
+            except Exception as e:
+                _FAILED_PLUGIN_MODULES.add(module_name)
+                logger.error(
+                    "skill plugin %s (%s) failed to import and is skipped: %s: %s",
+                    skill_name, module_name, type(e).__name__, e,
+                )
+                continue
+        else:
+            try:
+                mod = importlib.import_module(module_name)
+            except ImportError:
+                continue
 
         setup_fn = getattr(mod, "setup_env", None)
         if setup_fn is not None:
             try:
                 result = setup_fn(ctx)
                 if isinstance(result, dict) and skill_name not in withheld:
+                    if plugin:
+                        result = _declared_hook_output(skill_name, meta, result)
                     env.update(_without_model_credentials(skill_name, result))
             except Exception as e:
                 logger.warning(
                     "setup_env() failed for skill %s: %s", skill_name, e,
                 )
     return env
+
+
+# Per process: a plugin package that raised at import, and the plugins already
+# warned about an undeclared hook key. A plugin changes only across a restart.
+_FAILED_PLUGIN_MODULES: set[str] = set()
+_WARNED_UNDECLARED: set[str] = set()
+
+
+def _declared_hook_output(skill_name: str, meta: SkillMeta, result: dict) -> dict:
+    """A plugin hook's output minus every key its manifest does not declare."""
+    declared = {spec.var for spec in meta.env_specs if spec.source == "setup_env"}
+    kept = {key: value for key, value in result.items() if key in declared}
+    dropped = sorted(str(key) for key in result if key not in declared)
+    if dropped and skill_name not in _WARNED_UNDECLARED:
+        _WARNED_UNDECLARED.add(skill_name)
+        logger.warning(
+            "setup_env_dropped skill=%s vars=%s: a plugin's hook may return only "
+            "the variables its manifest declares from setup_env",
+            skill_name, ",".join(dropped),
+        )
+    return kept

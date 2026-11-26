@@ -31,7 +31,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from istota.lib.markdown_headings import demote_headings
-from istota.lib.skill_module import plugin_name_problem, valid_plugin_value
+from istota.lib.skill_module import (
+    PLUGIN_GROUP,
+    bundled_skill_module,
+    plugin_name_problem,
+    valid_plugin_value,
+)
 from istota.sandbox.confined import open_dir as open_overlay_dir  # noqa: F401 - re-exported for its callers
 
 from ._types import EnvSpec, PluginProblem, SkillMeta, is_plugin
@@ -301,8 +306,6 @@ def _load_legacy_index(skills_dir: Path) -> dict[str, SkillMeta]:
         if isinstance(meta, dict)
     }
 
-
-PLUGIN_GROUP = "istota.skills"
 
 # What a plugin's `env:` entry may say. An allowlist, so a field added to
 # EnvSpec later is refused until somebody decides otherwise: `config` reads any
@@ -628,6 +631,16 @@ def load_skill_index(
     skills.update(overrides)
 
     return skills
+
+
+def resolve_skill_module(name: str, skill_index: dict[str, SkillMeta]) -> str:
+    """The importable package that runs skill ``name``.
+
+    A plugin's own package, inherited by an operator entry over it, else the
+    bundled ``istota.skills.<name>``. Raises ``KeyError`` for a name not in
+    the index; every caller has checked the name against it already.
+    """
+    return skill_index[name].module or bundled_skill_module(name)
 
 
 def _get_attachment_extensions(attachments: list[str] | None) -> set[str]:

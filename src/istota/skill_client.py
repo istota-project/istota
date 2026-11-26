@@ -207,7 +207,14 @@ def _run_direct(skill: str, args: list[str]) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
-    cmd = [sys.executable, "-m", f"istota.skills.{skill}"] + args
+    from pathlib import Path
+
+    from istota.lib.skill_module import resolve_unindexed_skill_module
+
+    # Names the bundled directory without importing the package: this client
+    # must not run `istota.skills`' star imports.
+    module = resolve_unindexed_skill_module(skill, Path(__file__).parent / "skills")
+    cmd = [sys.executable, "-m", module] + args
     from istota.sandbox.host_paths import skill_file_env
 
     try:
@@ -215,7 +222,7 @@ def _run_direct(skill: str, args: list[str]) -> None:
             result = subprocess.run(cmd, env=env)
         sys.exit(result.returncode)
     except FileNotFoundError:
-        print(f"Python not found or skill module missing: istota.skills.{skill}", file=sys.stderr)
+        print(f"Python not found or skill module missing: {module}", file=sys.stderr)
         sys.exit(1)
 
 
