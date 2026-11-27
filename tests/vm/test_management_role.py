@@ -10,7 +10,11 @@ against a stack the role converged. This file holds what is the role's own:
 - `ansible-playbook --check` straight after it reports nothing to change,
   which is the drift answer an estate relies on;
 - the same --check with one config value changed does report a change and
-  writes nothing, so the no-change answer is not one the check gives always;
+  writes nothing, so the no-change answer is not one the check gives always,
+  and prints the diff a play run would write to config.toml;
+- the plan's `[meta]` decides who owns the config (proxied, ISSUE-993):
+  `managed: true` locks it, a snapshot as the plan leaves the lock as it is,
+  and `managed: false` releases it, each without a change or a restart;
 - a second real converge changes nothing (proxied only, for the time);
 - the secrets directory holds one file per secret, 0400 and uid 10001;
 - a first converge, on a VM with no config.toml and no deployed tag, brings
@@ -61,10 +65,21 @@ def _config_toml(vm: lima.Vm) -> str:
     return vm.read(f"{lima.STACK}/config/config.toml")
 
 
+def _task_output(run: lima.RoleRun, name: str) -> str:
+    """What the task named `name` (role prefix aside) printed, or nothing."""
+    blocks = [block for block in run.output.split("TASK [") if block.split("]", 1)[0].endswith(name)]
+    return blocks[0] if blocks else ""
+
+
 def _task_changed(run: lima.RoleRun, name: str) -> bool:
     """Whether the task named `name` (role prefix aside) reported a change."""
-    blocks = [block for block in run.output.split("TASK [") if block.split("]", 1)[0].endswith(name)]
-    return bool(blocks) and "\nchanged:" in blocks[0]
+    return "\nchanged:" in _task_output(run, name)
+
+
+def _config_owner(vm: lima.Vm) -> tuple[bool, str]:
+    """Who `config/managed.json` says owns config.toml."""
+    entry = json.loads(vm.read(f"{lima.STACK}/config/managed.json"))["config"]
+    return entry["managed"], entry["source"]
 
 
 class _RoleChecks:
@@ -90,6 +105,7 @@ class _RoleChecks:
         assert run.returncode == 0, _describe(run)
         assert run.recap.get("changed", 0) >= 1, _describe(run)
         assert _task_changed(run, "istota-stack apply"), _describe(run)
+        assert "Drifted" in _task_output(run, "Report the config changes --check would write"), _describe(run)
         assert _config_toml(stack) == before
 
     def test_every_secret_file_is_0400_and_owned_by_10001(self, stack):
@@ -381,6 +397,81 @@ class TestASnapshotIsTheRolesPlan:
     def test_the_next_check_is_clean(self, round_trip):
         run = round_trip.clean_check
         assert run.returncode == 0 and run.recap.get("changed") == 0, _describe(run)
+
+
+@dataclass
+class Ownership:
+    locked: lima.RoleRun
+    owner_locked: tuple[bool, str]
+    snapshot: lima.RoleRun
+    owner_after_snapshot: tuple[bool, str]
+    released: lima.RoleRun
+    owner_released: tuple[bool, str]
+    owner_restored: tuple[bool, str]
+    daemon_before: str
+    daemon_after: str
+    config_before: str
+    config_after: str
+
+
+class TestThePlansMetaDecidesWhoOwnsTheConfig:
+    """The role applies the plan's `[meta]` as written (ISSUE-993: it marked
+    every config it applied managed, which made config.toml read-only in the
+    web config editor whatever the plan said). On the VM the role converged
+    in proxied mode, three plans in turn, none changing a setting."""
+
+    @pytest.fixture(scope="class")
+    def ownership(self, proxied_stack):
+        if lima.control():
+            pytest.skip("a negative control is applied; the role's own checks run without one")
+        stack = proxied_stack
+        _, variables = _last("proxied")
+        locking = copy.deepcopy(variables)
+        locking["istota_plan"]["meta"] = {"managed": True}
+        snapshot = copy.deepcopy(variables)
+        snapshot["istota_plan"] = _snapshot(stack)
+        releasing = copy.deepcopy(snapshot)
+        releasing["istota_plan"]["meta"]["managed"] = False
+        daemon_before, config_before = _daemon_started(stack), _config_toml(stack)
+        try:
+            locked = lima.converge_role(stack, locking)
+            owner_locked = _config_owner(stack)
+            kept = lima.converge_role(stack, snapshot)
+            owner_kept = _config_owner(stack)
+            released = lima.converge_role(stack, releasing)
+            owner_released = _config_owner(stack)
+            daemon_after, config_after = _daemon_started(stack), _config_toml(stack)
+        finally:
+            # The tier's own plan names no [meta], which leaves the config unmanaged.
+            restore = lima.converge_role(stack, variables)
+            assert restore.returncode == 0, _describe(restore)
+            lima.wait_healthy(stack)
+        return Ownership(locked, owner_locked, kept, owner_kept, released, owner_released,
+                         _config_owner(stack), daemon_before, daemon_after, config_before, config_after)
+
+    def test_managed_true_locks_the_config(self, ownership):
+        run = ownership.locked
+        assert run.returncode == 0 and run.recap.get("failed") == 0, _describe(run)
+        assert ownership.owner_locked == (True, "ansible")
+
+    def test_a_snapshot_as_the_plan_leaves_the_lock_as_it_is(self, ownership):
+        run = ownership.snapshot
+        assert run.returncode == 0 and run.recap.get("failed") == 0, _describe(run)
+        assert ownership.owner_after_snapshot == (True, "ansible")
+
+    def test_managed_false_releases_it(self, ownership):
+        run = ownership.released
+        assert run.returncode == 0 and run.recap.get("failed") == 0, _describe(run)
+        assert ownership.owner_released == (False, "ansible")
+
+    def test_a_plan_naming_no_meta_leaves_the_config_to_the_web(self, ownership):
+        assert ownership.owner_restored == (False, "ansible")
+
+    def test_none_of_them_is_a_change_or_a_restart(self, ownership):
+        for run in (ownership.locked, ownership.snapshot, ownership.released):
+            assert run.recap.get("changed") == 0, _describe(run)
+        assert ownership.config_after == ownership.config_before
+        assert ownership.daemon_after == ownership.daemon_before, "a marker change restarted the daemon"
 
 
 class TestTheRoleInNextcloudMode(_RoleChecks):
