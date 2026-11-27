@@ -168,11 +168,11 @@ Istota's instructions mention secret links only on tasks where the command can w
 
 A link that asks for a password is what a scammer would send. Istota keeps to a few rules so that its own links are easy to tell apart:
 
-- It sends a link only when you asked to give it a secret, in that conversation, a moment before. It never sends one unprompted, from a scheduled job or from mail somebody else wrote.
+- It sends a link only while answering a message you wrote, in that conversation. It never sends one from a scheduled job, an incognito room or mail somebody else wrote.
 - The link is always on your Istota's own address, the `[site] hostname` you open the web UI at, with no redirect.
-- The form names the account and the exact site the secret is for.
+- The form names the account and the exact site the secret is for, and the secret is only ever sent to that site.
 
-If a message asks you to enter a password you did not just offer, do not use it. Check that the address in the link is your Istota's before you type anything.
+Istota chooses the name and the site from the conversation, so something it read while answering you (a web page, an attachment) could lead it to ask for the wrong one. If a message asks for a password you did not just offer, or names a site you did not mean, do not use it. Check that the address in the link is your Istota's and that the site on the form is the one you expect before you type anything.
 
 The risk that remains is the one every emailed sign-in link carries. Whoever opens a forwarded or leaked link before it expires can set that one credential, and nothing else. The notice tells you when that happens.
 

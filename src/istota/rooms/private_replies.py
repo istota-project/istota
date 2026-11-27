@@ -1352,7 +1352,9 @@ def _secret_link_destination(conn, config, user_id: str, about: str) -> PrivateD
     """
     from istota.transport.routing import phone_room
 
-    if about:
+    # `is_private_room_of` reads members only; a thread room or a Talk group
+    # with guests has one member and is still read by others.
+    if about and not db.room_is_shared(conn, about) and db.get_room_binding(conn, about, "email") is None:
         phone = phone_room(conn, about)
         if phone is None:
             talk = db.get_room_binding(conn, about, "talk") is not None
@@ -1701,10 +1703,11 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                 # A link superseded, spent or expired while queued is dead; sending
                 # it would only teach the user to expect links that do not work.
                 if not secret_links.is_live(conn, destination.get("secret_link_id"), user):
-                    raise RequestError("link_unavailable")
+                    _, outcome = secret_links.spent_link(conn, destination.get("secret_link_id"))
+                    raise RequestError("link_superseded" if outcome == "superseded" else "link_unavailable")
                 delivery = deliver_private(
                     conn, config, user_id=user, about_token=parent, kind="secret_link",
-                    reference=f"secret-link:{request_id}", body=body,
+                    reference=request_id, body=body,
                     task_id=row["origin_task_id"],
                 )
                 if delivery.dest is None:
@@ -1785,7 +1788,8 @@ def _finish(config, request_id: str, reason: str) -> None:
                 "updated_at=datetime('now') WHERE id=? AND state IN ('queued','sending')",
                 (state, reason, request_id),
             ).rowcount
-            if changed and row is not None:
+            # A superseded link's newer one is on its way; an alert would contradict it.
+            if changed and row is not None and reason != "link_superseded":
                 what = {"room_post": "Room post", "secret_link": "Secret link"}.get(
                     row["kind"], "Private note")
                 notice = task_alert.write(
@@ -1852,7 +1856,13 @@ async def deliver_request(config, row) -> None:
             picture_surface = True
     else:
         # Never raises; a whisper that reached nobody becomes a bell row there.
-        await send_private(config, claim["delivery"], body=claim["body"])
+        delivered = await send_private(config, claim["delivery"], body=claim["body"])
+        dest = claim["delivery"].dest
+        if claim["kind"] == "secret_link" and dest is not None and dest.pushes and not delivered:
+            # The model already said a link is on its way; a body-free alert
+            # says it is not, since the bell must never carry the link.
+            await asyncio.to_thread(_finish, config, claim["request_id"], "not_delivered")
+            return
     await asyncio.to_thread(_settle, config, claim, talk_id)
     # Web draws the card itself; Talk and a WhatsApp group were promised a
     # picture, so one that failed or could not be drawn is announced.

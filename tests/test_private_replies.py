@@ -1887,6 +1887,8 @@ class TestSecretLink:
         (row,) = _rows(config, "SELECT * FROM messages WHERE body LIKE ?", (f"%{token}%",))
         assert row["room_token"] == web and row["role"] == "system" and row["task_id"] is None
         assert row["delivery_reference"].startswith("private-secret_link:")
+        # Talk keeps a referenceId of at most 64 characters.
+        assert len(row["delivery_reference"]) <= 64
         (request,) = _rows(config, "SELECT kind, state FROM whatsapp_skill_requests")
         assert request == {"kind": "secret_link", "state": "sent"}
         assert _rows(config, "SELECT id FROM notifications") == []
@@ -1950,6 +1952,35 @@ class TestSecretLink:
         (row,) = _rows(config, "SELECT room_token FROM messages WHERE body LIKE ?", (f"%{token}%",))
         assert row["room_token"] == mine.canonical != web
 
+    def test_from_an_email_thread_with_only_the_host_as_member_it_goes_elsewhere(self, config):
+        with db.get_db(config.db_path) as conn:
+            web = _web_room(conn)
+            thread = db.register_room(conn, None, "alice", origin="email", name="Thread").token
+            db.add_room_binding(conn, thread, "email", "<root@example.com>")
+            db.upsert_room_participant(conn, room_token=thread, surface="email",
+                                       surface_ref="bob@example.com", kind="guest")
+            ident = _running(conn, "alice", thread, source_type="email")
+        token, _, result = _secret_link(config, ident, thread)
+        _drain(config)
+        (row,) = _rows(config, "SELECT room_token FROM messages WHERE body LIKE ?", (f"%{token}%",))
+        assert row["room_token"] == web != thread
+        assert result["delivered_to"] == "web"
+
+    def test_from_a_talk_room_with_a_non_member_participant_it_goes_elsewhere(self, config, talk):
+        with db.get_db(config.db_path) as conn:
+            group = plain_talk_room(conn, "alice", name="Book club")
+            db.upsert_room_participant(conn, room_token=group.canonical, surface="talk",
+                                       surface_ref="alice", kind="principal", user_id="alice")
+            db.upsert_room_participant(conn, room_token=group.canonical, surface="talk",
+                                       surface_ref="carol", kind="guest")
+            web = _web_room(conn)
+            ident = _running(conn, "alice", group.canonical, source_type="talk")
+        token, _, _ = _secret_link(config, ident, group.canonical)
+        _drain(config)
+        assert talk["client"].calls_to(group.talk_ref, method="send_message") == []
+        (row,) = _rows(config, "SELECT room_token FROM messages WHERE body LIKE ?", (f"%{token}%",))
+        assert row["room_token"] == web
+
     def test_from_the_users_own_sms_room_it_goes_to_another_private_room(self, config):
         # SMS is not a private-reply surface; the link falls back as for a shared room.
         with db.get_db(config.db_path) as conn:
@@ -1980,13 +2011,43 @@ class TestSecretLink:
             ident = _running(conn, "alice", web)
         token, link, _ = _secret_link(config, ident, web)
         with db.get_db(config.db_path) as conn:
-            assert secret_links.spend(conn, link.id, "superseded")
+            assert secret_links.spend(conn, link.id, "cancelled")
         mark = _max_message_id(config)
         _drain(config)
         assert _rows(config, "SELECT id FROM messages WHERE id > ? AND body LIKE ?",
                      (mark, f"%{token}%")) == []
         (request,) = _rows(config, "SELECT state, error_code FROM whatsapp_skill_requests")
         assert request == {"state": "failed", "error_code": "link_unavailable"}
+        (notice,) = _rows(config, "SELECT title, body FROM notifications")
+        assert notice["title"] == "Secret link not delivered"
+        assert token not in notice["body"] and "/istota/secret" not in notice["body"]
+
+    def test_a_link_superseded_before_delivery_closes_without_an_alert(self, config):
+        from istota.webui import secret_links
+
+        with db.get_db(config.db_path) as conn:
+            web = _web_room(conn)
+            ident = _running(conn, "alice", web)
+        _, link, _ = _secret_link(config, ident, web)
+        with db.get_db(config.db_path) as conn:
+            assert secret_links.spend(conn, link.id, "superseded")
+        _drain(config)
+        (request,) = _rows(config, "SELECT state, error_code FROM whatsapp_skill_requests")
+        assert request == {"state": "failed", "error_code": "link_superseded"}
+        assert _rows(config, "SELECT id FROM notifications") == []
+
+    def test_a_push_that_reaches_nobody_fails_the_request_and_says_so(self, config, talk):
+        from istota.relay.relays import AudienceUnavailable
+
+        with db.get_db(config.db_path) as conn:
+            mine = plain_talk_room(conn, "alice", name="talk")
+            ident = _running(conn, "alice", mine.canonical, source_type="talk")
+        token, _, _ = _secret_link(config, ident, mine.canonical)
+        with patch("istota.relay.relays.verify_private_audience",
+                   side_effect=AudienceUnavailable()):
+            _drain(config)
+        (request,) = _rows(config, "SELECT state, error_code FROM whatsapp_skill_requests")
+        assert request == {"state": "failed", "error_code": "not_delivered"}
         (notice,) = _rows(config, "SELECT title, body FROM notifications")
         assert notice["title"] == "Secret link not delivered"
         assert token not in notice["body"] and "/istota/secret" not in notice["body"]

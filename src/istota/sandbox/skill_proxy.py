@@ -1458,18 +1458,27 @@ class SkillProxy:
             return
 
         host = secret_links.link_host(url)
+        # For an existing name the save keeps the stored binding, so the message
+        # names its hosts, as the form does, rather than the URL asked with.
+        shown = {"hosts": host}
 
         def check(database) -> None:
+            from istota.credentials.broker import bindings
+
             if (name in local._taken_names(database, user_id)
                     and not local.is_local(database, user_id, name)):
                 raise secret_links.LinkRefused("not_local", "That name belongs to a credential edited elsewhere")
             if host is None:
                 raise secret_links.LinkRefused("bad_url", "Give the site as a hostname or https URL, with no path")
+            if local.is_local(database, user_id, name):
+                stored = (bindings.get_entry_binding(database, user_id, name) or {}).get("hosts") or []
+                if stored:
+                    shown["hosts"] = ", ".join(stored)
 
         what = "username and password" if username else "password"
 
         def compose(address: str, expires: str) -> str:
-            return (f"Enter the {what} for `{name}` ({host}) here: {address}\n"
+            return (f"Enter the {what} for `{name}` ({shown['hosts']}) here: {address}\n"
                     f"It works once and expires at {expires}. I only send these when you ask for one.")
 
         try:
@@ -1490,7 +1499,7 @@ class SkillProxy:
             task_id, link.id, label_for_display(name), delivered_to,
         )
         self._send_response(conn, {
-            "name": name, "host": host, "expires_at": secret_links.iso_expiry(link),
+            "name": name, "host": shown["hosts"], "expires_at": secret_links.iso_expiry(link),
             "delivered_to": delivered_to,
         })
 

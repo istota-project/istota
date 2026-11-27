@@ -146,7 +146,11 @@ class TestTheHappyPath:
             local.create(conn, "alice", local.LocalCredential(
                 name="acme", value="old", url="acme.example"))
         task_id, _ = _running(config)
-        assert _ask(config, sock, task_id, username=False)["name"] == "acme"
+        # The save keeps the stored binding, so the message and reply name it.
+        reply = _ask(config, sock, task_id, username=False, url="https://other.example")
+        assert reply["name"] == "acme" and reply["host"] == "acme.example"
+        (request,) = _rows(config, "SELECT text FROM whatsapp_skill_requests")
+        assert "(acme.example)" in request["text"] and "other.example" not in request["text"]
 
     def test_a_second_link_for_the_name_supersedes_the_first(self, config, sock):
         task_id, _ = _running(config)
