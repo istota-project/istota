@@ -283,6 +283,80 @@ class TestALaterRoster:
             {"archived": 1}]
 
 
+class TestAGuestBoundToAUser:
+    """ISSUE-995: a guest whose number is later bound to an istota user is
+    the same reader. Their join epoch follows them from `whatsapp:<jid>` to
+    `u:<user>`, and their first turn as a principal is not a second join."""
+
+    def _guest_era(self, config):
+        config.users["max"] = UserConfig(display_name="Max")
+        _apply(config, _roster([ALICE_JID, BOB_JID]))
+        _apply(config, _message("before the guest came", message_id="M1"))
+        _apply(config, _roster([ALICE_JID, BOB_JID, GUEST_JID]))
+        _apply(config, _message("hello all", sender=GUEST_JID, message_id="G1"))
+        with db.get_db(config.db_path) as conn:
+            cutoff = db.front_stage_cutoff(conn, _room(config))
+            db.set_whatsapp_binding(conn, "max", bootstrap_phone_number="+15559990000")
+        assert cutoff
+        return cutoff
+
+    def _epochs(self, config):
+        return _rows(config, "SELECT reason, person FROM room_epochs "
+                     "WHERE room_token=? AND epoch > 0 ORDER BY epoch",
+                     (_room(config),))
+
+    def test_a_first_turn_before_any_roster_keeps_the_boundary(self, config):
+        as_guest = self._guest_era(config)
+        _apply(config, _message("hi, it's max", sender=GUEST_JID, message_id="G2"))
+
+        assert self._epochs(config) == [
+            {"reason": "whatsapp_join", "person": "u:max"},
+        ]
+        with db.get_db(config.db_path) as conn:
+            assert db.is_room_member(conn, _room(config), "max")
+            assert db.front_stage_cutoff(conn, _room(config)) == as_guest
+
+    def test_a_roster_before_the_first_turn_keeps_the_boundary(self, config):
+        as_guest = self._guest_era(config)
+        _apply(config, _roster([ALICE_JID, BOB_JID, GUEST_JID]))
+        with db.get_db(config.db_path) as conn:
+            assert db.front_stage_cutoff(conn, _room(config)) == as_guest
+        _apply(config, _message("hi, it's max", sender=GUEST_JID, message_id="G2"))
+
+        assert self._epochs(config) == [
+            {"reason": "whatsapp_join", "person": "u:max"},
+        ]
+        with db.get_db(config.db_path) as conn:
+            assert db.front_stage_cutoff(conn, _room(config)) == as_guest
+
+    def test_a_guest_known_by_lid_keeps_the_boundary_on_a_first_turn(self, config):
+        """A guest the roster showed by LID alone, who then writes with their
+        number: the message moves their row as a roster would, rather than
+        leaving it and joining a second time under the number."""
+        config.users["max"] = UserConfig(display_name="Max")
+        _apply(config, _roster([ALICE_JID, BOB_JID]))
+        _apply(config, _message("before the guest came", message_id="M1"))
+        _apply(config, _roster([ALICE_JID, BOB_JID, {"jid": "", "lid": GUEST_LID}]))
+        _apply(config, _message("hello all", sender="", lid=GUEST_LID,
+                                message_id="G1"))
+        with db.get_db(config.db_path) as conn:
+            as_guest = db.front_stage_cutoff(conn, _room(config))
+            db.set_whatsapp_binding(conn, "max", bootstrap_phone_number="+15559990000")
+        assert as_guest
+        _apply(config, _message("hi, it's max", sender=GUEST_JID, lid=GUEST_LID,
+                                message_id="G2"))
+
+        assert self._epochs(config) == [
+            {"reason": "whatsapp_join", "person": "u:max"},
+        ]
+        present = _rows(config, "SELECT surface_ref, user_id FROM room_participants "
+                        "WHERE room_token=? AND left_at IS NULL ORDER BY id",
+                        (_room(config),))
+        assert present[2:] == [{"surface_ref": GUEST_JID, "user_id": "max"}]
+        with db.get_db(config.db_path) as conn:
+            assert db.front_stage_cutoff(conn, _room(config)) == as_guest
+
+
 class TestTheHostLeaving:
     def test_the_bot_leaves_with_the_host(self, config):
         """D14: the room loses its host and the bot leaves the group."""
