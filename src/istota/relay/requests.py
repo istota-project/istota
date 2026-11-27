@@ -24,12 +24,14 @@ REQUEST_KEY_RE = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 #: table rather than a second hold table: `side_whisper` is a task in a shared
 #: room writing to its principal privately (the name predates ISSUE-608 and is
 #: kept to avoid a CHECK rebuild), `room_post` a private-room task's post into
-#: a shared room, held for the member's approval.
+#: a shared room, held for the member's approval. `secret_link` is the host's
+#: own message carrying a secret-entry link to the user's private room; the
+#: model never sees its text (`rooms.private_replies.enqueue_secret_link`).
 KINDS = ("self_send", "relay_question", "side_whisper", "room_post", "purchase", "recovery_fill",
-         "location_share", "assignment_activation")
-ROOM_KINDS = ("side_whisper", "room_post")
+         "location_share", "assignment_activation", "secret_link")
+ROOM_KINDS = ("side_whisper", "room_post", "secret_link")
 _SELF_KINDS = ("self_send", "side_whisper", "room_post", "purchase", "recovery_fill", "location_share",
-               "assignment_activation")
+               "assignment_activation", "secret_link")
 _HELD_KINDS = ("relay_question", "room_post", "purchase", "recovery_fill", "location_share",
                "assignment_activation")
 
@@ -169,13 +171,16 @@ def _store_request(
 
 
 def get_request(conn: sqlite3.Connection, *, actor_user_id: str, request_id: str) -> dict | None:
+    """A request for the `relay` and `whatsapp` status verbs. A `secret_link`
+    is never one: its text is a live link the model must not read."""
     row = conn.execute(
         """SELECT id,request_key,kind,recipient_user_id,relay_id,text,state,preview,
                   created_at,updated_at,approved_at,queue_deadline,closed_at,
                   content_cleared_at,
                   CASE WHEN kind='relay_question' AND error_code IS NOT NULL
                        THEN 'could_not_deliver' ELSE error_code END AS error_code
-           FROM whatsapp_skill_requests WHERE id=? AND requester_user_id=?""",
+           FROM whatsapp_skill_requests WHERE id=? AND requester_user_id=?
+           AND kind <> 'secret_link'""",
         (request_id, actor_user_id),
     ).fetchone()
     return dict(row) if row is not None else None

@@ -159,6 +159,19 @@ def peek(db_path: Path, token: object) -> SecretLink | None:
         return _link(row) if row is not None else None
 
 
+def is_live(conn: sqlite3.Connection, link_id: object, user_id: str) -> bool:
+    """Whether ``user_id``'s link ``link_id`` is unspent and unexpired, by id.
+
+    For the delivery of a link's message, which knows the id and never the token.
+    """
+    if type(link_id) is not int:
+        return False
+    return conn.execute(
+        "SELECT 1 FROM secret_links WHERE id = ? AND user_id = ? AND used_at IS NULL AND expires_at > ?",
+        (link_id, user_id, _timestamp()),
+    ).fetchone() is not None
+
+
 def live_for_update(conn: sqlite3.Connection, token: object) -> SecretLink | None:
     """The live link for ``token``, read inside the caller's ``BEGIN IMMEDIATE``."""
     row = _live_row(conn, token)

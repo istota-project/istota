@@ -102,6 +102,8 @@ Reused unchanged or widened in place: `_store_request`, `_validate_input`, the w
 
 A stale `sending` room request is recovered by marking it sent, never by re-posting its Talk half.
 
+**`secret_link` is a third room kind**, the host's own message carrying a secret-entry link (`rooms.private_replies.enqueue_secret_link`, called only by the skill proxy's `vault_link_request`). It is queued at once to the requester, from any room, destination `{"kind": "private_reply", "about", "user", "secret_link_id"}`. `_claim` re-resolves the private room and refuses `link_unavailable` for a link spent or expired while queued and `no_private_room` where there is none; it never falls back to the bell, which would copy the link into the notification store, and the send carries no `re:` header. Its rows are `private-secret_link:` references, which `context.build_talk_context` skips, and `get_request` never returns one, so no status verb reads the link back.
+
 ## Still open
 
 - `deliver_returns` records a participant fetch failure as `blocked` rather than retrying it; the question path's `AudienceUnavailable` handling has not been carried over.

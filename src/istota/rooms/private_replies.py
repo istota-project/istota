@@ -110,7 +110,7 @@ def room_label(room: db.Room | None) -> str:
 
 
 
-KINDS = ("whisper", "confirmation", "proposal", "answer_notice", "pass_on")
+KINDS = ("whisper", "confirmation", "proposal", "answer_notice", "pass_on", "secret_link")
 #: The kinds with no park behind them: no bell row is owed by anyone else, so
 #: one that reaches nobody becomes its own `private_note` bell row.
 _UNPARKED_KINDS = ("whisper", "pass_on")
@@ -779,10 +779,15 @@ async def _send(config, delivery: PrivateDelivery, *, header_room_label, body: s
 
     if delivery.notice is not None:
         await asyncio.to_thread(deliver_pending, config, [delivery.notice])
-    label = await asyncio.to_thread(_parent_label, config, delivery.about_token)
-    if header_room_label:
-        label = flatten(header_room_label)[:_LABEL_MAX] or label
-    text = f"{HEADER_PREFIX}{label}\n\n{body}"
+    if delivery.kind == "secret_link":
+        # The host's own fixed text, which names what it is for; it may be
+        # about the private room itself, which has no "re:" to give.
+        text = body
+    else:
+        label = await asyncio.to_thread(_parent_label, config, delivery.about_token)
+        if header_room_label:
+            label = flatten(header_room_label)[:_LABEL_MAX] or label
+        text = f"{HEADER_PREFIX}{label}\n\n{body}"
     delivered = False
     pushed = False
     dest = delivery.dest
@@ -1332,6 +1337,51 @@ def enqueue_whisper(conn, config, *, actor_user_id: str, task_id: int,
         return response
 
 
+SECRET_LINK_KEY_PREFIX = "secret-link-"
+
+
+def secret_link_room(conn, config, task) -> tuple[str, PrivateDestination | None]:
+    """``(about, destination)`` for a secret link asked for in ``task``: the
+    task's canonical room, and its user's private room for it, or None."""
+    own = task.conversation_token or ""
+    about = (canonical_token(conn, own) or own) if own else ""
+    return about, private_room_for(conn, config, task.user_id, about)
+
+
+def enqueue_secret_link(conn, config, *, actor_user_id: str, task_id: int,
+                        link_id: int, text: str) -> dict:
+    """Queue the host's message carrying secret link ``link_id`` to its user's private room.
+
+    The skill proxy's alone, inside its transaction: ``text`` holds a live
+    link, so it is never returned, and the answer names only the surface.
+    A sibling of `enqueue_whisper` that any room may ask from, a 1:1 room
+    included, since the message is the host's rather than the task's. It
+    never falls back to the bell, which would copy the link into the
+    notification store and whatever mirrors it: no private room is
+    `no_private_room`, now and again at delivery (`_claim`), where a link
+    spent or expired by then is not sent either.
+
+    The request key is derived from the text, which carries the token, so a
+    task cannot plant a request under the key ahead of it.
+    """
+    _validate_input(SECRET_LINK_KEY_PREFIX + "x", text)
+    task = _owned_running_task(conn, actor_user_id=actor_user_id, task_id=task_id)
+    with write_transaction(conn):
+        about, dest = secret_link_room(conn, config, task)
+        if dest is None:
+            raise RequestError("no_private_room")
+        row = _store_request(
+            conn, actor_user_id=actor_user_id, task_id=task_id,
+            request_key=SECRET_LINK_KEY_PREFIX + text_hash(text)[:48],
+            kind="secret_link", recipient_user_id=actor_user_id, text=text,
+            service_body=text, template_body=None, provider="room",
+            binding_fingerprint=_fingerprint(actor_user_id, about),
+            destination={"kind": "private_reply", "about": about, "user": actor_user_id,
+                         "secret_link_id": link_id},
+        )
+    return {"status": row["state"], "delivered_to": dest.surface}
+
+
 PRIVATE_ANSWER_REFERENCE = "private-answer:"
 #: Where a member's own turn can be asked again privately: the surfaces whose
 #: `tasks.prompt` is the member's own words in the room.
@@ -1615,6 +1665,25 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                              reference=reference, whatsapp_group=whatsapp_group,
                              talk_reply_to=quoted_ids.get("talk"),
                              whatsapp_reply_to=quoted_ids.get("whatsapp"))
+            elif row["kind"] == "secret_link":
+                from istota.webui import secret_links
+
+                parent = destination.get("about") or ""
+                if (destination.get("kind") != "private_reply" or destination.get("user") != user
+                        or _fingerprint(user, parent) != row["binding_fingerprint"]):
+                    raise RequestError("destination_changed")
+                # A link superseded, spent or expired while queued is dead; sending
+                # it would only teach the user to expect links that do not work.
+                if not secret_links.is_live(conn, destination.get("secret_link_id"), user):
+                    raise RequestError("link_unavailable")
+                delivery = deliver_private(
+                    conn, config, user_id=user, about_token=parent, kind="secret_link",
+                    reference=f"secret-link:{request_id}", body=body,
+                    task_id=row["origin_task_id"],
+                )
+                if delivery.dest is None:
+                    raise RequestError("no_private_room")
+                claim["delivery"] = delivery
             else:
                 # A whisper (stored kind `side_whisper`): the principal's own
                 # private room, resolved now rather than at enqueue.
@@ -1691,7 +1760,8 @@ def _finish(config, request_id: str, reason: str) -> None:
                 (state, reason, request_id),
             ).rowcount
             if changed and row is not None:
-                what = "Room post" if row["kind"] == "room_post" else "Private note"
+                what = {"room_post": "Room post", "secret_link": "Secret link"}.get(
+                    row["kind"], "Private note")
                 notice = task_alert.write(
                     conn, row["requester_user_id"], dedup_key=f"private-reply-request:{request_id}",
                     title=f"{what} not delivered",
