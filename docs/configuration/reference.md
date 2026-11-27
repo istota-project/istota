@@ -863,7 +863,7 @@ Calendars and folders shared with Istota over open protocols. See [sharing](../f
 
 ## `[secret_links]`
 
-Single-use links to a form on `[site] hostname`, which Istota sends to a user's private chat when they ask to give it a password or key. See [credentials](credentials.md).
+Single-use links to a form on `[site] hostname`, which Istota sends to a user's private chat when they ask to give it a password or key. See [secret links](credentials.md#secret-links).
 
 | Setting | Default | Description |
 |---|---|---|

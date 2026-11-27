@@ -252,6 +252,10 @@ The task skill exposes `whatsapp send --request-key KEY "text"` and `whatsapp st
 
 Questions to another user of the installation, which can travel over WhatsApp among other routes, are [relay questions](relay.md). A WhatsApp question is answered by quoting it or with `!relay reply RELAY_ID text`, and STOP still blocks all WhatsApp delivery, relay questions included.
 
+## Giving Istota a password
+
+Do not paste a password, API key or token into a WhatsApp chat: the message passes through WhatsApp's servers and lands in Istota's history. Ask Istota to store it instead, and it sends you a one-use link to a form on your Istota's own web address, where you type the value. Asked in a WhatsApp group, the link comes to your own WhatsApp chat with Istota, never to the group. Asked in your one-to-one chat, it goes to your default web room or your private Talk room if you have either, and to this chat otherwise. Each use of a link is confirmed with a notice, which comes here when your notifications are routed to WhatsApp. How the links work, what they refuse and how to tell one from a phishing message are in [Secret links](../configuration/credentials.md#secret-links).
+
 ## The 24-hour service window (Cloud only)
 
 Meta allows a free-form service message only within 24 hours of the user's latest message. Istota keeps a five-minute safety margin, so its local window is open while `now` is before `last_user_message_at + 23h55m`. Meta stays authoritative and can still refuse a send the local state allowed.

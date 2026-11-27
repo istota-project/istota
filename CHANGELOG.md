@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Skills can live in their own Python package.** Copy a plugin's wheel into `/srv/app/istota/plugins/src/` and run `istota-stack plugins sync`, or list it in the management role's `istota_skill_plugins`; plugins survive updates and rollbacks. A plugin runs unsandboxed with the daemon's access. See docs/development/adding-skills.md.
-- **You can give Istota a password without pasting it into chat.** Ask it to store a password, API key or token and it sends a one-use link to your private chat with it; the form behind the link saves the credential to your account, so the value never passes through the conversation or the model. A link expires soon after it is sent, and you get a notice whenever one is used.
+- **You can give Istota a password without pasting it into chat.** Ask it to store a password, API key or token and it sends a one-use link to your private chat with it; the form behind the link saves the credential to your account, so the value never passes through the conversation or the model. A link expires soon after it is sent, and you get a notice whenever one is used. See docs/configuration/credentials.md.
 - **Settings has a Plugins section.** It lists the skill plugins installed on your server, with a card for each one that needs credentials, so you can enter them yourself. Until now a plugin's credentials could only be set from the command line or a settings plan.
 
 ### Changed

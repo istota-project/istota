@@ -106,6 +106,80 @@ The History action lists prior versions without their values. Restore and purge 
 
 On a multi-user deployment, the store requires effective sandboxing unless the operator sets `[security] allow_unsandboxed_multi_user_vaults = true` and restarts. The opt-in accepts same-uid cross-task access; it does not isolate users. `istota doctor --only security.credential_isolation` reports the policy.
 
+## Secret links
+
+A secret link lets you give Istota a password, API key or token you already hold without typing it into a chat. It is meant for people who talk to Istota from a phone, on WhatsApp or Talk, and rarely open the web UI. Ask Istota to store the secret, and it sends a link to your private chat. The link opens a small form on your Istota's own web address. You type the value there, and the form saves it straight to your credentials. The value never goes through the chat, the model, the task transcript or the memory index.
+
+Istota does not see the link either. The task runs `istota-credential request-link NAME --url URL`, adding `--username` when the site also needs a username. The daemon makes the link and sends it as its own message. The task gets back only the name, the host, the expiry and which surface the message went to. The message looks like this:
+
+> Enter the password for `example_mail` (mail.example.com) here: https://istota.example.com/istota/secret?token=...
+> It works once and expires at 14:15. I only send these when you ask for one.
+
+### The form
+
+The form shows the credential's name, the site it is used on, the account it is for and when the link expires. It asks for the password, and for a username when the link was made with `--username`. **Save** stores it; **Cancel this link** closes the link and stores nothing. You do not need to be signed in. If the browser is signed in to Istota as a different user, the page says the link belongs to another account and the link stays usable.
+
+Opening the link changes nothing. Chat apps fetch a link to show a preview, so only Save or Cancel uses it up. You can open it as often as you like until then.
+
+For a new name, Save creates a credential bound to the link's site and grants it to the conversation you asked from, so Istota can use it in your next message there. It shows up in Settings → Credentials like one you added yourself. For a name you already have, Save replaces the value, and the username when the form asks for one; leave the username empty to keep the stored one. The site, "Also used on", the allowed headers, "Tasks may read the secret" and the existing grants stay as they are. A credential imported from KeePass counts as one you have, so a link can replace its value. A generated credential or one from deployment configuration cannot be replaced this way.
+
+A value the store refuses, such as an empty one or one over 8 KiB, shows the reason beside the field and counts as a failed try. After five failed tries the link closes.
+
+### Limits on a link
+
+- A link works once: a save, a cancel or the fifth failed try uses it up.
+- It expires 15 minutes after it is made. `[secret_links] ttl_seconds` in the [configuration reference](reference.md#secret_links) changes that, from 1 minute to 60.
+- Asking for a new link for the same name cancels the earlier one.
+- You can have at most five unused links at once.
+- A link that expired, was used, was cancelled or was replaced opens one page saying it has expired or was already used. The page is the same in every case.
+- A link also stops working if your account is removed or disabled, or if the credential store stops accepting writes for you, between the moment it was sent and the save.
+
+### Where the link goes
+
+The link goes to one of your private rooms, never to a shared room. When you ask in a WhatsApp group, it goes to your own WhatsApp chat with Istota, and when you ask in a Talk room, to your private Talk room. Anywhere else, your one-to-one WhatsApp chat included, or when that room does not exist, it goes to the first private room you have, in this order: your default web room, your private Talk room, your WhatsApp chat. Istota tells you which one it used. The link never goes to SMS, email or the notification bell, so a user who has only SMS cannot get one. If you have no private room, Istota says so and sends nothing.
+
+### Every use is confirmed
+
+Each save, cancel or closed link sends you a notice in the bell and on the surfaces your notifications are routed to, WhatsApp and SMS included. A save reads "Credential example_mail saved" with the time. If you did not save it, delete the credential in Settings → Credentials, or tell Istota.
+
+### When Istota will not send a link
+
+Istota sends a link only in answer to your own message in a conversation. The refusal names the reason, and Istota passes it on instead of asking you to paste the secret:
+
+| Reason | Meaning |
+|---|---|
+| `not_owner_turn` | The task was not your own turn: a guest's message, mail somebody else wrote, or a task nobody asked for in a shared room |
+| `scheduled_turn` | The task was a scheduled job or briefing |
+| `incognito` | The conversation is an incognito room |
+| `vault_isolation` | The credential store is not accepting writes for you (see the multi-user rule under [Shared credentials](#shared-credentials)) |
+| `no_external_origin` | The deployment has no web address: `[site] hostname` is not set |
+| `bad_name` | The name breaks the naming rule: lowercase letters, digits and single underscores, starting with a letter, and not one of the reserved prefixes |
+| `not_local` | The name belongs to a generated or deployment credential |
+| `bad_url` | The site is not a hostname or an `https://` address with no path |
+| `no_private_room` | You have no private room to send the link to |
+| `too_many_links` | You already have five unused links |
+| `vault_write_limit` | The task has used up its credential writes |
+
+Istota's instructions mention secret links only on tasks where the command can work: your own turn in a conversation, not incognito, with a web address set and the credential store open to you.
+
+### Phishing
+
+A link that asks for a password is what a scammer would send. Istota keeps to a few rules so that its own links are easy to tell apart:
+
+- It sends a link only when you asked to give it a secret, in that conversation, a moment before. It never sends one unprompted, from a scheduled job or from mail somebody else wrote.
+- The link is always on your Istota's own address, the `[site] hostname` you open the web UI at, with no redirect.
+- The form names the account and the exact site the secret is for.
+
+If a message asks you to enter a password you did not just offer, do not use it. Check that the address in the link is your Istota's before you type anything.
+
+The risk that remains is the one every emailed sign-in link carries. Whoever opens a forwarded or leaked link before it expires can set that one credential, and nothing else. The notice tells you when that happens.
+
+### What the server does with the link
+
+The token is in the query string. On the stack, nginx keeps no access log for `/istota/secret` and the web process logs no access lines, and the log redactor removes query strings from any address that is logged. Log lines name the link's number and the credential's name, never the token, the value or the username. The pages are not cached, send no referrer, cannot be framed and ask search engines not to index them. Only a digest of each token is stored, and a link's record is deleted seven days after it expires.
+
+Two places can still show the link after it is sent. If you reply to or quote the link's message, the quote goes into Istota's next task with the rest of your message. And on iOS, a push alert for a message in a web room shows the start of that message on your lock screen. The quote stays inside your own conversation, and the push alert travels through Apple's push service like any other. Either way the link still works only once.
+
 ## Import and export
 
 Use **Import from KeePass** in Settings → Credentials. Choose a `.kdbx` file, enter its passphrase, and supply the source key file if it needs one. Preview groups entries as new, changed, unchanged, conflicting or skipped. New entries are selected by default; changed entries require an explicit choice so a stale file cannot silently replace newer values. Import replaces only selected credentials. Other credentials stay as they are, and replaced values enter history. The file, key file and passphrase are discarded after each request and cleared from the form on completion or cancellation.
