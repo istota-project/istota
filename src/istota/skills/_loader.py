@@ -34,6 +34,7 @@ from pathlib import Path
 from istota.lib.markdown_headings import demote_headings
 from istota.lib.skill_module import (
     PLUGIN_GROUP,
+    PLUGIN_SECRET_KEY_RE,
     PLUGIN_SERVICE_RE,
     bundled_skill_module,
     plugin_name_problem,
@@ -390,7 +391,7 @@ def _forbidden_env_spec(skill: str, fm: dict) -> bool:
             service, key = entry.get("service"), entry.get("key")
             if not isinstance(service, str) or PLUGIN_SERVICE_RE.fullmatch(service) is None:
                 return True
-            if not isinstance(key, str) or not key:
+            if not isinstance(key, str) or PLUGIN_SECRET_KEY_RE.fullmatch(key) is None:
                 return True
         if "sensitive" in entry and not isinstance(entry["sensitive"], bool):
             return True

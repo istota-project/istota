@@ -50,6 +50,11 @@ MODULE_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 #: list every service name the code stores under.
 PLUGIN_SERVICE_RE = re.compile(r"plugin_[a-z0-9_]+")
 
+#: A key under a plugin's secret service, held by the same two readers. The web
+#: writes a secret at `/settings/secrets/<service>/<key>`, where a `/` has no
+#: route and a `#` or `?` cuts the key short.
+PLUGIN_SECRET_KEY_RE = re.compile(r"[a-z0-9_]+")
+
 #: `rooms.scopes.SYNTHETIC_SCOPES`, `sandbox.user_scope.ROOM_NOTES_WITHHELD`,
 #: `user_profiles.CORRESPONDENT_REFUSED_SCOPES`, and `web`.
 RESERVED_SKILL_NAMES = frozenset({

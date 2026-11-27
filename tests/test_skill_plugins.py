@@ -415,10 +415,14 @@ class TestTheEnvSpecs:
         {"service": "vault"},
         {"service": "mail_account"},
         {"service": "example"},
+        {"key": "a/b"},
+        {"key": "token#x"},
+        {"key": "Token"},
+        {"key": ".."},
     ], ids=[
         "from_config", "from_template_file", "fallback_var", "proxy_only", "bundled_var",
         "another_prefix", "service_karakeep", "service_vault", "service_mail_account",
-        "service_unprefixed",
+        "service_unprefixed", "key_slash", "key_fragment", "key_uppercase", "key_dots",
     ])
     def test_a_forbidden_spec(self, tmp_path, plugin_builder, changes):
         p = plugin_builder.injected()
@@ -703,6 +707,24 @@ class TestTheSecretRegistry:
         assert is_plugin(index[p.skill])
         assert plugin_service_keys(index) == {"plugin_other": ("password",)}
         assert "mail_account" not in all_known_services(index)
+
+    def test_an_operator_entry_over_a_plugin_cannot_add_a_key_a_url_cannot_carry(
+        self, tmp_path, plugin_builder,
+    ):
+        """The web writes a secret at `/settings/secrets/<service>/<key>`, so a
+        key with a `/` has no route and one with a `#` writes another key."""
+        from istota.credentials.schema import known_service_keys, plugin_service_keys
+
+        p = plugin_builder.injected()
+        ops, bundled = _dirs(tmp_path)
+        _write_skill(ops, p.skill, {"description": "operator doc", "cli": True, "env": [
+            {"var": "OPS_A", "from": "secret", "service": "plugin_other", "key": "token"},
+            {"var": "OPS_B", "from": "secret", "service": "plugin_other", "key": "token#x"},
+            {"var": "OPS_C", "from": "secret", "service": "plugin_other", "key": "a/b"},
+        ]})
+        index = load_skill_index(ops, bundled, plugin_entry_points=[p.entry_point])
+        assert plugin_service_keys(index) == {"plugin_other": ("token",)}
+        assert known_service_keys(index)["plugin_other"] == frozenset({"token"})
 
     def test_a_non_plugin_entry_adds_nothing(self, tmp_path):
         from istota.credentials.schema import plugin_service_keys

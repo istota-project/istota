@@ -196,12 +196,14 @@ MODULE_SERVICE_SCHEMA: dict[str, dict[str, dict]] = {
 def plugin_service_keys(skill_index: dict) -> dict[str, tuple[str, ...]]:
     """The ``(service, keys)`` pairs a skill plugin's ``from: secret`` specs name.
 
-    Only entries ``is_plugin`` holds for, and only services matching
-    ``PLUGIN_SERVICE_RE``. The filter is here rather than left to the loader's
-    manifest check because an operator entry over a plugin is a plugin entry
-    too and its ``env:`` is not put through that check: without it a
-    ``config/skills/<plugin>/skill.md`` naming ``mail_account`` would make
-    that service writable (spec: external-skill-packages).
+    Only entries ``is_plugin`` holds for, only services matching
+    ``PLUGIN_SERVICE_RE`` and only keys matching ``PLUGIN_SECRET_KEY_RE``. The
+    filter is here rather than left to the loader's manifest check because an
+    operator entry over a plugin is a plugin entry too and its ``env:`` is not
+    put through that check: without it a ``config/skills/<plugin>/skill.md``
+    naming ``mail_account`` would make that service writable, and one naming a
+    key with a ``/`` or a ``#`` would list a field the web route cannot
+    address (spec: external-skill-packages).
 
     The imports are function-scoped: a caller with an index has already
     loaded the skills package, and a caller with none (the config-load path)
@@ -215,7 +217,7 @@ def plugin_service_keys(skill_index: dict) -> dict[str, tuple[str, ...]]:
 
 def _plugin_secret_specs(skill_index: dict) -> list[tuple]:
     """``(skill, meta, spec)`` for each secret spec `plugin_service_keys` admits."""
-    from istota.lib.skill_module import PLUGIN_SERVICE_RE
+    from istota.lib.skill_module import PLUGIN_SECRET_KEY_RE, PLUGIN_SERVICE_RE
     from istota.skills._types import is_plugin
 
     specs = []
@@ -223,9 +225,11 @@ def _plugin_secret_specs(skill_index: dict) -> list[tuple]:
         if not is_plugin(meta):
             continue
         for spec in meta.env_specs:
-            if spec.source != "secret" or not spec.key:
+            if spec.source != "secret":
                 continue
             if PLUGIN_SERVICE_RE.fullmatch(spec.service) is None:
+                continue
+            if PLUGIN_SECRET_KEY_RE.fullmatch(spec.key) is None:
                 continue
             specs.append((name, meta, spec))
     return specs
@@ -237,8 +241,10 @@ def plugin_service_schemas(skill_index: dict) -> dict[str, dict]:
     A manifest carries no display text, so the card is titled by the service
     name and each field by its key, the names ``istota secret ensure`` takes.
     A key is ``plain`` (its stored value is shown to its owner) only when no
-    spec reading it is ``sensitive``: such a value is already in the model's
-    environment, so it is a setting. Any other key is a write-only credential.
+    spec reading it is ``sensitive``: the manifest does not ask for such a
+    value to be kept from the model, whose environment holds it whenever the
+    skill is authorized, so it is a setting. Any other key is a write-only
+    credential.
     No ``key_rule``: the declared keys are all.
     """
     used_by: dict[str, set[str]] = {}

@@ -214,6 +214,7 @@ So a limited scheduled job needs its owner to approve `skill:<name>` before it c
 - **`from:` is `secret`, `setup_env` or `user_id`.** Not `config`, which reads any configuration value, and not `template_file`.
 - **The only fields are `var`, `from`, `service`, `key`, `sensitive` and `when`.** Not `fallback_var`, which copies a variable from the daemon's environment, and not `proxy_only`, which hands a value to every skill CLI.
 - **Every secret service is `plugin_…`**: `plugin_example`, never `example` or a built-in service such as `karakeep`, `vault` or `mail_account`.
+- **Every secret key is lowercase letters, digits and underscores**: `token`, `api_key`, never `apiKey` or `client-id`. The key is part of the address the web UI writes a secret at.
 
 ```yaml
 env: [{"var":"PLUGIN_EXAMPLE_TOKEN","from":"secret","service":"plugin_example","key":"token","sensitive":true}]
@@ -223,7 +224,7 @@ A `setup_env(ctx)` hook may return only the variables its manifest declares with
 
 A plugin's secret is an ordinary row in the `secrets` table, written with `istota secret ensure -u alice --service plugin_example --key token --value-stdin`, or by an `istota apply` plan with the value in its sidecar ([Declarative settings](../configuration/declarative-settings.md)). Both accept a `plugin_*` service and key only while the plugin is loaded, so on the stack sync the plugin before a plan provisions its secret.
 
-A user can also enter their own in the web UI. Settings, Connections shows one card per `plugin_*` service, to each user who can use the plugin's skill (an `admin_only` plugin's card shows to admins only). The manifest has no display text, so the card is titled by the service name and each field by its key. An entry marked `"sensitive": true` is a write-only field: the stored value is never sent back to the browser. An entry without it is shown with its stored value, like a server URL, because such a value is already in the model's environment. Mark every credential `sensitive`.
+A user can also enter their own in the web UI. Settings, Connections shows one card per `plugin_*` service, to each user who can use the plugin's skill (an `admin_only` plugin's card shows to admins only). The manifest has no display text, so the card is titled by the service name and each field by its key. An entry marked `"sensitive": true` is a write-only field: the stored value is never sent back to the browser. An entry without it is shown with its stored value, like a server URL: the manifest does not ask for that value to be kept from the model, and the model's environment holds it whenever the skill is in use. Mark every credential `sensitive`.
 
 An operator's `config/skills/<name>/skill.md` over a plugin replaces its documentation and metadata. The skill still runs the plugin's package, every rule in the next section still applies, and the operator file's `env:` is not held to the allowlist above, since `config/` is the operator's file.
 
