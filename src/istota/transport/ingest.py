@@ -809,6 +809,14 @@ def record_inbound(
         # each participant's web room list (ISSUE-134), and their own next
         # message un-hides a room they hid. A guest is neither: membership is
         # what makes an istota user a principal.
+        if user_author and author is not None and author.surface_ref:
+            # A guest whose ref now maps to this user is already reading the
+            # room: bind the present row first, so the membership below finds
+            # them in the audience rather than opening a second epoch.
+            db.bind_room_participant_user(
+                conn, room_token, surface=surface,
+                surface_ref=author.surface_ref, user_id=author.user_id,
+            )
         if user_author and not db.note_member_turn(conn, room_token, user_id):
             # A group-owned room the sender's group membership no longer
             # admits: a stale handle does not speak, and does not rejoin.

@@ -5562,6 +5562,12 @@ def upsert_room_participant(
         "AND surface_ref = ? AND left_at IS NULL",
         (room_token, surface, surface_ref),
     ).fetchone()
+    if previous is not None and previous["user_id"] is None and user_id:
+        bind_room_participant_user(
+            conn, room_token, surface=surface, surface_ref=surface_ref,
+            user_id=user_id,
+        )
+        previous = {"kind": previous["kind"], "user_id": user_id}
     joining = kind != "agent" and previous is None
     audience = audience_persons(conn, room_token) if joining else set()
     row = conn.execute(
@@ -5586,6 +5592,38 @@ def upsert_room_participant(
             reason=f"{surface}_join", acknowledged=acknowledged,
         )
     return int(row[0])
+
+
+def bind_room_participant_user(
+    conn: sqlite3.Connection,
+    room_token: str,
+    *,
+    surface: str,
+    surface_ref: str,
+    user_id: str,
+) -> bool:
+    """A present participant nobody had mapped is now `user_id`; True if so.
+
+    The audience spells them `u:<user>` from here on instead of
+    `<surface>:<ref>`, so any epoch they started is respelled with them: left
+    behind, it would match nobody and the turns from before they joined would
+    come back to the front stage while they read it (ISSUE-995). Only a row
+    with no `user_id` is bound, so an existing mapping is never replaced.
+    """
+    bound = conn.execute(
+        "UPDATE room_participants SET user_id = ? "
+        "WHERE room_token = ? AND surface = ? AND surface_ref = ? "
+        "AND left_at IS NULL AND user_id IS NULL",
+        (user_id, room_token, surface, surface_ref),
+    ).rowcount
+    if not bound:
+        return False
+    conn.execute(
+        "UPDATE room_epochs SET person = ? WHERE room_token = ? AND person = ?",
+        (f"u:{user_id}", room_token, f"{surface}:{surface_ref}"),
+    )
+    _invalidate_room_location_shares(conn, room_token)
+    return True
 
 
 def sync_room_roster(
