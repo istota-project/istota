@@ -4785,6 +4785,30 @@ def task_is_tool_less(task: db.Task) -> bool:
     return task.source_type == "briefing"
 
 
+def secret_links_offered(config: Config, task: db.Task, *, restricted: bool) -> bool:
+    """Whether the prompt tells the model to send a secret link.
+
+    Not gated on the user already having credentials: the user who most needs a
+    link has none yet. Gated on the conditions the proxy's `vault_link_request`
+    would refuse on from config and the task alone (the shim, a restricted
+    turn, a scheduled run, incognito, vault isolation, no web origin), so the
+    line never names a verb that can only refuse. The proxy is still the gate.
+    """
+    from istota.webui.origin import external_origin
+
+    if not config.security.skill_proxy_enabled or restricted:
+        return False
+    if _is_automated_task(task) or task.incognito:
+        return False
+    if secrets_vault.vault_isolation_refusal(config, task.user_id):
+        return False
+    try:
+        external_origin(config)
+    except ValueError:
+        return False
+    return True
+
+
 def build_allowed_tools(
     is_admin: bool,
     skill_names: list[str],
@@ -7740,6 +7764,7 @@ def build_prompt(
     effective_prompt: str | None = None,
     attachment_status: "dict[str, str] | None" = None,
     shared_credentials: bool = False,
+    secret_links: bool = False,
     withheld_scopes: "frozenset[str] | set[str] | None" = None,
     reach: "Reach | None" = None,
     group_memory: str | None = None,
@@ -8383,6 +8408,22 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
                 "name that does not exist counts each time."
             )
 
+    # The example name uses underscores because `local._check_name` refuses a
+    # hyphen. The line names no host and no user: nothing here is a scalar.
+    secret_link_line = ""
+    if secret_links:
+        secret_link_line = (
+            "\n- Secret links: when the user wants to give you a password, API key or "
+            "token, run `istota-credential request-link NAME --url URL`, adding "
+            "`--username` when the site also needs one. NAME is lowercase letters, "
+            "digits and single underscores, starting with a letter (`fastmail_app`); "
+            "URL is the site's hostname or https address with no path. The link goes "
+            "to the user's private chat and works once; you never see it or the "
+            "value, so tell them it is on its way. Once saved, the name appears in "
+            "`istota-credential list`. Never ask the user to paste a secret in chat, "
+            "and if the command refuses, tell them why in plain words instead."
+        )
+
     # A linked turn (ISSUE-608): the header
     # says which room it is about and that nothing written here reaches it;
     # that room's transcript goes in the user half, fenced, since every line
@@ -8425,7 +8466,7 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
 You have access to:
 {file_tools}{browser_tool}{web_tools}{bash_tool}
 {cli_skills_section}{db_tool_line}
-- Email: two commands exist — `istota-skill email send` sends immediately via SMTP, `istota-skill email output` writes a deferred reply file. Use `send` when the user asks you to email someone (this is the common case). Only use `output` when this task arrived as an incoming email (Source: email) and you are composing the reply. See the email skill for details.{shared_credentials_line}
+- Email: two commands exist — `istota-skill email send` sends immediately via SMTP, `istota-skill email output` writes a deferred reply file. Use `send` when the user asks you to email someone (this is the common case). Only use `output` when this task arrived as an incoming email (Source: email) and you are composing the reply. See the email skill for details.{shared_credentials_line}{secret_link_line}
 
 """
 
@@ -9608,6 +9649,7 @@ def execute_task(
             and not _reach.restricted
             and secrets_vault.has_shared_credentials(config.db_path, task.user_id)
         ),
+        secret_links=secret_links_offered(config, task, restricted=_reach.restricted),
         assignment_prompt=wake_start.prompt if wake_start is not None else None,
     )
 
