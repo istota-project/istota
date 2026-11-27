@@ -1923,6 +1923,45 @@ class TestSecretLink:
         (request,) = sent
         assert token in request.text and GROUP_JID not in str(request)
 
+    def test_from_the_users_own_whatsapp_chat_it_answers_there_not_in_web(self, config, sent):
+        # A web room exists too, which `private_room_for` would rank first.
+        with db.get_db(config.db_path) as conn:
+            web = _web_room(conn)
+            phone = _phone_room(conn)
+            ident = _running(conn, "alice", phone, source_type="whatsapp")
+        token, _, result = _secret_link(config, ident, phone)
+        assert result["delivered_to"] == "whatsapp"
+        _drain(config)
+        (request,) = sent
+        assert token in request.text
+        (row,) = _rows(config, "SELECT room_token FROM messages WHERE body LIKE ?", (f"%{token}%",))
+        assert row["room_token"] == phone != web
+
+    def test_from_the_users_own_talk_room_it_answers_there_not_in_web(self, config, talk):
+        with db.get_db(config.db_path) as conn:
+            web = _web_room(conn)
+            mine = plain_talk_room(conn, "alice", name="talk")
+            ident = _running(conn, "alice", mine.canonical, source_type="talk")
+        token, _, result = _secret_link(config, ident, mine.canonical)
+        assert result["delivered_to"] == "talk"
+        _drain(config)
+        (send,) = talk["client"].calls_to(mine.talk_ref, method="send_message")
+        assert token in send.args["message"]
+        (row,) = _rows(config, "SELECT room_token FROM messages WHERE body LIKE ?", (f"%{token}%",))
+        assert row["room_token"] == mine.canonical != web
+
+    def test_from_the_users_own_sms_room_it_goes_to_another_private_room(self, config):
+        # SMS is not a private-reply surface; the link falls back as for a shared room.
+        with db.get_db(config.db_path) as conn:
+            web = _web_room(conn)
+            sms = _phone_room(conn, surface="sms")
+            ident = _running(conn, "alice", sms, source_type="sms")
+        token, _, result = _secret_link(config, ident, sms)
+        assert result["delivered_to"] == "web"
+        _drain(config)
+        (row,) = _rows(config, "SELECT room_token FROM messages WHERE body LIKE ?", (f"%{token}%",))
+        assert row["room_token"] == web
+
     def test_with_no_private_room_nothing_is_queued(self, config):
         from istota.relay.requests import RequestError
 

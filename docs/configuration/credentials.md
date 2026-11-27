@@ -136,7 +136,7 @@ A value the store refuses, such as an empty one or one over 8 KiB, shows the rea
 
 ### Where the link goes
 
-The link goes to one of your private rooms, never to a shared room. When you ask in a WhatsApp group, it goes to your own WhatsApp chat with Istota, and when you ask in a Talk room, to your private Talk room. Anywhere else, your one-to-one WhatsApp chat included, or when that room does not exist, it goes to the first private room you have, in this order: your default web room, your private Talk room, your WhatsApp chat. Istota tells you which one it used. The link never goes to SMS, email or the notification bell, so a user who has only SMS cannot get one. If you have no private room, Istota says so and sends nothing.
+The link goes to one of your private rooms, never to a shared room. When you ask in a private room of your own (your one-to-one WhatsApp chat with Istota, your private Talk room or a web room only you are in), the link comes back to that room. When you ask in a WhatsApp group, it goes to your own WhatsApp chat with Istota, and when you ask in a shared Talk room, to your private Talk room. Anywhere else, or when that room does not exist, it goes to the first private room you have, in this order: your default web room, your private Talk room, your WhatsApp chat. Istota tells you which one it used. The link never goes to SMS, email or the notification bell, so a user who has only SMS cannot get one. If you have no private room, Istota says so and sends nothing.
 
 ### Every use is confirmed
 

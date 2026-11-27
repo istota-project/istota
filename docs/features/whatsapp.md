@@ -254,7 +254,7 @@ Questions to another user of the installation, which can travel over WhatsApp am
 
 ## Giving Istota a password
 
-Do not paste a password, API key or token into a WhatsApp chat: the message passes through WhatsApp's servers and lands in Istota's history. Ask Istota to store it instead, and it sends you a one-use link to a form on your Istota's own web address, where you type the value. Asked in a WhatsApp group, the link comes to your own WhatsApp chat with Istota, never to the group. Asked in your one-to-one chat, it goes to your default web room or your private Talk room if you have either, and to this chat otherwise. Each use of a link is confirmed with a notice, which comes here when your notifications are routed to WhatsApp. How the links work, what they refuse and how to tell one from a phishing message are in [Secret links](../configuration/credentials.md#secret-links).
+Do not paste a password, API key or token into a WhatsApp chat: the message passes through WhatsApp's servers and lands in Istota's history. Ask Istota to store it instead, and it sends you a one-use link to a form on your Istota's own web address, where you type the value. Asked in a WhatsApp group, the link comes to your own WhatsApp chat with Istota, never to the group. Asked in your one-to-one chat, it comes back to this chat. Each use of a link is confirmed with a notice, which comes here when your notifications are routed to WhatsApp. How the links work, what they refuse and how to tell one from a phishing message are in [Secret links](../configuration/credentials.md#secret-links).
 
 ## The 24-hour service window (Cloud only)
 

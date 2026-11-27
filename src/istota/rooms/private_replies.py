@@ -673,7 +673,9 @@ def deliver_private(conn, config, *, user_id: str, about_token: str, kind: str,
     delivery_reference = f"private-{kind}:{reference}"
     try:
         dest = _existing(conn, delivery_reference, user_id)
-        if dest is None:
+        if dest is None and kind == "secret_link":
+            dest = _secret_link_destination(conn, config, user_id, about)
+        elif dest is None:
             dest = private_room_for(conn, config, user_id, about)
     except _Taken:
         logger.warning("private %s %s: reference already used in another room; using the bell",
@@ -1340,12 +1342,36 @@ def enqueue_whisper(conn, config, *, actor_user_id: str, task_id: int,
 SECRET_LINK_KEY_PREFIX = "secret-link-"
 
 
+def _secret_link_destination(conn, config, user_id: str, about: str) -> PrivateDestination | None:
+    """The room a secret link asked for in ``about`` reaches ``user_id`` in.
+
+    The asking room itself when it is one of the user's own private rooms on a
+    surface a note can reach, so a link asked for in a 1:1 WhatsApp chat
+    answers there rather than in a web room a chat-only user never opens.
+    Otherwise `private_room_for`, as for a note about a shared room.
+    """
+    from istota.transport.routing import phone_room
+
+    if about:
+        phone = phone_room(conn, about)
+        if phone is None:
+            talk = db.get_room_binding(conn, about, "talk") is not None
+            dest = _checked(conn, about, user_id, surface="talk" if talk else "web")
+            if dest is not None and (dest.talk_ref or not talk):
+                return dest
+        elif phone.surface == "whatsapp" and not phone.group:
+            dest = _checked(conn, about, user_id, surface="whatsapp", allow_phone=True)
+            if dest is not None:
+                return dest
+    return private_room_for(conn, config, user_id, about)
+
+
 def secret_link_room(conn, config, task) -> tuple[str, PrivateDestination | None]:
     """``(about, destination)`` for a secret link asked for in ``task``: the
-    task's canonical room, and its user's private room for it, or None."""
+    task's canonical room, and the private room the link goes to, or None."""
     own = task.conversation_token or ""
     about = (canonical_token(conn, own) or own) if own else ""
-    return about, private_room_for(conn, config, task.user_id, about)
+    return about, _secret_link_destination(conn, config, task.user_id, about)
 
 
 def enqueue_secret_link(conn, config, *, actor_user_id: str, task_id: int,
