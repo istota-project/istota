@@ -652,8 +652,9 @@ def _plan_secrets(config, declarations, values):
 class TestTheSecretRegistry:
     """A plugin's `from: secret` services join the writable registry (Stage 3).
 
-    Only when a caller hands the three schema functions an index: with none,
-    which is how the web settings routes call them, the registry is today's.
+    Only when a caller hands the three schema functions an index: with none
+    the registry is the static one. The web settings routes pass the signed-in
+    user's skills (`tests/test_web_plugin_secrets.py`).
     """
 
     def test_plugin_service_keys_returns_the_plugins_pair(self, tmp_path, plugin_builder):

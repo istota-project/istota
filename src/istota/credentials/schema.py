@@ -20,8 +20,10 @@ There are two flavors:
 A skill plugin's ``plugin_*`` services are a third, dynamic set: a caller
 holding a skill index passes it to `all_known_services`, `known_service_keys`
 or `service_accepts_key` and they are added (`plugin_service_keys`). The
-``istota secret`` CLI and the settings plan do; the web settings routes do
-not, so a plugin's service has no settings card in v1.
+``istota secret`` CLI and the settings plan pass the whole index. The web
+settings routes pass the skills the signed-in user can use, so a plugin's
+service has a card on ``/istota/settings/connections`` for those users and is
+unknown to the rest.
 
 A field marked ``plain: True`` is a setting stored beside the credentials
 rather than a credential (ntfy's server URL and topic). The settings UI
@@ -202,14 +204,22 @@ def plugin_service_keys(skill_index: dict) -> dict[str, tuple[str, ...]]:
     that service writable (spec: external-skill-packages).
 
     The imports are function-scoped: a caller with an index has already
-    loaded the skills package, and the callers with none (the web settings
-    routes, the config-load path) must not.
+    loaded the skills package, and a caller with none (the config-load path)
+    must not.
     """
+    pairs: dict[str, set[str]] = {}
+    for _, _, spec in _plugin_secret_specs(skill_index):
+        pairs.setdefault(spec.service, set()).add(spec.key)
+    return {service: tuple(sorted(keys)) for service, keys in sorted(pairs.items())}
+
+
+def _plugin_secret_specs(skill_index: dict) -> list[tuple]:
+    """``(skill, meta, spec)`` for each secret spec `plugin_service_keys` admits."""
     from istota.lib.skill_module import PLUGIN_SERVICE_RE
     from istota.skills._types import is_plugin
 
-    pairs: dict[str, set[str]] = {}
-    for meta in skill_index.values():
+    specs = []
+    for name, meta in skill_index.items():
         if not is_plugin(meta):
             continue
         for spec in meta.env_specs:
@@ -217,30 +227,46 @@ def plugin_service_keys(skill_index: dict) -> dict[str, tuple[str, ...]]:
                 continue
             if PLUGIN_SERVICE_RE.fullmatch(spec.service) is None:
                 continue
-            pairs.setdefault(spec.service, set()).add(spec.key)
-    return {service: tuple(sorted(keys)) for service, keys in sorted(pairs.items())}
+            specs.append((name, meta, spec))
+    return specs
 
 
-def _plugin_service_schemas(skill_index: dict) -> dict[str, dict]:
-    """A minimal registry entry per plugin service, in the static entries' shape.
+def plugin_service_schemas(skill_index: dict) -> dict[str, dict]:
+    """A registry entry per plugin service, in the static entries' shape.
 
-    ``cli_only``: v1 has no settings card for a plugin, and the web routes
-    never pass an index anyway. No ``key_rule``: the declared keys are all.
+    A manifest carries no display text, so the card is titled by the service
+    name and each field by its key, the names ``istota secret ensure`` takes.
+    A key is ``plain`` (its stored value is shown to its owner) only when no
+    spec reading it is ``sensitive``: such a value is already in the model's
+    environment, so it is a setting. Any other key is a write-only credential.
+    No ``key_rule``: the declared keys are all.
     """
     used_by: dict[str, set[str]] = {}
-    for name, meta in skill_index.items():
-        for spec in meta.env_specs:
-            if spec.source == "secret":
-                used_by.setdefault(spec.service, set()).add(name)
-    return {
-        service: {
+    dists: dict[str, set[str]] = {}
+    sensitive: set[tuple[str, str]] = set()
+    for name, meta, spec in _plugin_secret_specs(skill_index):
+        used_by.setdefault(spec.service, set()).add(name)
+        if meta.plugin_dist:
+            dists.setdefault(spec.service, set()).add(meta.plugin_dist)
+        if spec.sensitive:
+            sensitive.add((spec.service, spec.key))
+    schemas: dict[str, dict] = {}
+    for service, keys in plugin_service_keys(skill_index).items():
+        fields = []
+        for key in keys:
+            if (service, key) in sensitive:
+                fields.append({"key": key, "label": key, "type": "password"})
+            else:
+                fields.append({"key": key, "label": key, "type": "text", "plain": True})
+        named = ", ".join(sorted(dists.get(service, ())))
+        schemas[service] = {
             "label": service,
             "used_by": tuple(sorted(used_by.get(service, ()))),
-            "cli_only": True,
-            "fields": [{"key": key, "label": key, "type": "password"} for key in keys],
+            "hint": f"Credentials for a skill plugin ({named})." if named
+            else "Credentials for a skill plugin.",
+            "fields": fields,
         }
-        for service, keys in plugin_service_keys(skill_index).items()
-    }
+    return schemas
 
 
 def all_known_services(skill_index: dict | None = None) -> dict[str, dict]:
@@ -250,15 +276,14 @@ def all_known_services(skill_index: dict | None = None) -> dict[str, dict]:
     ``Config.is_module_enabled`` at request time, not by the schema.
 
     With ``skill_index``, each skill plugin's secret services are added
-    (`plugin_service_keys`). With none, the static registry alone, which is
-    what the web settings routes ask for.
+    (`plugin_service_keys`). With none, the static registry alone.
     """
     out: dict[str, dict] = dict(CONNECTED_SERVICE_SCHEMA)
     for mod_services in MODULE_SERVICE_SCHEMA.values():
         for service, schema in mod_services.items():
             out[service] = schema
     if skill_index is not None:
-        for service, schema in _plugin_service_schemas(skill_index).items():
+        for service, schema in plugin_service_schemas(skill_index).items():
             out.setdefault(service, schema)
     return out
 

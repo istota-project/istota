@@ -16200,6 +16200,7 @@ from istota.credentials.schema import (
     CONNECTED_SERVICE_SCHEMA as _CONNECTED_SERVICE_SCHEMA,
     MODULE_SERVICE_SCHEMA as _MODULE_SERVICE_SCHEMA,
     all_known_services as _all_known_services,
+    plugin_service_schemas as _plugin_service_schemas,
 )
 
 
@@ -16279,7 +16280,8 @@ def _build_service_card(
 async def settings_services(user: dict = Depends(_require_api_auth)) -> dict:
     """Connected services for the current user.
 
-    Returns only services in ``_CONNECTED_SERVICE_SCHEMA`` — module-specific
+    Returns the services in ``_CONNECTED_SERVICE_SCHEMA``, then one card per
+    secret service of a skill plugin the user can use. Module-specific
     services live on their per-module settings pages and are reachable via
     ``/settings/module-services/{module}``.
     """
@@ -16305,6 +16307,12 @@ async def settings_services(user: dict = Depends(_require_api_auth)) -> dict:
         cards.append(
             _build_service_card(service, schema, stored, username=username, extra=extra)
         )
+    plugin_index = await asyncio.to_thread(_user_skill_index, _config, username)
+    static = _all_known_services()
+    for service, schema in _plugin_service_schemas(plugin_index).items():
+        if service in static:
+            continue
+        cards.append(_build_service_card(service, schema, stored, username=username))
     return {"services": cards}
 
 
@@ -18097,15 +18105,39 @@ async def settings_modules(user: dict = Depends(_require_api_auth)) -> dict:
     }
 
 
-def _settings_skill_options(config, user_id: str) -> list[str]:
+def _user_skill_index(config, user_id: str) -> dict:
+    """The skills this user's tasks can load, by name, sorted.
+
+    The user's own disabled skills stay in. Empty when the index cannot be
+    read, so a page that needs it shows nothing rather than failing.
+    """
     from istota.skills._loader import load_skill_index, user_skill_names
 
     try:
         index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
-        return user_skill_names(config, user_id, index, count_user_disabled=False)
+        names = user_skill_names(config, user_id, index, count_user_disabled=False)
+        return {name: index[name] for name in names}
     except Exception:
         logger.warning("settings: skill index unavailable", exc_info=True)
-        return []
+        return {}
+
+
+def _settings_skill_options(config, user_id: str) -> list[str]:
+    return list(_user_skill_index(config, user_id))
+
+
+async def _secret_route_index(service: str, user_id: str) -> dict | None:
+    """The skill index a secret write for ``service`` is judged against.
+
+    None for anything but a ``plugin_*`` name, which the static registry
+    decides alone. For one, the skills this user can use: a plugin's service
+    is writable by the users that plugin is loaded for, and a 404 for the rest.
+    """
+    from istota.lib.skill_module import PLUGIN_SERVICE_RE
+
+    if not _config or PLUGIN_SERVICE_RE.fullmatch(service) is None:
+        return None
+    return await asyncio.to_thread(_user_skill_index, _config, user_id)
 
 
 @api_router.get("/settings/module-services/{module}")
@@ -18166,12 +18198,13 @@ async def settings_set_secret(
     from istota.credentials import store as secrets_store
     from fastapi import HTTPException
 
-    schema = _all_known_services().get(service)
+    skill_index = await _secret_route_index(service, user["username"])
+    schema = _all_known_services(skill_index).get(service)
     if not schema:
         raise HTTPException(status_code=404, detail=f"Unknown service: {service}")
     from istota.credentials.schema import service_accepts_key
 
-    if not service_accepts_key(service, key):
+    if not service_accepts_key(service, key, skill_index):
         raise HTTPException(
             status_code=400,
             detail=f"Unknown key '{key}' for service '{service}'",
@@ -18362,7 +18395,8 @@ async def settings_delete_secret(
     from istota.credentials import store as secrets_store
     from fastapi import HTTPException
 
-    schema = _all_known_services().get(service)
+    skill_index = await _secret_route_index(service, user["username"])
+    schema = _all_known_services(skill_index).get(service)
     if not schema:
         raise HTTPException(status_code=404, detail=f"Unknown service: {service}")
     valid_keys = {f["key"] for f in schema["fields"]}

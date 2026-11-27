@@ -333,7 +333,7 @@ istota-stack plugins sync
 istota doctor --only skills.plugins
 ```
 
-To remove one, delete its wheel from `plugins/src/` and run `istota-stack plugins sync` again. To upgrade one, replace the wheel and sync. A plugin's secrets are written with `istota secret ensure` or an `istota apply` plan once it is synced ([External skill packages](../development/adding-skills.md#what-the-manifest-may-say)).
+To remove one, delete its wheel from `plugins/src/` and run `istota-stack plugins sync` again. To upgrade one, replace the wheel and sync. A plugin's secrets are written with `istota secret ensure`, an `istota apply` plan, or by each user under Settings, Connections, once it is synced ([External skill packages](../development/adding-skills.md#what-the-manifest-may-say)).
 
 `istota-stack plugins sync [--force] [--no-restart]` takes the stack lock and:
 

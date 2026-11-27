@@ -48,6 +48,41 @@ it('shows a failed first load in the card', async () => {
   );
 });
 
+it("draws a skill plugin's secret service as a card", async () => {
+  api.getMailAccounts.mockRejectedValue(Object.assign(new Error('Not found'), { status: 404 }));
+  api.getSettingsServices.mockResolvedValue({
+    services: [
+      {
+        service: 'plugin_example',
+        label: 'plugin_example',
+        status: 'configured',
+        fields: [
+          { key: 'token', label: 'token', type: 'password' },
+          { key: 'url', label: 'url', type: 'text', plain: true },
+        ],
+        configured_keys: ['token', 'url'],
+        values: { url: 'https://example.com' },
+        last_updated: null,
+        used_by: ['example'],
+        hint: 'Credentials for a skill plugin (example-plugin 0.1.0).',
+        oauth: false,
+        custom_ui: false,
+      },
+    ],
+  });
+  render(Harness);
+
+  expect(await screen.findByRole('heading', { name: 'plugin_example' })).toBeInTheDocument();
+  expect(screen.getByText('Credentials for a skill plugin (example-plugin 0.1.0).')).toBeVisible();
+  expect(screen.getByText('Configured')).toBeInTheDocument();
+  // The stored token is never sent back, so its field starts empty; the plain
+  // field shows what is stored.
+  expect((screen.getByLabelText('token') as HTMLInputElement).value).toBe('');
+  expect((screen.getByLabelText('url') as HTMLInputElement).value).toBe('https://example.com');
+  expect(screen.getAllByTitle('Clear stored value').length).toBe(2);
+  expect(screen.queryByText(/No connected services are available/)).toBeNull();
+});
+
 it('ends an expired session', async () => {
   api.getMailAccounts.mockRejectedValue(new AuthError());
   const expireSession = vi.fn();
