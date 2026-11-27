@@ -22,7 +22,7 @@ It replaces the socket client ``skills/developer.setup_env`` used to generate.
 With the broker enabled, developer credential helpers use placeholders. The
 legacy ``env`` verb still uses the same public socket and reveal policy.
 
-Nine verbs::
+Ten verbs::
 
     istota-credential list                       # shared credential names
     istota-credential placeholder <name>         # inert auth-header text
@@ -33,6 +33,13 @@ Nine verbs::
     istota-credential new <slug> [options]        # generate and store a credential
     istota-credential otp-set <name>              # enrollment seed on stdin
     istota-credential recovery-set <name>         # recovery codes on stdin
+    istota-credential request-link <name> --url URL [--username]
+                                                  # the user types it into a link
+
+``request-link`` asks the proxy to send the user a one-use link to a form where
+they enter the credential themselves. The proxy delivers the link to their
+private room; this program and the model get back only the name, the host,
+the expiry and the surface it went to.
 
 ``placeholder`` is the broker path: the value is added outside the sandbox.
 ``get`` and both forms of ``run`` ask for a value and, under reveal enforcement,
@@ -142,6 +149,7 @@ USAGE = (
     "  istota-credential otp-set NAME  # read enrollment secret from stdin\n"
     "  istota-credential recovery-set NAME [--format codes|phrase|block]  # read stdin\n"
     "  istota-credential new SLUG [--username USER] [--url URL] [--length N] [--no-symbols]\n"
+    "  istota-credential request-link NAME --url URL [--username]\n"
 )
 
 
@@ -461,6 +469,36 @@ def _cmd_new(args: list[str]) -> int:
     return 0
 
 
+_LINK_FIELDS = ("name", "host", "expires_at", "delivered_to")
+
+
+def _cmd_request_link(args: list[str]) -> int:
+    if not args or args[0].startswith("--"):
+        print(USAGE, file=sys.stderr)
+        return EXIT_REFUSED
+    payload: dict = {"type": "vault_link_request", "name": args[0], "username": False}
+    index = 1
+    while index < len(args):
+        flag = args[index]
+        if flag == "--username":
+            payload["username"] = True
+            index += 1
+        elif flag == "--url" and index + 1 < len(args):
+            payload["url"] = args[index + 1]
+            index += 2
+        else:
+            print(USAGE, file=sys.stderr)
+            return EXIT_REFUSED
+    if "url" not in payload:
+        print(USAGE, file=sys.stderr)
+        return EXIT_REFUSED
+    reply = _request(payload, timeout=CREATE_TIMEOUT_SECONDS)
+    if not all(isinstance(reply.get(field), str) for field in _LINK_FIELDS):
+        raise ProxyError("the credential proxy answered unparseably")
+    print(json.dumps({field: reply[field] for field in _LINK_FIELDS}))
+    return 0
+
+
 def _cmd_otp_set(args: list[str]) -> int:
     if len(args) != 1:
         print(USAGE, file=sys.stderr)
@@ -674,6 +712,7 @@ def main(argv: list[str] | None = None) -> int:
         "new": lambda: _cmd_new(rest),
         "otp-set": lambda: _cmd_otp_set(rest),
         "recovery-set": lambda: _cmd_recovery_set(rest),
+        "request-link": lambda: _cmd_request_link(rest),
     }
     handler = handlers.get(verb)
     if handler is None:
