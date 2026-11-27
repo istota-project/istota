@@ -312,20 +312,7 @@ What each devbox gets, and nothing else:
 
 ## Skill plugins
 
-A skill plugin is a skill packaged as its own wheel, outside this repository; [External skill packages](../development/adding-skills.md#external-skill-packages) has the package contract and what a plugin can reach. Plugins live beside the image, never in it, so they need no build and survive `update` and `rollback` with no step of their own. A plugin is not sandboxed and can read whatever the daemon can, so put a wheel here only if you would run its code as the daemon.
-
-`provision.sh` makes the layout:
-
-| Path | Owner, mode | What it holds |
-|---|---|---|
-| `/srv/app/istota/plugins/` | root, 0755 | the two below and `.synced` |
-| `plugins/src/` | root, 0755 | the wheels, which you copy in as root |
-| `plugins/installed/` | uid 10001, 0755 | `site/`, the installed tree, written only by `plugins sync` |
-| `plugins/.synced` | root, 0644 | the digest of the wheels `site/` was built from |
-
-`istota-stack` binds `plugins/` read-only at `/app/plugins` into `daemon` and `web` alone (`docker/docker-compose.plugins.yml`), when `plugins/installed` exists and the release has that file. No task's sandbox binds it. A VM provisioned before this release gets the layout from the update that installs it, which runs `provision.sh`.
-
-To add a plugin, copy its wheel in and sync:
+A skill plugin is a skill packaged as its own wheel, outside this repository. Plugins live beside the image in `/srv/app/istota/plugins/`, never in it, so they need no build and survive `update` and `rollback` with no step of their own. A plugin is not sandboxed and can read whatever the daemon can, so put a wheel there only if you would run its code as the daemon.
 
 ```bash
 install -m 0644 -o root -g root example_plugin-0.1.0-py3-none-any.whl /srv/app/istota/plugins/src/
@@ -333,32 +320,7 @@ istota-stack plugins sync
 istota doctor --only skills.plugins
 ```
 
-To remove one, delete its wheel from `plugins/src/` and run `istota-stack plugins sync` again. To upgrade one, replace the wheel and sync. A plugin's secrets are written with `istota secret ensure`, an `istota apply` plan, or by each user under Settings, Plugins, once it is synced ([External skill packages](../development/adding-skills.md#what-the-manifest-may-say)).
-
-`istota-stack plugins sync [--force] [--no-restart]` takes the stack lock and:
-
-1. Refuses, before any container starts, unless every entry in `plugins/src/` is a regular file named like a wheel (`NAME-VERSION-TAGS.whl`, of letters, digits and `_.!+-`, starting with a letter or a digit), owned by root and writable by root alone, and `plugins/` and `plugins/src/` are root's and writable by no one else. It also refuses when the layout is missing (run `provision.sh`) or the deployed release has no plugins overlay (update first).
-2. Hashes the wheels. When nothing changed since the last sync it prints `unchanged` and exits 0, unless `--force` is given.
-3. Installs the wheels in a one-shot container, as uid 10001, with the image's own `uv`: no index, no network and no dependencies (`--no-deps`), into `plugins/installed/next/`. It then refuses the tree if a wheel declares no `istota.skills` entry point, has a distribution name or package name the image's virtual environment already has, which would hide the plugin, or puts anything at the top level besides its one package and that package's metadata. Only then does the new tree replace `site/`. With no wheels the result is an empty `site/`. A run killed in the middle of that replacement leaves the old tree under another name, and the next sync puts it back before it does anything else.
-4. On a failure, prints what the one-shot printed and exits 1. `site/` and `.synced` stay as they were, and nothing restarts. Two wheels of one distribution at different versions fail here.
-5. Otherwise writes `.synced`, prints `changed`, restarts `daemon` and `web` if the stack is running, and exits 2. The other services do not read plugins and are not restarted, and a stack that is down stays down. If the restart fails after a good install, it exits 1 with `.synced` already written, and `istota-stack up` finishes the job.
-
-`--no-restart` skips step 5's restart. The management role uses it so that one play restarts the stack once. Do not use it by hand: until the next restart, a newly spawned plugin CLI runs the new tree, while the daemon's skill index and the proxy's list of skills are the old ones, so a removed plugin is still offered and fails when it runs.
-
-`istota-stack plugins status` takes no lock and prints each wheel in `plugins/src/`, then `synced` or `not synced`. It does not say what loaded: `istota doctor --only skills.plugins` does, and fails for a plugin that is installed and did not load or a wheel that loaded as no plugin.
-
-| `plugins sync` exit | Meaning |
-|---|---|
-| 0 | nothing changed |
-| 2 | the plugins changed and the stack restarted onto them |
-| 1 | a refused entry in `plugins/src/`, a missing layout, a failed install, or a failed restart |
-| 64 | a usage error |
-
-**Updates, rollbacks and restores.** `update` and `rollback` leave `plugins/` alone, and the new containers bind the same directory. If a later image gains a distribution with a plugin's name, that plugin stops loading at the next start with no error at load time; doctor's `skills.plugins.wheels` reports it. A rollback to a release from before plugins existed runs that release's `istota-stack`, which binds nothing: the plugins' skills are absent there, and the daemon removes their jobs at its start (below). `plugins/` is in none of the workspace backups and `istota-stack restore` does not bring it back, so keep the wheels with the rest of the deployment, and on a restored stack copy them into `plugins/src/` and run `istota-stack plugins sync` before you start the stack.
-
-**A plugin absent at a daemon start loses its jobs' network approvals.** At every start the daemon deletes the scheduled jobs that run a skill it does not have (a CRON.md `command: istota-skill <name> …` line runs as one) and fails their pending tasks, and a job's network approvals go with its row. When the plugin comes back, the CRON.md sync creates the job again from nothing, so a limited job has to be approved again, its `skill:` approval included. A plugin that is installed and fails to load (a problem doctor reports) keeps its jobs. When the daemon cannot read the list of installed plugins at all, it deletes no job at that start and says so in its log.
-
-The Mac app does not support plugins in this version. The Mac's `istota-stack` forwards `plugins` to the VM like any other verb, but nothing tests it there.
+`plugins/` is in none of the workspace backups. Keep the wheels with the rest of the deployment. [Installing plugins](../plugins/installing.md) has the directory layout, what `plugins sync` checks and its exit codes, credentials, and what happens to a plugin across updates, rollbacks and restores.
 
 ## Storage
 

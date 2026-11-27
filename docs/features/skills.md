@@ -4,7 +4,7 @@ Skills are self-contained directories under `src/istota/skills/`, each with a `s
 
 ## How skills work
 
-Skills are not plugins or extensions. They are curated documentation and tooling that gets selectively loaded into Claude's prompt based on what's relevant to the current task. When a user asks about their calendar, the calendar skill docs are included so Claude knows how to use the CalDAV CLI. When they ask about email, the email skill docs are loaded instead.
+A skill is curated documentation, plus optional tooling, that gets selectively loaded into Claude's prompt based on what's relevant to the current task. When a user asks about their calendar, the calendar skill docs are included so Claude knows how to use the CalDAV CLI. When they ask about email, the email skill docs are loaded instead.
 
 ## Selection: deterministic matching
 
@@ -101,7 +101,7 @@ A skill with `cli: true` is also named in the prompt's "Skill CLI tools" list. T
 Skill discovery uses layered priority:
 
 1. Bundled `skill.md` directories in `src/istota/skills/*/` (base)
-2. Skill plugins: skills in their own Python package, found through the `istota.skills` entry-point group. A plugin adds a skill and never replaces a bundled one. See [external skill packages](../development/adding-skills.md#external-skill-packages).
+2. Skill plugins: skills in their own Python package, found through the `istota.skills` entry-point group. A plugin adds a skill and never replaces a bundled one. See [Skill plugins](../plugins/overview.md).
 3. Operator override directories in `config/skills/*/` (higher priority, `skill.md` or `skill.toml`)
 
 Operator overrides can replace or extend bundled skills and plugins.
@@ -122,7 +122,7 @@ Skills have a SHA-256 fingerprint (of all `skill.md` + `skill.toml` files). When
 
 ## Creating new skills
 
-See [adding skills](../development/adding-skills.md) for a step-by-step guide.
+See [adding skills](../development/adding-skills.md) for a step-by-step guide to a bundled skill, and [writing a plugin](../plugins/writing.md) for a skill in its own package.
 
 ## Configuration
 
