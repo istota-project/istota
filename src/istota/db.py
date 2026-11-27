@@ -1435,6 +1435,7 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     _rebuild_skill_request_kinds(conn, "recovery_fill")
     _rebuild_skill_request_kinds(conn, "location_share")
     _rebuild_skill_request_kinds(conn, "assignment_activation")
+    _rebuild_skill_request_kinds(conn, "secret_link")
     # Reads the `scheduled_jobs` columns added above. Its own transaction.
     _migrate_egress_seed_open(conn)
     _migrate_egress_retire_subjects(conn)
@@ -8665,7 +8666,7 @@ _SKILL_REQUESTS_DDL = """CREATE TABLE whatsapp_skill_requests_rebuild (
     requester_user_id TEXT NOT NULL,
     origin_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
     request_key TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post', 'purchase', 'recovery_fill', 'location_share', 'assignment_activation')),
+    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post', 'purchase', 'recovery_fill', 'location_share', 'assignment_activation', 'secret_link')),
     recipient_user_id TEXT NOT NULL,
     relay_id TEXT UNIQUE,
     text TEXT,
