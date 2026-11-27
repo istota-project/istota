@@ -940,6 +940,27 @@ button.btn { cursor: pointer; }
 .link-summary dt { flex: none; color: var(--text-muted); }
 .link-summary dd { margin: 0; min-width: 0; text-align: right; overflow-wrap: anywhere; }
 .link-summary code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
+.form-alert, .field-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin: 0;
+  text-align: left;
+  line-height: 1.45;
+  color: var(--text-primary);
+}
+.form-alert {
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.85rem;
+  background: var(--surface-base);
+  border: 1px solid var(--border-default);
+  border-left: 3px solid var(--accent-amber);
+  border-radius: 0.5rem;
+}
+.field-error { font-size: 0.8rem; }
+.form-alert svg, .field-error svg { flex: none; width: 1rem; height: 1rem; margin-top: 0.1rem; color: var(--accent-amber); }
+input[aria-invalid='true'] { border-color: var(--accent-amber); }
 .reveal { padding: 0; font: inherit; font-size: 0.75rem; background: none; border: 0; cursor: pointer; }
 .btn-text {
   width: 100%;
@@ -1060,6 +1081,12 @@ _LOCK_ICON = _lucide(
 _CIRCLE_CHECK_ICON = _lucide(
     "circle-check",
     '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
+)
+
+_CIRCLE_ALERT_ICON = _lucide(
+    "circle-alert",
+    '<circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/>'
+    '<line x1="12" x2="12.01" y1="16" y2="16"/>',
 )
 
 
@@ -1936,8 +1963,23 @@ def _secret_link_error_text(field: str, message: str) -> str:
     return message if message.endswith(".") else message + "."
 
 
-async def _secret_link_form(request: Request, token: str, view: dict, error: str = "") -> HTMLResponse:
+def _secret_field_error(field_id: str, error: str) -> tuple[str, str]:
+    """The input's invalid attributes and the message under it, for the field the store refused."""
+    if not error:
+        return "", ""
+    attrs = f' aria-invalid="true" aria-describedby="{field_id}-error"'
+    message = (f'<p class="field-error" id="{field_id}-error" role="alert">'
+               f'{_CIRCLE_ALERT_ICON}<span>{escape(error)}</span></p>')
+    return attrs, message
+
+
+async def _secret_link_form(
+    request: Request, token: str, view: dict, error: str = "", error_field: str = "", username: str = "",
+) -> HTMLResponse:
     bot = escape(_config.bot_name)
+    # Beside the field it concerns; anything else above the form.
+    field = error_field if error_field in ("value", "username") and (
+        error_field == "value" or view["asks_username"]) else ""
     used_on = ", ".join(view["hosts"]) if view["hosts"] else "No site yet"
     rows = (
         ("Credential", f'<code>{escape(view["name"])}</code>'),
@@ -1947,8 +1989,10 @@ async def _secret_link_form(request: Request, token: str, view: dict, error: str
     )
     body = '<dl class="link-summary">' + "".join(
         f"<div><dt>{label}</dt><dd>{value}</dd></div>" for label, value in rows) + "</dl>"
-    if error:
-        body += f'<p class="form-error" role="alert">{escape(error)}</p>'
+    if error and not field:
+        body += f'<p class="form-alert" role="alert">{_CIRCLE_ALERT_ICON}<span>{escape(error)}</span></p>'
+    user_invalid, user_error = _secret_field_error("secret-username", error if field == "username" else "")
+    value_invalid, value_error = _secret_field_error("secret-value", error if field == "value" else "")
     hidden = (
         f'<input type="hidden" name="token" value="{escape(token)}">'
         f'<input type="hidden" name="csrf_token" value="{escape(_csrf_token(request, "secret-link"))}">'
@@ -1956,13 +2000,18 @@ async def _secret_link_form(request: Request, token: str, view: dict, error: str
     body += f'<form method="post" action="{_SECRET_LINK_PATH}">{hidden}<input type="hidden" name="action" value="save">'
     if view["asks_username"]:
         keep = view["username_set"]
+        described = " ".join(filter(None, (
+            "secret-username-help" if keep else "", "secret-username-error" if user_error else "")))
         body += (
             '<div class="form-field"><label for="secret-username">Username</label>'
             '<input id="secret-username" type="text" name="username" autocomplete="username" '
             'autocapitalize="off" autocorrect="off" spellcheck="false"'
-            + (' aria-describedby="secret-username-help">'
-               '<p class="form-help" id="secret-username-help">Leave it empty to keep the stored one.</p>'
-               if keep else ">")
+            f' value="{escape(username)}"'
+            + (' aria-invalid="true"' if user_error else "")
+            + (f' aria-describedby="{described}"' if described else "") + ">"
+            + user_error
+            + ('<p class="form-help" id="secret-username-help">Leave it empty to keep the stored one.</p>'
+               if keep else "")
             + "</div>"
         )
     body += (
@@ -1970,8 +2019,10 @@ async def _secret_link_form(request: Request, token: str, view: dict, error: str
         '<button class="recovery reveal" type="button" id="secret-reveal" aria-controls="secret-value" '
         'aria-pressed="false" hidden>Show</button></div>'
         '<input id="secret-value" type="password" name="value" autocomplete="current-password" '
-        'autocapitalize="off" autocorrect="off" spellcheck="false" required '
-        'aria-describedby="secret-value-help"></div>'
+        'autocapitalize="off" autocorrect="off" spellcheck="false" required'
+        + (value_invalid.replace('"secret-value-error"', '"secret-value-error secret-value-help"')
+           if value_invalid else ' aria-describedby="secret-value-help"')
+        + f'>{value_error}</div>'
         f'<p class="form-help" id="secret-value-help">This goes straight to {bot}’s credential '
         'store, not into the chat.</p>'
         f'<button class="btn btn-primary" type="submit">{_LOCK_ICON}Save</button></form>'
@@ -2061,12 +2112,14 @@ async def secret_link_submit(request: Request):
         left = secret_links.MAX_FAILURES - outcome["failures"]
         error = _secret_link_error_text(outcome["field"], outcome["message"])
         error += f" {left} {'try' if left == 1 else 'tries'} left."
-        return await _secret_link_form(request, token, view, error)
+        return await _secret_link_form(request, token, view, error, outcome["field"] or "", username)
     logger.info("secret_link id=%s name=%s: stored (%s)", link.id, label,
                 "created" if outcome["created"] else "updated")
     await asyncio.to_thread(_secret_link_notice, link, "stored")
     return await _secret_link_page(
-        request, "Saved", "You can close this page and go back to the chat.", 200, icon=_CIRCLE_CHECK_ICON)
+        request, "Saved",
+        f"The password for {link.params['name']} is stored. You can close this page and go back to the chat.",
+        200, icon=_CIRCLE_CHECK_ICON)
 
 
 # Email sign-in by code (ISSUE-574). The browser that asks holds a secret in its

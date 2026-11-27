@@ -325,6 +325,10 @@ class TestFailures:
         assert "whitespace" in answer.text
         assert " padded " not in answer.text
         assert 'name="action" value="save"' in answer.text
+        # Beside the password field, which is marked, with the username kept.
+        assert answer.text.index('id="secret-value"') < answer.text.index("whitespace")
+        assert 'aria-invalid="true" aria-describedby="secret-value-error secret-value-help"' in answer.text
+        assert f'value="{USERNAME}"' in answer.text
         row = _link_row(config, link.id)
         assert row["failures"] == 1 and row["used_at"] is None
         assert not _is_local(config)
