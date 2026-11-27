@@ -3,6 +3,7 @@
 import json
 import os
 import sqlite3
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -573,3 +574,219 @@ class TestCredentialProxy:
         from istota.executor import derive_skill_credential_map
         result = derive_skill_credential_map(["google_workspace"], self._idx())
         assert "GOOGLE_WORKSPACE_CLI_TOKEN" in result.get("google_workspace", set())
+
+
+# ============================================================================
+# connect-link: a one-use link to connect Google from chat (#994)
+# ============================================================================
+
+DRIVE_RO_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+GMAIL_MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
+CONNECT_LINK_RE = r"https://zorg\.example/istota/secret\?token=([A-Za-z0-9_-]+)"
+
+
+class TestConnectLink:
+    """`istota-skill google_workspace connect-link` issues a `google_connect`
+    secret link host-side through the gates the credential link uses, and
+    queues it for the user's private room. The reply names the services and
+    the expiry, never the token or the address."""
+
+    @pytest.fixture
+    def cfg(self, tmp_path, monkeypatch):
+        from istota.skills.google_workspace import connect
+
+        c = config.Config(
+            db_path=tmp_path / "daemon" / "test.db",
+            workspace_path=tmp_path / "workspace",
+            users={"alice": config.UserConfig(display_name="Alice"), "bob": config.UserConfig()},
+            site=config.SiteConfig(hostname="zorg.example"),
+            google_workspace=config.GoogleWorkspaceConfig(
+                enabled=True, client_id="example-client", client_secret="example-secret",
+                scopes=[DRIVE_RO_SCOPE, GMAIL_MODIFY_SCOPE],
+            ),
+        )
+        c.db_path.parent.mkdir()
+        db.init_db(c.db_path)
+        monkeypatch.setattr(connect, "_load_config", lambda: c)
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.delenv("ISTOTA_TASK_ID", raising=False)
+        return c
+
+    def _running(self, c, *, source_type="web", shared=False, monkeypatch=None):
+        with db.get_db(c.db_path) as conn:
+            room = db.create_web_chat_room(conn, "alice", "general").token
+            if shared:
+                db.add_web_room_member(conn, room, "bob")
+            ident = db.create_task(conn, user_id="alice", source_type=source_type,
+                                   prompt="connect my google", conversation_token=room)
+            conn.execute("UPDATE tasks SET status='running' WHERE id=?", (ident,))
+        if monkeypatch is not None:
+            monkeypatch.setenv("ISTOTA_TASK_ID", str(ident))
+        return ident, room
+
+    def _run(self, monkeypatch, capsys, *args):
+        """`main` as `istota-skill` runs it, as `(envelope, exit code)`."""
+        from istota.skills import google_workspace
+
+        monkeypatch.setattr(sys, "argv", ["google_workspace", "connect-link", *args])
+        monkeypatch.setattr(os, "execvp", lambda *a: pytest.fail("connect-link must not run gws"))
+        monkeypatch.delenv("ISTOTA_HOST_FILES_DIR", raising=False)
+        code = 0
+        try:
+            google_workspace.main()
+        except SystemExit as exc:
+            code = exc.code
+        return json.loads(capsys.readouterr().out), code
+
+    def _rows(self, c, sql):
+        with db.get_db(c.db_path) as conn:
+            return [dict(r) for r in conn.execute(sql).fetchall()]
+
+    def _nothing_issued(self, c):
+        assert self._rows(c, "SELECT id FROM secret_links") == []
+        assert self._rows(c, "SELECT id FROM whatsapp_skill_requests") == []
+
+    def test_it_queues_one_link_and_the_reply_carries_no_address(
+            self, cfg, monkeypatch, capsys, caplog):
+        import hashlib
+        import re
+
+        caplog.set_level("DEBUG")
+        task_id, room = self._running(cfg, monkeypatch=monkeypatch)
+        reply, code = self._run(monkeypatch, capsys)
+
+        assert code == 0
+        (link,) = self._rows(cfg, "SELECT * FROM secret_links")
+        (request,) = self._rows(cfg, "SELECT * FROM whatsapp_skill_requests")
+        stored = link["expires_at"]
+        assert reply == {
+            "status": "ok", "services": ["Drive (read-only)", "Gmail (read and write)"],
+            "connected": False, "expires_at": stored[:10] + "T" + stored[11:19] + "Z",
+            "delivered_to": "web",
+        }
+        assert link["intent"] == "google_connect" and json.loads(link["params"]) == {}
+        assert link["user_id"] == "alice" and link["task_id"] == task_id
+        assert link["room_token"] == room
+        assert request["kind"] == "secret_link" and request["recipient_user_id"] == "alice"
+        (token,) = re.findall(CONNECT_LINK_RE, request["service_body"])
+        assert hashlib.sha256(token.encode()).hexdigest() == link["token_hash"]
+        assert "Google" in request["service_body"] and "Drive (read-only)" in request["service_body"]
+        for leaked in (token, "/istota/secret"):
+            assert leaked not in json.dumps(reply)
+            assert leaked not in caplog.text
+
+    def test_it_says_when_google_is_already_connected(self, cfg, monkeypatch, capsys, secret_key):
+        self._running(cfg, monkeypatch=monkeypatch)
+        with db.get_db(cfg.db_path) as conn:
+            db.upsert_google_token(conn, "alice", "a", "r", "2030-01-01T00:00:00+00:00",
+                                   json.dumps([DRIVE_RO_SCOPE]))
+        reply, code = self._run(monkeypatch, capsys)
+        assert code == 0 and reply["connected"] is True
+
+    def test_a_second_link_supersedes_the_first(self, cfg, monkeypatch, capsys):
+        self._running(cfg, monkeypatch=monkeypatch)
+        self._run(monkeypatch, capsys)
+        self._run(monkeypatch, capsys)
+        outcomes = [r["outcome"] for r in self._rows(cfg, "SELECT outcome FROM secret_links ORDER BY id")]
+        assert outcomes == ["superseded", None]
+
+    def test_no_services_selected_points_at_settings(self, cfg, monkeypatch, capsys):
+        from istota import user_profiles
+
+        self._running(cfg, monkeypatch=monkeypatch)
+        user_profiles.ensure_profile(cfg.db_path, "alice")
+        user_profiles.update_profile(cfg.db_path, "alice",
+                                     google_scopes={"drive": "off", "gmail": "off"})
+        reply, code = self._run(monkeypatch, capsys)
+        assert code == 1
+        assert reply["status"] == "error" and reply["reason"] == "no_scopes"
+        assert reply["settings_url"] == "https://zorg.example/istota/settings/connections"
+        self._nothing_issued(cfg)
+
+    @pytest.mark.parametrize("change", ["disabled", "no_client"])
+    def test_google_not_configured_here(self, cfg, monkeypatch, capsys, change):
+        if change == "disabled":
+            cfg.google_workspace.enabled = False
+        else:
+            cfg.google_workspace.client_id = ""
+        self._running(cfg, monkeypatch=monkeypatch)
+        reply, code = self._run(monkeypatch, capsys)
+        assert code == 1 and reply["reason"] == "not_configured"
+        self._nothing_issued(cfg)
+
+    def test_a_correspondents_mail_cannot_cause_a_link(self, cfg, monkeypatch, capsys):
+        task_id, _ = self._running(cfg, source_type="email", monkeypatch=monkeypatch)
+        with db.get_db(cfg.db_path) as conn:
+            db.mark_email_processed(conn, f"uid-{task_id}", "mallory@elsewhere.example",
+                                    user_id="alice", task_id=task_id,
+                                    routing_method="plus_address")
+        reply, code = self._run(monkeypatch, capsys)
+        assert code == 1 and reply["reason"] == "not_owner_turn"
+        self._nothing_issued(cfg)
+
+    def test_another_users_task_is_not_the_owners_turn(self, cfg, monkeypatch, capsys):
+        with db.get_db(cfg.db_path) as conn:
+            ident = db.create_task(conn, user_id="bob", source_type="web", prompt="x")
+        monkeypatch.setenv("ISTOTA_TASK_ID", str(ident))
+        reply, code = self._run(monkeypatch, capsys)
+        assert code == 1 and reply["reason"] == "not_owner_turn"
+        self._nothing_issued(cfg)
+
+    def test_outside_a_task_nothing_is_issued(self, cfg, monkeypatch, capsys):
+        reply, code = self._run(monkeypatch, capsys)
+        assert code == 1 and reply["reason"] == "not_owner_turn"
+        self._nothing_issued(cfg)
+
+    @pytest.mark.parametrize("source_type", ["scheduled", "briefing", "heartbeat"])
+    def test_a_scheduled_turn_never_issues_a_link(self, cfg, monkeypatch, capsys, source_type):
+        self._running(cfg, source_type=source_type, monkeypatch=monkeypatch)
+        reply, code = self._run(monkeypatch, capsys)
+        assert code == 1 and reply["reason"] == "scheduled_turn"
+        self._nothing_issued(cfg)
+
+    def test_an_incognito_room_never_issues_a_link(self, cfg, monkeypatch, capsys):
+        task_id, _ = self._running(cfg, monkeypatch=monkeypatch)
+        with db.get_db(cfg.db_path) as conn:
+            conn.execute("UPDATE tasks SET incognito = 1 WHERE id = ?", (task_id,))
+        reply, code = self._run(monkeypatch, capsys)
+        assert code == 1 and reply["reason"] == "incognito"
+        self._nothing_issued(cfg)
+
+    def test_no_web_origin_means_no_link(self, cfg, monkeypatch, capsys):
+        cfg.site.hostname = ""
+        self._running(cfg, monkeypatch=monkeypatch)
+        reply, code = self._run(monkeypatch, capsys)
+        assert code == 1 and reply["reason"] == "no_external_origin"
+        self._nothing_issued(cfg)
+
+    def test_a_shared_room_task_with_no_private_room(self, cfg, monkeypatch, capsys):
+        self._running(cfg, shared=True, monkeypatch=monkeypatch)
+        reply, code = self._run(monkeypatch, capsys)
+        assert code == 1 and reply["reason"] == "no_private_room"
+        self._nothing_issued(cfg)
+
+    def test_the_live_link_cap(self, cfg, monkeypatch, capsys):
+        from istota.webui import secret_links
+
+        task_id, room = self._running(cfg, monkeypatch=monkeypatch)
+        with db.get_db(cfg.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for index in range(secret_links.MAX_LIVE_PER_USER):
+                secret_links.issue(conn, user_id="alice", intent="credential",
+                                   params={"name": f"other{index}"}, task_id=task_id,
+                                   room_token=room, ttl_seconds=900)
+        reply, code = self._run(monkeypatch, capsys)
+        assert code == 1 and reply["reason"] == "too_many_links"
+        assert self._rows(cfg, "SELECT id FROM whatsapp_skill_requests") == []
+
+    def test_extra_arguments_are_refused(self, cfg, monkeypatch, capsys):
+        self._running(cfg, monkeypatch=monkeypatch)
+        reply, code = self._run(monkeypatch, capsys, "--scope", "x")
+        assert code == 1 and reply["reason"] == "bad_request"
+        self._nothing_issued(cfg)
+
+    def test_the_skill_doc_sends_the_link_instead_of_naming_the_page(self):
+        body = (Path(__file__).parent.parent / "src" / "istota" / "skills"
+                / "google_workspace" / "skill.md").read_text()
+        assert "istota-skill google_workspace connect-link" in body
+        assert "no_scopes" in body

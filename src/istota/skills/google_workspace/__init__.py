@@ -11,6 +11,8 @@ an empty, non-writable private cwd, so an unrecognized relative output cannot
 write into that workspace. Local output files are unsupported; use stdout.
 The parent skill launcher owns the staging directory and removes it after
 exit or timeout. Keeping exec lets that parent terminate gws itself.
+
+One verb is the skill's own rather than gws's: `connect-link` (`connect.py`).
 """
 
 from __future__ import annotations
@@ -183,7 +185,18 @@ def _enter_workspace() -> str | None:
 
 
 def main() -> None:
-    """Run gws with read-only input copies owned and reaped by the skill proxy."""
+    """Run gws with read-only input copies owned and reaped by the skill proxy.
+
+    `connect-link` is this skill's own verb, not a gws one: it runs before the
+    scan and execs nothing (`connect.py`).
+    """
+    if sys.argv[1:2] == ["connect-link"]:
+        from istota.skills._cli import emit
+
+        from .connect import connect_link
+
+        emit(connect_link(sys.argv[2:]))
+        return
     host_files = os.environ.get("ISTOTA_HOST_FILES_DIR")
     if not host_files:
         fail("Google Workspace must run through istota-skill or a scheduled skill launcher", reason="host_path_refused")

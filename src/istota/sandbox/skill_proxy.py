@@ -363,10 +363,6 @@ def _owners_own_turn(conn, task_id: int, user_id: str, *, own_addresses=None) ->
             and turn_author(conn, task, own_addresses=own_addresses) == "own")
 
 
-class _LinkRefused(Exception):
-    """A secret link refused with ``(reason, message)``, raised to roll back what was written."""
-
-
 class _RequestTooLarge(Exception):
     """A request passed `MAX_REQUEST_BYTES`."""
 
@@ -1413,20 +1409,15 @@ class SkillProxy:
         """Send the user a one-use link to enter a credential themselves; return metadata only.
 
         The link is issued and its message queued for the user's private room
-        here, in one transaction, so neither the token nor the address reaches
-        the reply, a log line or the task. The gates run in a fixed order, each
-        refusal a fixed ``reason`` (secret-entry-links spec, "Gates at issue
-        time"); a refusal after the budget writes nothing.
+        in one transaction (`secret_links.issue_and_queue`, which the
+        `google_workspace connect-link` verb shares), so neither the token nor
+        the address reaches the reply, a log line or the task. The gates run in
+        a fixed order, each refusal a fixed ``reason`` (secret-entry-links spec,
+        "Gates at issue time"); a refusal after the budget writes nothing.
         """
-        from istota import db
         from istota.credentials import local
         from istota.credentials import names as secrets_vault
-        from istota.credentials.broker.grants import _task_context
-        from istota.mail.support import own_addresses
-        from istota.relay.requests import RequestError
-        from istota.rooms import private_replies
         from istota.webui import secret_links
-        from istota.webui.origin import external_origin
 
         if not self._spend_vault_write(conn):
             return
@@ -1441,31 +1432,21 @@ class SkillProxy:
             return
         name, url, username = request.get("name"), request.get("url"), request.get("username", False)
         try:
-            with db.get_db(config.db_path) as database:
-                own_turn = _owners_own_turn(database, task_id, user_id,
-                                            own_addresses=own_addresses(config, user_id))
-                task_row, scheduled = _task_context(database, task_id, user_id) if own_turn else (None, True)
+            refused = secret_links.turn_refusal(config, user_id, task_id)
         except Exception as exc:
             logger.error("vault_link_request task_id=%s failed: %s", task_id, type(exc).__name__)
             refuse("store_failed", "Could not create the link")
             return
-        if not own_turn:
-            refuse("not_owner_turn", "Only your own turn can ask for a link")
-            return
-        if scheduled:
-            refuse("scheduled_turn", "A scheduled run cannot send a link")
-            return
-        if task_row["incognito"]:
-            refuse("incognito", "No link is sent from an incognito room")
+        if refused is not None:
+            refuse(refused.reason, refused.message)
             return
         refusal = secrets_vault.vault_isolation_refusal(config, user_id)
         if refusal:
             refuse("vault_isolation", refusal)
             return
-        try:
-            origin_host, scheme = external_origin(config)
-        except ValueError:
-            refuse("no_external_origin", "This deployment has no web address to link to")
+        refused = secret_links.origin_refusal(config)
+        if refused is not None:
+            refuse(refused.reason, refused.message)
             return
         try:
             local._check_name(name)
@@ -1476,47 +1457,29 @@ class SkillProxy:
             refuse("bad_request", "username must be true or false")
             return
 
+        host = secret_links.link_host(url)
+
+        def check(database) -> None:
+            if (name in local._taken_names(database, user_id)
+                    and not local.is_local(database, user_id, name)):
+                raise secret_links.LinkRefused("not_local", "That name belongs to a credential edited elsewhere")
+            if host is None:
+                raise secret_links.LinkRefused("bad_url", "Give the site as a hostname or https URL, with no path")
+
+        what = "username and password" if username else "password"
+
+        def compose(address: str, expires: str) -> str:
+            return (f"Enter the {what} for `{name}` ({host}) here: {address}\n"
+                    f"It works once and expires at {expires}. I only send these when you ask for one.")
+
         try:
-            with db.get_db(config.db_path) as database:
-                database.execute("BEGIN IMMEDIATE")
-                if (name in local._taken_names(database, user_id)
-                        and not local.is_local(database, user_id, name)):
-                    raise _LinkRefused("not_local", "That name belongs to a credential edited elsewhere")
-                host = secret_links.link_host(url)
-                if host is None:
-                    raise _LinkRefused("bad_url", "Give the site as a hostname or https URL, with no path")
-                task = db.get_task(database, task_id)
-                about, dest = private_replies.secret_link_room(database, config, task)
-                if dest is None:
-                    raise _LinkRefused("no_private_room", "You have no private chat to send the link to")
-                try:
-                    token, link = secret_links.issue(
-                        database, user_id=user_id, intent="credential",
-                        params={"name": name, "url": url, "username": username},
-                        task_id=task_id, room_token=about,
-                        ttl_seconds=config.secret_links.ttl_seconds,
-                    )
-                except secret_links.SecretLinkError as exc:
-                    if exc.reason == "too_many_links":
-                        raise _LinkRefused("too_many_links", "Too many unused links; use or let one expire") from None
-                    raise
-                expires = secret_links.expiry(link.expires_at)
-                what = "username and password" if username else "password"
-                text = (
-                    f"Enter the {what} for `{name}` ({host}) here: "
-                    f"{scheme}://{origin_host}/istota/secret?token={token}\n"
-                    f"It works once and expires at {secret_links.local_clock(config, user_id, expires)}. "
-                    "I only send these when you ask for one."
-                )
-                try:
-                    queued = private_replies.enqueue_secret_link(
-                        database, config, actor_user_id=user_id, task_id=task_id,
-                        link_id=link.id, text=text,
-                    )
-                except RequestError as exc:
-                    raise _LinkRefused(str(exc), "The link could not be queued") from None
-        except _LinkRefused as exc:
-            refuse(*exc.args)
+            link, delivered_to = secret_links.issue_and_queue(
+                config, user_id=user_id, task_id=task_id, intent="credential",
+                params={"name": name, "url": url, "username": username},
+                compose=compose, check=check,
+            )
+        except secret_links.LinkRefused as exc:
+            refuse(exc.reason, exc.message)
             return
         except Exception as exc:
             logger.error("vault_link_request task_id=%s failed: %s", task_id, type(exc).__name__)
@@ -1524,12 +1487,11 @@ class SkillProxy:
             return
         logger.info(
             "vault_link_request task_id=%s link_id=%s name=%s delivered_to=%s",
-            task_id, link.id, label_for_display(name), queued["delivered_to"],
+            task_id, link.id, label_for_display(name), delivered_to,
         )
         self._send_response(conn, {
-            "name": name, "host": host,
-            "expires_at": expires.isoformat(timespec="seconds").replace("+00:00", "Z"),
-            "delivered_to": queued["delivered_to"],
+            "name": name, "host": host, "expires_at": secret_links.iso_expiry(link),
+            "delivered_to": delivered_to,
         })
 
     def _serve_vault_otp_set(self, conn: socket.socket, request: dict) -> None:

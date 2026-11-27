@@ -1,15 +1,20 @@
 """Secret links: short-lived, single-use capability tokens for one action.
 
-A link lets a user enter a secret (or, later, connect Google) from a chat
-without a web session: opening it is the authentication. This module is the
-token store only, with no HTTP. It follows `webui/auth.py`'s token discipline:
-a SHA-256 digest is the only thing stored, a token is spent by an
+A link lets a user enter a secret or connect Google from a chat without a web
+session: opening it is the authentication. This module is the token store and
+the one issuing path, with no HTTP. It follows `webui/auth.py`'s token
+discipline: a SHA-256 digest is the only thing stored, a token is spent by an
 ``UPDATE ... WHERE used_at IS NULL`` whose rowcount decides who won, and a peek
 writes nothing, because link previews fetch the page.
 
 ``issue``, ``live_for_update``, ``spend`` and ``record_failure`` take the
 caller's connection, and the caller owns the transaction. ``peek`` and
 ``prune`` open their own.
+
+Issuing from a task (``turn_refusal``, ``origin_refusal``, ``issue_and_queue``)
+is shared by the skill proxy's ``vault_link_request`` and the host-side
+``google_workspace connect-link`` verb, so both links pass the same gates and
+reach the user by the same private-room delivery.
 """
 
 from __future__ import annotations
@@ -143,7 +148,8 @@ def issue(
 ) -> tuple[str, SecretLink]:
     """Store a new link and return its raw token, which is never stored.
 
-    A ``credential`` link supersedes the user's live link for the same name.
+    A ``credential`` link supersedes the user's live link for the same name,
+    and a ``google_connect`` link the user's live ``google_connect`` link.
     The cap of ``MAX_LIVE_PER_USER`` is counted without the link being
     superseded, and checked before anything is written.
     """
@@ -159,6 +165,12 @@ def issue(
             "SELECT id FROM secret_links WHERE user_id = ? AND intent = 'credential' "
             "AND json_extract(params, '$.name') = ? AND used_at IS NULL AND expires_at > ?",
             (user_id, params["name"], now),
+        )]
+    elif intent == "google_connect":
+        superseded = [r[0] for r in conn.execute(
+            "SELECT id FROM secret_links WHERE user_id = ? AND intent = 'google_connect' "
+            "AND used_at IS NULL AND expires_at > ?",
+            (user_id, now),
         )]
     live = conn.execute(
         "SELECT count(*) FROM secret_links WHERE user_id = ? AND used_at IS NULL AND expires_at > ?",
@@ -209,6 +221,19 @@ def is_live(conn: sqlite3.Connection, link_id: object, user_id: str) -> bool:
     ).fetchone() is not None
 
 
+def spent_link(conn: sqlite3.Connection, link_id: object) -> tuple[SecretLink | None, str | None]:
+    """``(link, outcome)`` for a spent link, by id; ``(None, None)`` for an unknown or unspent one.
+
+    For the Google callback, which holds the id of the link its flow spent.
+    """
+    if type(link_id) is not int:
+        return None, None
+    row = conn.execute(
+        "SELECT * FROM secret_links WHERE id = ? AND used_at IS NOT NULL", (link_id,),
+    ).fetchone()
+    return (_link(row), row["outcome"]) if row is not None else (None, None)
+
+
 def live_for_update(conn: sqlite3.Connection, token: object) -> SecretLink | None:
     """The live link for ``token``, read inside the caller's ``BEGIN IMMEDIATE``."""
     row = _live_row(conn, token)
@@ -255,3 +280,99 @@ def prune(db_path: Path, *, older_than_days: int = PRUNE_AFTER_DAYS) -> int:
             "DELETE FROM secret_links WHERE expires_at <= ?",
             (_timestamp(-older_than_days * 86400),),
         ).rowcount
+
+
+# Issuing from a task. The gates are numbered as in the secret-entry-links spec
+# ("Gates at issue time"); each caller runs the ones its intent needs, in order.
+
+
+class LinkRefused(Exception):
+    """A link refused at issue time: a fixed ``reason`` and a message for the model."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(reason, message)
+        self.reason = reason
+        self.message = message
+
+
+def turn_refusal(config, user_id: str, task_id: int) -> LinkRefused | None:
+    """Gates 2 to 4: the user's own turn, not a scheduled run, not an incognito room.
+
+    Only the user, answering a turn they wrote just now, can cause a link.
+    A read error raises; the caller refuses on it.
+    """
+    from istota.credentials.broker.grants import _task_context
+    from istota.mail.support import own_addresses
+    from istota.sandbox.skill_proxy import _owners_own_turn
+
+    with get_db(config.db_path) as conn:
+        if not _owners_own_turn(conn, task_id, user_id, own_addresses=own_addresses(config, user_id)):
+            return LinkRefused("not_owner_turn", "Only your own turn can ask for a link")
+        task_row, scheduled = _task_context(conn, task_id, user_id)
+    if scheduled:
+        return LinkRefused("scheduled_turn", "A scheduled run cannot send a link")
+    if task_row["incognito"]:
+        return LinkRefused("incognito", "No link is sent from an incognito room")
+    return None
+
+
+def origin_refusal(config) -> LinkRefused | None:
+    """Gate 6: the deployment has a web address of its own to link to."""
+    from istota.webui.origin import external_origin
+
+    try:
+        external_origin(config)
+    except ValueError:
+        return LinkRefused("no_external_origin", "This deployment has no web address to link to")
+    return None
+
+
+def issue_and_queue(config, *, user_id: str, task_id: int, intent: str, params: dict,
+                    compose, check=None) -> tuple[SecretLink, str]:
+    """Gates 8 and 9, then the link and its message, in one ``BEGIN IMMEDIATE``.
+
+    ``check(conn)`` runs first inside the transaction and refuses by raising
+    ``LinkRefused``. ``compose(address, expires)`` writes the message from the
+    link's address and its expiry in the user's clock; the address goes into
+    the queued message and nowhere else. Returns ``(link, delivered_to)``. A
+    refusal or any other error rolls back, leaving neither a link nor a message.
+    """
+    from istota import db
+    from istota.relay.requests import RequestError
+    from istota.rooms import private_replies
+    from istota.webui.origin import external_origin
+
+    try:
+        origin_host, scheme = external_origin(config)
+    except ValueError:
+        raise LinkRefused("no_external_origin", "This deployment has no web address to link to") from None
+    with get_db(config.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if check is not None:
+            check(conn)
+        task = db.get_task(conn, task_id)
+        about, dest = private_replies.secret_link_room(conn, config, task)
+        if dest is None:
+            raise LinkRefused("no_private_room", "You have no private chat to send the link to")
+        try:
+            token, link = issue(conn, user_id=user_id, intent=intent, params=params,
+                                task_id=task_id, room_token=about,
+                                ttl_seconds=config.secret_links.ttl_seconds)
+        except SecretLinkError as exc:
+            if exc.reason == "too_many_links":
+                raise LinkRefused("too_many_links", "Too many unused links; use or let one expire") from None
+            raise
+        text = compose(f"{scheme}://{origin_host}/istota/secret?token={token}",
+                       local_clock(config, user_id, expiry(link.expires_at)))
+        try:
+            queued = private_replies.enqueue_secret_link(
+                conn, config, actor_user_id=user_id, task_id=task_id, link_id=link.id, text=text,
+            )
+        except RequestError as exc:
+            raise LinkRefused(str(exc), "The link could not be queued") from None
+    return link, queued["delivered_to"]
+
+
+def iso_expiry(link: SecretLink) -> str:
+    """The link's expiry as the ISO UTC string a reply to the model carries."""
+    return expiry(link.expires_at).isoformat(timespec="seconds").replace("+00:00", "Z")

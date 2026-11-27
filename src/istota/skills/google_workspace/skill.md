@@ -16,10 +16,27 @@ Credentials are injected automatically via the skill proxy. Do not hardcode toke
 
 Two different failures look alike, and telling them apart is the difference between useful advice and wrong advice:
 
-- **No token at all** — the user has never connected their Google account, or disconnected it. Tell them to connect it at Settings → Google Workspace.
+- **No token at all** — the user has never connected their Google account, or disconnected it. Send them a connect link (below) rather than naming a settings page.
 - **Insufficient scope** — they are connected, but did not grant this service, or granted it read-only and the command writes. Google says so explicitly: `insufficientPermissions`, `ACCESS_TOKEN_SCOPE_INSUFFICIENT`, or a 403 mentioning scope. Tell them which service and level the command needs, and that Settings → Google Workspace shows what they granted and lets them change it. A change requires reconnecting — Google has to ask them again.
 
 Read-only is the conservative default on most instances, so **assume nothing about write access**. The write verbs below (`gmail +send` / `+reply`, `sheets +append`, `drive +upload`, `calendar +insert`, `docs documents create`, `chat spaces.messages create`) all need the read-and-write level for their service. An instance can also decline to offer a service at all, in which case no amount of reconnecting will help and the operator has to enable the API.
+
+### Connecting from chat
+
+When the user asks to connect Google, or a command fails because they have no token, run:
+
+```bash
+istota-skill google_workspace connect-link
+```
+
+It sends the user a one-use link in their private chat. You never see the link. Opening it shows which Google services will be connected, and "Continue to Google" takes them to Google's consent screen. The link works once and expires after 15 minutes unless the operator set another time. The reply looks like `{"status": "ok", "services": ["Drive (read-only)", "Gmail (read and write)"], "connected": false, "expires_at": "...", "delivered_to": "whatsapp"}`. Tell the user the link is on its way, name the services, and say where it went. `connected: true` means a Google account is already connected; a new link reconnects it, which is how a changed service selection takes effect.
+
+Refusals come back as `{"status": "error", "reason": ...}`:
+
+- `no_scopes`: no services are selected. Send the user `settings_url` from the reply and tell them to pick services there first.
+- `not_configured`: Google Workspace is not set up on this server. Only the operator can fix that.
+- `not_owner_turn`, `scheduled_turn`, `incognito`: a link is only sent in answer to the user's own message, outside scheduled runs and incognito rooms. Tell them to ask themselves, in a normal chat.
+- `no_private_room`, `no_external_origin`, `too_many_links`: say what it means in plain words. Never ask for a password or a code in chat instead.
 
 ## Commands
 
