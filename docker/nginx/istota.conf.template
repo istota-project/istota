@@ -107,6 +107,22 @@ location = /istota/auth/set-password {
     proxy_set_header X-Forwarded-Proto $forwarded_proto;
 }
 
+# A secret link (/istota/secret?token=): the token in the query is a
+# credential for one credential slot, so this path has no access log either.
+# Its form carries a credential value, so its cap is twice the app's 64 KiB
+# (`_SECRET_FORM_BODY_LIMIT`). No starting page, for the reason set-password
+# has none.
+location = /istota/secret {
+    access_log off;
+    client_max_body_size 128k;
+    proxy_pass http://$upstream_web;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $forwarded_proto;
+}
+
 # A user's Istota calendar feed (/istota/calendar/<token>.ics): the token in
 # the path is the feed's whole credential, so this path has no access log
 # either. Read by calendar apps with no session; no starting page, for the

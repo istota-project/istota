@@ -58,12 +58,13 @@ def test_the_page_loads_nothing_from_elsewhere():
 # still web UI pages, and the Mac app opens /istota/auth/local before `web` is up.
 WEB_UI_LOCATIONS = {"/istota/", "/istota/auth/", "= /istota/login/email"}
 # Under /istota/ but not pages: the chat stream and the browser console's
-# websocket are APIs, and set-password's and the calendar feed's access logs are
-# off, which an internal redirect to the page would undo.
+# websocket are APIs, and set-password's, a secret link's and the calendar
+# feed's access logs are off, which an internal redirect to the page would undo.
 NOT_WEB_UI_PAGES = {
     "/istota/api/chat/",
     "= /istota/api/admin/browsers/console",
     "= /istota/auth/set-password",
+    "= /istota/secret",
     "^~ /istota/calendar/",
 }
 

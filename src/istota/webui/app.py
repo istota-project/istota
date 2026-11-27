@@ -919,6 +919,43 @@ button.btn { cursor: pointer; }
 .recovery:hover { color: var(--text-primary); text-decoration: underline; }
 .form-help { margin: 0; color: var(--text-muted); font-size: 0.8rem; line-height: 1.5; }
 .form-error { color: var(--text-primary); }
+/* The secret link form: what is being stored, then the fields. */
+.link-summary {
+  margin: 0 0 1.25rem;
+  padding: 0 0.9rem;
+  text-align: left;
+  font-size: 0.85rem;
+  background: var(--surface-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: 0.6rem;
+}
+.link-summary > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.55rem 0;
+}
+.link-summary > div + div { border-top: 1px solid var(--border-subtle); }
+.link-summary dt { flex: none; color: var(--text-muted); }
+.link-summary dd { margin: 0; min-width: 0; text-align: right; overflow-wrap: anywhere; }
+.link-summary code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
+.reveal { padding: 0; font: inherit; font-size: 0.75rem; background: none; border: 0; cursor: pointer; }
+.btn-text {
+  width: 100%;
+  padding: 0.6rem;
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  background: none;
+  border: 0;
+  border-radius: 0.4rem;
+  cursor: pointer;
+}
+.btn-text:hover { color: var(--text-primary); text-decoration: underline; }
+.btn-text:focus-visible { outline: 2px solid var(--accent-amber); outline-offset: 2px; }
+.result-icon { display: flex; justify-content: center; margin: 0 0 0.75rem; color: var(--accent-amber); }
+.result-icon svg { width: 2rem; height: 2rem; }
 footer {
   font-size: 0.72rem;
   color: var(--text-dim);
@@ -1012,6 +1049,17 @@ _MAIL_ICON = _lucide(
     "mail",
     '<path d="m22 7-8.991 5.727a2 2 0 0 1-2.009 0L2 7"/>'
     '<rect x="2" y="4" width="20" height="16" rx="2"/>',
+)
+
+_LOCK_ICON = _lucide(
+    "lock",
+    '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/>'
+    '<path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+)
+
+_CIRCLE_CHECK_ICON = _lucide(
+    "circle-check",
+    '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
 )
 
 
@@ -1286,18 +1334,21 @@ async def _auth_error(request: Request, headline: str, detail: str, status_code:
 _AUTH_FORM_BODY_LIMIT = 16 * 1024
 
 
-async def _read_auth_form(request: Request):
+async def _read_auth_form(request: Request, limit: int = _AUTH_FORM_BODY_LIMIT, refuse=None):
     """The posted sign-in form, or the page refusing it, as ``(form, refusal)``.
 
     The body is read through `read_bounded_body` before anything parses it,
-    and Starlette's parser is then handed only those bytes.
+    and Starlette's parser is then handed only those bytes. ``refuse`` builds
+    the refusal page for a form that is not a sign-in, from ``(headline,
+    detail, status)``.
     """
+    refuse = refuse or (lambda headline, detail, status: _auth_error(request, headline, detail, status))
     try:
-        raw = await read_bounded_body(request, _AUTH_FORM_BODY_LIMIT)
+        raw = await read_bounded_body(request, limit)
     except BodyError as exc:
         if exc.status == 413:
-            return None, await _auth_error(request, "This form is too large", "Reload and try again.", 413)
-        return None, await _auth_error(request, "This form was interrupted", "Reload and try again.", 400)
+            return None, await refuse("This form is too large", "Reload and try again.", 413)
+        return None, await refuse("This form was interrupted", "Reload and try again.", 400)
     replayed = False
 
     async def receive():
@@ -1401,11 +1452,12 @@ async def _run_password_work(function, *args, **kwargs):
 
 async def _auth_form(
     request: Request, headline: str, body: str, status_code: int = 200, head: str = "",
+    headers: dict | None = None,
 ) -> HTMLResponse:
     mark = await asyncio.get_running_loop().run_in_executor(_login_mark_executor, _login_page_mark)
     return HTMLResponse(
         _render_form_page(_config.bot_name, headline, body, mark, head, sheet=_in_app_sheet(request)),
-        status_code=status_code, headers=_AUTH_PAGE_HEADERS,
+        status_code=status_code, headers=headers or _AUTH_PAGE_HEADERS,
     )
 
 
@@ -1635,6 +1687,386 @@ async def set_password_submit(request: Request):
         return await _invalid_auth_link(request)
     response = await _start_email_session(request, result) if result is not None else None
     return response or await _invalid_auth_link(request)
+
+
+# Secret links (`webui/secret_links.py`, issued by `istota-credential
+# request-link`): a one-use form that stores one credential, opened from the
+# user's private chat. The token is the authority, so no login is needed, and
+# GET writes nothing, since link previews fetch it.
+_SECRET_LINK_PATH = "/istota/secret"
+_SECRET_LINK_HEADERS = {
+    **_AUTH_PAGE_HEADERS,
+    "Content-Security-Policy": "frame-ancestors 'none'",
+    "X-Robots-Tag": "noindex",
+}
+# A value and a username at the store's 8 KiB cap, each percent-encoded to up
+# to three times that, plus the two tokens. nginx caps the location at twice this.
+_SECRET_FORM_BODY_LIMIT = 64 * 1024
+# The field goes back to a password before the form is sent, so a password
+# manager still offers to save it.
+_SECRET_REVEAL_SCRIPT = (
+    "(function(){var b=document.getElementById('secret-reveal'),"
+    "i=document.getElementById('secret-value');if(!b||!i)return;b.hidden=false;"
+    "b.addEventListener('click',function(){var s=i.type==='password';"
+    "i.type=s?'text':'password';b.textContent=s?'Hide':'Show';"
+    "b.setAttribute('aria-pressed',s?'true':'false');i.focus()});"
+    "i.form.addEventListener('submit',function(){i.type='password'})})();"
+)
+_SECRET_FIELD_LABELS = {"value": "The password", "username": "The username"}
+
+
+class _SecretLinkRace(Exception):
+    """The spend found the link already spent; raised to roll the store back."""
+
+
+def _secret_link_account_refusal(conn, user_id: str) -> bool:
+    """Whether the link's user can no longer store a credential here.
+
+    Removed from the config, profile deleted, web identity disabled, or the
+    credential store's isolation gate refusing them, as Settings would.
+    """
+    if user_id not in _config.users:
+        return True
+    if user_profiles.get_profile(_config.db_path, user_id, conn=conn) is None:
+        return True
+    row = conn.execute("SELECT disabled FROM web_auth_identities WHERE user_id=?", (user_id,)).fetchone()
+    if row is not None and row[0]:
+        return True
+    return bool(_web_vault_refusal(user_id))
+
+
+def _secret_link_view(token: object) -> dict | None:
+    """What the form shows for a live credential link, or None. Writes nothing.
+
+    For a name that already exists, the hosts are the ones the stored
+    credential is bound to, which the save keeps, not the URL the link carried.
+    """
+    from istota import db
+    from istota.credentials import local
+    from istota.credentials.broker import bindings
+    from istota.webui import secret_links
+
+    link = secret_links.peek(_config.db_path, token)
+    if link is None or link.intent != "credential":
+        return None
+    name = link.params["name"]
+    with db.get_db(_config.db_path) as conn:
+        if _secret_link_account_refusal(conn, link.user_id):
+            return None
+        profile = user_profiles.get_profile(_config.db_path, link.user_id, conn=conn)
+        existing = local.is_local(conn, link.user_id, name)
+        if existing:
+            hosts = list((bindings.get_entry_binding(conn, link.user_id, name) or {"hosts": []})["hosts"])
+            username_set = local.stored_fields(conn, link.user_id, name)["username_set"]
+        else:
+            host = secret_links.link_host(link.params.get("url"))
+            hosts = [host] if host else []
+            username_set = False
+    expires = secret_links.local_clock(_config, link.user_id, secret_links.expiry(link.expires_at))
+    return {
+        "link": link, "name": name, "hosts": hosts, "existing": existing,
+        "asks_username": link.params.get("username") is True, "username_set": username_set,
+        "display_name": (profile.display_name if profile else "") or link.user_id,
+        "expires": expires,
+    }
+
+
+def _stored_headers(binding: dict) -> str:
+    """The binding's header names as `local.update` takes them, the default as empty."""
+    from istota.credentials.broker.bindings import DEFAULT_HEADERS
+
+    headers = list(binding.get("headers") or [])
+    return "" if headers == sorted(DEFAULT_HEADERS) else ", ".join(headers)
+
+
+def _grant_secret_link_entry(conn, link) -> None:
+    """Grant a new credential to the conversation that asked for the link, as `vault_create` does.
+
+    A savepoint, so a grant that fails leaves the credential stored.
+    """
+    from istota.credentials.broker.grants import grant_created_entry
+
+    conn.execute("SAVEPOINT secret_link_grant")
+    try:
+        grant_created_entry(conn, link.user_id, link.params["name"], link.task_id)
+    except Exception as exc:
+        conn.execute("ROLLBACK TO secret_link_grant")
+        logger.warning("secret_link id=%s: conversation grant failed: %s", link.id, type(exc).__name__)
+    conn.execute("RELEASE secret_link_grant")
+
+
+def _store_secret_link(token: object, action: str, value: str, username: str) -> dict:
+    """Cancel or save through a credential link, in one ``BEGIN IMMEDIATE``.
+
+    The live row is read again under the write lock, so of two saves racing
+    one stores and the other finds the link spent. A refused value rolls back
+    to a savepoint and counts a failure; ``record_failure`` spends the link on
+    the last one. Returns ``{"result": ...}``: ``invalid``, ``cancelled``,
+    ``refused`` (the account changed since issue, link spent), ``retry``,
+    ``closed`` or ``stored``.
+    """
+    from istota import db
+    from istota.credentials import local
+    from istota.credentials.broker import bindings
+    from istota.webui import secret_links
+
+    with db.get_db(_config.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        link = secret_links.live_for_update(conn, token)
+        if link is None or link.intent != "credential":
+            return {"result": "invalid"}
+        if action == "cancel":
+            secret_links.spend(conn, link.id, "cancelled")
+            return {"result": "cancelled", "link": link}
+        user_id, name = link.user_id, link.params["name"]
+        existing = local.is_local(conn, user_id, name)
+        if (_secret_link_account_refusal(conn, user_id)
+                or (not existing and name in local._taken_names(conn, user_id))):
+            secret_links.spend(conn, link.id, "failed")
+            return {"result": "refused", "link": link}
+        asks_username = link.params.get("username") is True
+        actor = f"secret_link:{link.id}"
+        conn.execute("SAVEPOINT secret_link_write")
+        try:
+            if existing:
+                stored = local.stored_fields(conn, user_id, name)
+                binding = bindings.get_entry_binding(conn, user_id, name) or {}
+                local.update(
+                    conn, user_id, name, value=value,
+                    username=(username or None) if asks_username else None,
+                    url=stored["url"], extra_hosts=stored["extra_hosts"],
+                    headers=_stored_headers(binding), revealable=bool(binding.get("revealable")),
+                    actor=actor,
+                )
+            else:
+                local.create(conn, user_id, local.LocalCredential(
+                    name=name, value=value, username=username if asks_username else "",
+                    url=link.params["url"],
+                ), actor=actor)
+        except local.LocalCredentialError as exc:
+            conn.execute("ROLLBACK TO secret_link_write")
+            conn.execute("RELEASE secret_link_write")
+            failures = secret_links.record_failure(conn, link.id)
+            result = "closed" if failures >= secret_links.MAX_FAILURES else "retry"
+            return {"result": result, "link": link, "field": exc.field, "message": str(exc),
+                    "failures": failures}
+        conn.execute("RELEASE secret_link_write")
+        if not existing:
+            _grant_secret_link_entry(conn, link)
+        if not secret_links.spend(conn, link.id, "stored"):
+            raise _SecretLinkRace()
+    return {"result": "stored", "link": link, "created": not existing}
+
+
+def _secret_link_notice(link, kind: str) -> None:
+    """The bell row confirming a use of the link, handed to the daemon to deliver.
+
+    After the store's commit, in a transaction of its own, so a notice that
+    fails leaves the store standing. The web process holds no WhatsApp bridge,
+    so it never sends one itself (ISSUE-702).
+    """
+    from istota import db
+    from istota.notifications.resolvers import task_alert
+    from istota.notifications.store import hand_to_daemon
+    from istota.webui import secret_links
+
+    name = link.params["name"]
+    at = secret_links.local_clock(_config, link.user_id, datetime.now(timezone.utc))
+    if kind == "stored":
+        title = f"Credential {name} saved"
+        body = (f"Saved from a link at {at}. If that wasn't you, delete it in "
+                "Settings, Credentials, or tell me.")
+        severity = "warning"
+    elif kind == "cancelled":
+        title = f"Link for {name} cancelled"
+        body = f"The link to enter it was cancelled at {at}. Nothing was stored."
+        severity = "info"
+    else:
+        title = f"Link for {name} closed"
+        body = (f"The link to enter it was closed at {at} after {secret_links.MAX_FAILURES} "
+                "failed tries. Nothing was stored. Ask me for a new one if you still need it.")
+        severity = "warning"
+    try:
+        with db.get_db(_config.db_path) as conn:
+            raised = task_alert.write(
+                conn, link.user_id, dedup_key=f"secret-link:{link.id}", title=title, body=body,
+                severity=severity, params={"task_id": link.task_id, "status": f"secret_link_{kind}"},
+            )
+            hand_to_daemon(conn, [raised])
+    except Exception as exc:
+        logger.warning("secret_link id=%s: notice could not be sent: %s", link.id, type(exc).__name__)
+
+
+async def _secret_link_page(request: Request, headline: str, detail: str, status_code: int,
+                            icon: str = "") -> HTMLResponse:
+    body = (f'<div class="result-icon">{icon}</div>' if icon else "") + f"<p>{escape(detail)}</p>"
+    return await _auth_form(request, headline, body, status_code, headers=_SECRET_LINK_HEADERS)
+
+
+async def _secret_link_dead(request: Request) -> HTMLResponse:
+    # One page for unknown, expired, used and cancelled, so a guess learns nothing.
+    return await _secret_link_page(
+        request, "This link has expired or was already used",
+        f"Ask {_config.bot_name} for a new one.", 400,
+    )
+
+
+async def _secret_link_other_account(request: Request) -> HTMLResponse:
+    return await _secret_link_page(
+        request, "This link belongs to another account",
+        "Sign out first, or open the link where you are not signed in.", 403,
+    )
+
+
+async def _secret_link_signed_in_as(request: Request) -> str | None:
+    """The user a valid web session is for, or None without one."""
+    try:
+        user = await asyncio.to_thread(_require_api_auth, request)
+    except _UnauthorizedException:
+        return None
+    return user["username"]
+
+
+def _secret_link_error_text(field: str, message: str) -> str:
+    """A store refusal as a sentence naming the form's own field, not the store's."""
+    label = _SECRET_FIELD_LABELS.get(field)
+    if label and message.startswith(field + " "):
+        message = label + message[len(field):]
+    message = message[:1].upper() + message[1:]
+    return message if message.endswith(".") else message + "."
+
+
+async def _secret_link_form(request: Request, token: str, view: dict, error: str = "") -> HTMLResponse:
+    bot = escape(_config.bot_name)
+    used_on = ", ".join(view["hosts"]) if view["hosts"] else "No site yet"
+    rows = (
+        ("Credential", f'<code>{escape(view["name"])}</code>'),
+        ("Used on", escape(used_on)),
+        ("Account", escape(view["display_name"])),
+        ("Link expires", escape(view["expires"])),
+    )
+    body = '<dl class="link-summary">' + "".join(
+        f"<div><dt>{label}</dt><dd>{value}</dd></div>" for label, value in rows) + "</dl>"
+    if error:
+        body += f'<p class="form-error" role="alert">{escape(error)}</p>'
+    hidden = (
+        f'<input type="hidden" name="token" value="{escape(token)}">'
+        f'<input type="hidden" name="csrf_token" value="{escape(_csrf_token(request, "secret-link"))}">'
+    )
+    body += f'<form method="post" action="{_SECRET_LINK_PATH}">{hidden}<input type="hidden" name="action" value="save">'
+    if view["asks_username"]:
+        keep = view["username_set"]
+        body += (
+            '<div class="form-field"><label for="secret-username">Username</label>'
+            '<input id="secret-username" type="text" name="username" autocomplete="username" '
+            'autocapitalize="off" autocorrect="off" spellcheck="false"'
+            + (' aria-describedby="secret-username-help">'
+               '<p class="form-help" id="secret-username-help">Leave it empty to keep the stored one.</p>'
+               if keep else ">")
+            + "</div>"
+        )
+    body += (
+        '<div class="form-field"><div class="password-label"><label for="secret-value">Password</label>'
+        '<button class="recovery reveal" type="button" id="secret-reveal" aria-controls="secret-value" '
+        'aria-pressed="false" hidden>Show</button></div>'
+        '<input id="secret-value" type="password" name="value" autocomplete="current-password" '
+        'autocapitalize="off" autocorrect="off" spellcheck="false" required '
+        'aria-describedby="secret-value-help"></div>'
+        f'<p class="form-help" id="secret-value-help">This goes straight to {bot}’s credential '
+        'store, not into the chat.</p>'
+        f'<button class="btn btn-primary" type="submit">{_LOCK_ICON}Save</button></form>'
+        f'<form method="post" action="{_SECRET_LINK_PATH}">{hidden}'
+        '<input type="hidden" name="action" value="cancel">'
+        '<button class="btn-text" type="submit">Cancel this link</button></form>'
+        f"<script>{_SECRET_REVEAL_SCRIPT}</script>"
+    )
+    headline = "Update a password" if view["existing"] else "Enter a password"
+    return await _auth_form(request, headline, body, 400 if error else 200, headers=_SECRET_LINK_HEADERS)
+
+
+@auth_router.get("/secret")
+async def secret_link_page(request: Request):
+    token = request.query_params.get("token", "")
+    try:
+        view = await asyncio.to_thread(_secret_link_view, token)
+    except Exception as exc:
+        logger.warning("secret_link lookup failed: %s", type(exc).__name__)
+        view = None
+    if view is None:
+        return await _secret_link_dead(request)
+    if (await _secret_link_signed_in_as(request)) not in (None, view["link"].user_id):
+        return await _secret_link_other_account(request)
+    return await _secret_link_form(request, token, view)
+
+
+@auth_router.post("/secret")
+async def secret_link_submit(request: Request):
+    from istota.credentials import names as secrets_vault
+    from istota.webui import secret_links
+
+    def refuse(headline, detail, status):
+        return _secret_link_page(request, headline, detail, status)
+
+    form, refused = await _read_auth_form(request, _SECRET_FORM_BODY_LIMIT, refuse)
+    if refused is not None:
+        return refused
+    token = form.get("token", "")
+    try:
+        link = await asyncio.to_thread(secret_links.peek, _config.db_path, token)
+    except Exception as exc:
+        logger.warning("secret_link lookup failed: %s", type(exc).__name__)
+        link = None
+    if link is None or link.intent != "credential":
+        return await _secret_link_dead(request)
+    if (await _secret_link_signed_in_as(request)) not in (None, link.user_id):
+        return await _secret_link_other_account(request)
+    if not _check_csrf(request, "secret-link", form.get("csrf_token")):
+        return await _secret_link_page(request, "This form expired", "Reload the page and try again.", 403)
+    action = form.get("action")
+    if action not in ("save", "cancel"):
+        return await _secret_link_page(request, "This form was interrupted", "Reload the page and try again.", 400)
+    value, username = form.get("value", ""), form.get("username", "")
+    value = value if isinstance(value, str) else ""
+    username = username if isinstance(username, str) else ""
+    try:
+        outcome = await asyncio.to_thread(_store_secret_link, token, action, value, username)
+    except _SecretLinkRace:
+        return await _secret_link_dead(request)
+    except Exception as exc:
+        # The type only: an exception's text could carry what was being stored.
+        logger.error("secret_link id=%s: store failed: %s", link.id, type(exc).__name__)
+        return await _secret_link_page(
+            request, "Something went wrong", "Nothing was stored. Go back and try again.", 500)
+    result = outcome["result"]
+    label = secrets_vault._label(link.params["name"])
+    if result in ("invalid", "refused"):
+        if result == "refused":
+            logger.info("secret_link id=%s name=%s: refused, the account changed since issue", link.id, label)
+        return await _secret_link_dead(request)
+    if result == "cancelled":
+        logger.info("secret_link id=%s name=%s: cancelled", link.id, label)
+        await asyncio.to_thread(_secret_link_notice, link, "cancelled")
+        return await _secret_link_page(request, "Link cancelled", "Nothing was stored. You can close this page.", 200)
+    if result == "closed":
+        logger.info("secret_link id=%s name=%s: closed after %s failures", link.id, label, outcome["failures"])
+        await asyncio.to_thread(_secret_link_notice, link, "closed")
+        return await _secret_link_page(
+            request, "This link is closed",
+            f"It failed too many times, so nothing was stored. Ask {_config.bot_name} for a new one.", 400)
+    if result == "retry":
+        logger.info("secret_link id=%s name=%s: refused field=%s", link.id, label, outcome["field"] or "-")
+        view = await asyncio.to_thread(_secret_link_view, token)
+        if view is None:
+            return await _secret_link_dead(request)
+        left = secret_links.MAX_FAILURES - outcome["failures"]
+        error = _secret_link_error_text(outcome["field"], outcome["message"])
+        error += f" {left} {'try' if left == 1 else 'tries'} left."
+        return await _secret_link_form(request, token, view, error)
+    logger.info("secret_link id=%s name=%s: stored (%s)", link.id, label,
+                "created" if outcome["created"] else "updated")
+    await asyncio.to_thread(_secret_link_notice, link, "stored")
+    return await _secret_link_page(
+        request, "Saved", "You can close this page and go back to the chat.", 200, icon=_CIRCLE_CHECK_ICON)
 
 
 # Email sign-in by code (ISSUE-574). The browser that asks holds a secret in its
