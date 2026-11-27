@@ -19,6 +19,7 @@ import json
 import secrets
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from istota.db import get_db
@@ -48,6 +49,42 @@ class SecretLink:
     task_id: int
     room_token: str
     expires_at: str
+
+
+def link_host(url) -> str | None:
+    """The one host a credential link's credential is bound to, or None for a URL that is not a site.
+
+    The rule the credential store applies on create (`local._site_shaped` and
+    `parse_binding`), so a link is never issued for a URL its form could not save.
+    """
+    from istota.credentials import local
+    from istota.credentials.broker.bindings import parse_binding
+
+    if not isinstance(url, str) or not url or url != url.strip() or not local._site_shaped(url):
+        return None
+    hosts = parse_binding(url, {}, [], source=local.SOURCE)["hosts"]
+    return hosts[0] if len(hosts) == 1 else None
+
+
+def expiry(stored: str) -> datetime:
+    """A link's ``expires_at``, which is UTC, as an aware datetime."""
+    return datetime.strptime(stored, "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=timezone.utc)
+
+
+def local_clock(config, user_id: str, when: datetime) -> str:
+    """``when`` as the user's wall-clock time, or UTC said as such when they chose no zone.
+
+    The delivered message and the form both say the expiry this way, so the
+    two never disagree.
+    """
+    from zoneinfo import ZoneInfo
+
+    from istota.lib.timezones import is_valid_timezone
+
+    name = config.resolve_user_timezone(user_id, default="")
+    if not name or not is_valid_timezone(name):
+        return when.strftime("%H:%M UTC")
+    return when.astimezone(ZoneInfo(name)).strftime("%H:%M")
 
 
 def _digest(token: str) -> str:

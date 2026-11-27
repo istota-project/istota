@@ -367,40 +367,6 @@ class _LinkRefused(Exception):
     """A secret link refused with ``(reason, message)``, raised to roll back what was written."""
 
 
-def _link_host(url) -> str | None:
-    """The one host a secret link's credential is bound to, or None for a URL that is not a site.
-
-    The rule the credential store applies on create (`local._site_shaped` and
-    `parse_binding`), so a link is never issued for a URL its form could not save.
-    """
-    from istota.credentials import local
-    from istota.credentials.broker.bindings import parse_binding
-
-    if not isinstance(url, str) or not url or url != url.strip() or not local._site_shaped(url):
-        return None
-    hosts = parse_binding(url, {}, [], source=local.SOURCE)["hosts"]
-    return hosts[0] if len(hosts) == 1 else None
-
-
-def _utc_expiry(stored: str):
-    """A `secret_links.expires_at` value, which is UTC, as an aware datetime."""
-    from datetime import datetime, timezone
-
-    return datetime.strptime(stored, "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=timezone.utc)
-
-
-def _local_clock(config, user_id: str, when) -> str:
-    """``when`` as the user's wall-clock time, or UTC said as such when they chose no zone."""
-    from zoneinfo import ZoneInfo
-
-    from istota.lib.timezones import is_valid_timezone
-
-    name = config.resolve_user_timezone(user_id, default="")
-    if not name or not is_valid_timezone(name):
-        return when.strftime("%H:%M UTC")
-    return when.astimezone(ZoneInfo(name)).strftime("%H:%M")
-
-
 class _RequestTooLarge(Exception):
     """A request passed `MAX_REQUEST_BYTES`."""
 
@@ -1516,7 +1482,7 @@ class SkillProxy:
                 if (name in local._taken_names(database, user_id)
                         and not local.is_local(database, user_id, name)):
                     raise _LinkRefused("not_local", "That name belongs to a credential edited elsewhere")
-                host = _link_host(url)
+                host = secret_links.link_host(url)
                 if host is None:
                     raise _LinkRefused("bad_url", "Give the site as a hostname or https URL, with no path")
                 task = db.get_task(database, task_id)
@@ -1534,12 +1500,12 @@ class SkillProxy:
                     if exc.reason == "too_many_links":
                         raise _LinkRefused("too_many_links", "Too many unused links; use or let one expire") from None
                     raise
-                expires = _utc_expiry(link.expires_at)
+                expires = secret_links.expiry(link.expires_at)
                 what = "username and password" if username else "password"
                 text = (
                     f"Enter the {what} for `{name}` ({host}) here: "
                     f"{scheme}://{origin_host}/istota/secret?token={token}\n"
-                    f"It works once and expires at {_local_clock(config, user_id, expires)}. "
+                    f"It works once and expires at {secret_links.local_clock(config, user_id, expires)}. "
                     "I only send these when you ask for one."
                 )
                 try:
