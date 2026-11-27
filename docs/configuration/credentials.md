@@ -115,6 +115,8 @@ Istota does not see the link either. The task runs `istota-credential request-li
 > Enter the password for `example_mail` (mail.example.com) here: https://istota.example.com/istota/secret?token=...
 > It works once and expires at 14:15. I only send these when you ask for one.
 
+The same kind of link connects a Google account from chat. That one opens Google's consent screen instead of a form; see [Google Workspace](../features/google-workspace.md#connecting-from-chat).
+
 ### The form
 
 The form shows the credential's name, the site it is used on, the account it is for and when the link expires. It asks for the password, and for a username when the link was made with `--username`. **Save** stores it; **Cancel this link** closes the link and stores nothing. You do not need to be signed in. If the browser is signed in to Istota as a different user, the page says the link belongs to another account and the link stays usable.

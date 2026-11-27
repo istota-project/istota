@@ -208,10 +208,12 @@ class TestDeadLinks:
         assert "Ask Ada for a new one" in text
         assert (await client.get("/istota/secret")).status_code == 400
 
-    async def test_another_intent_is_not_served_here(self, client, configured):
+    async def test_a_google_link_gets_its_own_page_not_the_credential_form(self, client, configured):
+        # The Google intent's own cases are in tests/test_admin_google_connection.py.
         token, _ = _issue(configured._config, intent="google_connect")
         status, text = await self._generic(client, token)
-        assert status == 400 and "expired or was already used" in text
+        assert status == 200 and "Connect Google" in text
+        assert 'name="value"' not in text and 'value="save"' not in text
 
 
 class TestAnotherAccount:

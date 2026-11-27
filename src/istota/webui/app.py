@@ -1746,11 +1746,12 @@ class _SecretLinkRace(Exception):
     """The spend found the link already spent; raised to roll the store back."""
 
 
-def _secret_link_account_refusal(conn, user_id: str) -> bool:
-    """Whether the link's user can no longer store a credential here.
+def _secret_link_account_refusal(conn, user_id: str, *, vault: bool = True) -> bool:
+    """Whether the link's user can no longer use a link here.
 
-    Removed from the config, profile deleted, web identity disabled, or the
-    credential store's isolation gate refusing them, as Settings would.
+    Removed from the config, profile deleted, web identity disabled, or, for
+    a credential (``vault``), the credential store's isolation gate refusing
+    them, as Settings would.
     """
     if user_id not in _config.users:
         return True
@@ -1759,14 +1760,15 @@ def _secret_link_account_refusal(conn, user_id: str) -> bool:
     row = conn.execute("SELECT disabled FROM web_auth_identities WHERE user_id=?", (user_id,)).fetchone()
     if row is not None and row[0]:
         return True
-    return bool(_web_vault_refusal(user_id))
+    return vault and bool(_web_vault_refusal(user_id))
 
 
 def _secret_link_view(token: object) -> dict | None:
-    """What the form shows for a live credential link, or None. Writes nothing.
+    """What the page shows for a live link, or None. Writes nothing.
 
-    For a name that already exists, the hosts are the ones the stored
-    credential is bound to, which the save keeps, not the URL the link carried.
+    For a credential name that already exists, the hosts are the ones the
+    stored credential is bound to, which the save keeps, not the URL the link
+    carried. A ``google_connect`` link's view is `_google_link_view`'s.
     """
     from istota import db
     from istota.credentials import local
@@ -1774,6 +1776,8 @@ def _secret_link_view(token: object) -> dict | None:
     from istota.webui import secret_links
 
     link = secret_links.peek(_config.db_path, token)
+    if link is not None and link.intent == "google_connect":
+        return _google_link_view(link)
     if link is None or link.intent != "credential":
         return None
     name = link.params["name"]
@@ -1791,10 +1795,31 @@ def _secret_link_view(token: object) -> dict | None:
             username_set = False
     expires = secret_links.local_clock(_config, link.user_id, secret_links.expiry(link.expires_at))
     return {
+        "intent": "credential",
         "link": link, "name": name, "hosts": hosts, "existing": existing,
         "asks_username": link.params.get("username") is True, "username_set": username_set,
         "display_name": (profile.display_name if profile else "") or link.user_id,
         "expires": expires,
+    }
+
+
+def _google_link_view(link) -> dict | None:
+    """What a live ``google_connect`` link's page shows: the account, and the
+    services the consent would ask for now, in the settings card's words."""
+    from istota import db
+    from istota.credentials import google_scopes
+    from istota.webui import secret_links
+
+    with db.get_db(_config.db_path) as conn:
+        if _secret_link_account_refusal(conn, link.user_id, vault=False):
+            return None
+        profile = user_profiles.get_profile(_config.db_path, link.user_id, conn=conn)
+    scopes = _google_requested_scopes(link.user_id)
+    return {
+        "intent": "google_connect", "link": link,
+        "display_name": (profile.display_name if profile else "") or link.user_id,
+        "expires": secret_links.local_clock(_config, link.user_id, secret_links.expiry(link.expires_at)),
+        "scopes": scopes, "services": google_scopes.requested_services(scopes),
     }
 
 
@@ -1897,9 +1922,18 @@ def _secret_link_notice(link, kind: str) -> None:
     from istota.notifications.store import hand_to_daemon
     from istota.webui import secret_links
 
-    name = link.params["name"]
     at = secret_links.local_clock(_config, link.user_id, datetime.now(timezone.utc))
-    if kind == "stored":
+    name = link.params.get("name", "")
+    if link.intent == "google_connect" and kind == "connected":
+        title = "Google connected"
+        body = (f"A Google account was connected from a link at {at}. If that wasn't you, "
+                "disconnect it in Settings, Connections, or tell me.")
+        severity = "warning"
+    elif link.intent == "google_connect":
+        title = "Link to connect Google cancelled"
+        body = f"The link was cancelled at {at}. Nothing was connected."
+        severity = "info"
+    elif kind == "stored":
         title = f"Credential {name} saved"
         body = (f"Saved from a link at {at}. If that wasn't you, delete it in "
                 "Settings, Credentials, or tell me.")
@@ -2035,6 +2069,188 @@ async def _secret_link_form(
     return await _auth_form(request, headline, body, 400 if error else 200, headers=_SECRET_LINK_HEADERS)
 
 
+_EXTERNAL_LINK_ICON = _lucide(
+    "external-link",
+    '<path d="M15 3h6v6"/><path d="M10 14 21 3"/>'
+    '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+)
+
+# A `google_connect` link's POST binds its user to this browser session for the
+# callback, which then needs no login. The keys live until the callback or the
+# link's own lifetime, whichever comes first.
+_GOOGLE_LINK_USER_KEY = "secret_link_user"
+_GOOGLE_LINK_ID_KEY = "secret_link_id"
+_GOOGLE_LINK_UNTIL_KEY = "secret_link_until"
+_GOOGLE_CONNECTED_PATH = "/istota/google/connected"
+
+
+def _google_oauth_ready() -> bool:
+    return _oauth is not None and hasattr(_oauth, "google")
+
+
+async def _google_unavailable(request: Request) -> HTMLResponse:
+    return await _secret_link_page(
+        request, "Google isn’t set up here",
+        f"Ask whoever runs {_config.bot_name} to set up Google Workspace. This link still works "
+        "until it expires.", 503,
+    )
+
+
+async def _google_no_services(request: Request, status_code: int) -> HTMLResponse:
+    return await _secret_link_page(
+        request, "Choose Google services first",
+        "No Google services are selected for this account. Choose them in Settings, "
+        "Connections, then open this link again.", status_code,
+    )
+
+
+async def _google_not_connected(request: Request) -> HTMLResponse:
+    return await _secret_link_page(
+        request, "Google wasn’t connected",
+        f"Nothing was stored. Ask {_config.bot_name} for a new link to try again.", 400,
+    )
+
+
+async def _google_link_form(request: Request, token: str, view: dict) -> HTMLResponse:
+    rows = [("Account", escape(view["display_name"]))]
+    rows += [(escape(label), escape(level)) for label, level in view["services"]]
+    rows.append(("Link expires", escape(view["expires"])))
+    hidden = (
+        f'<input type="hidden" name="token" value="{escape(token)}">'
+        f'<input type="hidden" name="csrf_token" value="{escape(_csrf_token(request, "secret-link"))}">'
+    )
+    body = (
+        '<dl class="link-summary">'
+        + "".join(f"<div><dt>{label}</dt><dd>{value}</dd></div>" for label, value in rows)
+        + "</dl>"
+        f'<form method="post" action="{_SECRET_LINK_PATH}">{hidden}'
+        '<input type="hidden" name="action" value="connect">'
+        '<p class="form-help">Google asks you to sign in and approve this access. The Google '
+        f'account you approve is connected to {escape(view["display_name"])} in '
+        f'{escape(_config.bot_name)}.</p>'
+        f'<button class="btn btn-primary" type="submit">{_EXTERNAL_LINK_ICON}Continue to Google</button>'
+        '</form>'
+        f'<form method="post" action="{_SECRET_LINK_PATH}">{hidden}'
+        '<input type="hidden" name="action" value="cancel">'
+        '<button class="btn-text" type="submit">Cancel this link</button></form>'
+    )
+    return await _auth_form(request, "Connect Google", body, headers=_SECRET_LINK_HEADERS)
+
+
+async def _google_link_page(request: Request, token: str, view: dict) -> HTMLResponse:
+    if not _google_oauth_ready():
+        return await _google_unavailable(request)
+    if not view["scopes"]:
+        return await _google_no_services(request, 200)
+    return await _google_link_form(request, token, view)
+
+
+def _spend_google_link(token: object, outcome: str):
+    """Spend a live ``google_connect`` link, or say why not, in one ``BEGIN IMMEDIATE``.
+
+    ``("spent", link)``, ``("invalid", None)``, or ``("refused", link)`` when
+    the account changed since issue, which spends the link ``failed``.
+    """
+    from istota import db
+    from istota.webui import secret_links
+
+    with db.get_db(_config.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        link = secret_links.live_for_update(conn, token)
+        if link is None or link.intent != "google_connect":
+            return "invalid", None
+        if _secret_link_account_refusal(conn, link.user_id, vault=False):
+            secret_links.spend(conn, link.id, "failed")
+            return "refused", link
+        if not secret_links.spend(conn, link.id, outcome):
+            return "invalid", None
+        return "spent", link
+
+
+async def _google_authorize(request: Request, scopes: list[str]):
+    """Send the browser to Google's consent screen for ``scopes``.
+
+    ``access_type=offline`` is what makes Google issue a refresh token at all,
+    and ``prompt=consent`` is what makes it issue one *again* on a reconnect;
+    ``google_callback`` refuses a response without one (it could not refresh
+    an hour later). Changing the per-user selection is exactly such a reconnect.
+    The registered client carries the operator's whole ceiling as its default
+    scope; authlib prefers the ``scope`` passed here, so this is an override.
+    """
+    hostname, scheme = _get_external_origin()
+    return await _oauth.google.authorize_redirect(
+        request, f"{scheme}://{hostname}/istota/google/callback",
+        scope=" ".join(scopes), access_type="offline", prompt="consent",
+    )
+
+
+async def _google_link_submit(request: Request, form, link) -> Response:
+    """POST on a ``google_connect`` link: cancel it, or spend it and start Google's consent.
+
+    The redirect is built before the link is spent, so a failure reaching
+    Google leaves the link usable. The spend binds the link's user to this
+    browser session for `google_callback`.
+    """
+    token = form.get("token", "")
+    action = form.get("action")
+    if action not in ("connect", "cancel"):
+        return await _secret_link_page(request, "This form was interrupted", "Reload the page and try again.", 400)
+    if action == "cancel":
+        result, spent = await asyncio.to_thread(_spend_google_link, token, "cancelled")
+        if result != "spent":
+            return await _secret_link_dead(request)
+        logger.info("secret_link id=%s google_connect: cancelled", spent.id)
+        await asyncio.to_thread(_secret_link_notice, spent, "cancelled")
+        return await _secret_link_page(request, "Link cancelled", "Nothing was connected. You can close this page.", 200)
+    if not _google_oauth_ready():
+        return await _google_unavailable(request)
+    scopes = await asyncio.to_thread(_google_requested_scopes, link.user_id)
+    if not scopes:
+        return await _google_no_services(request, 400)
+    try:
+        redirect = await _google_authorize(request, scopes)
+    except Exception as exc:
+        logger.error("secret_link id=%s google_connect: consent could not start: %s", link.id, type(exc).__name__)
+        return await _secret_link_page(
+            request, "Google couldn’t be reached", "Nothing was connected. Try this link again in a minute.", 502)
+    result, spent = await asyncio.to_thread(_spend_google_link, token, "connected")
+    if result != "spent":
+        if result == "refused":
+            logger.info("secret_link id=%s google_connect: refused, the account changed since issue", spent.id)
+        return await _secret_link_dead(request)
+    request.session[_GOOGLE_LINK_USER_KEY] = spent.user_id
+    request.session[_GOOGLE_LINK_ID_KEY] = spent.id
+    request.session[_GOOGLE_LINK_UNTIL_KEY] = int(time.time()) + _config.secret_links.ttl_seconds
+    logger.info("secret_link id=%s google_connect: consent started", spent.id)
+    return redirect
+
+
+def _pop_google_link_binding(request: Request) -> dict | None:
+    """The link user this session was bound to by a ``google_connect`` POST, or None.
+
+    Always removes the keys, so a binding serves one callback at most. One
+    past its lifetime, or of the wrong shape, is None.
+    """
+    user_id = request.session.pop(_GOOGLE_LINK_USER_KEY, None)
+    link_id = request.session.pop(_GOOGLE_LINK_ID_KEY, None)
+    until = request.session.pop(_GOOGLE_LINK_UNTIL_KEY, None)
+    if not isinstance(user_id, str) or not user_id or type(link_id) is not int or type(until) is not int:
+        return None
+    if time.time() > until:
+        return None
+    return {"user_id": user_id, "link_id": link_id}
+
+
+def _bound_google_link(conn, binding: dict):
+    """The bound link, when it is the user's ``google_connect`` link this flow spent; else None."""
+    from istota.webui import secret_links
+
+    link, outcome = secret_links.spent_link(conn, binding["link_id"])
+    if link is None or link.user_id != binding["user_id"] or link.intent != "google_connect":
+        return None
+    return link if outcome == "connected" else None
+
+
 @auth_router.get("/secret")
 async def secret_link_page(request: Request):
     token = request.query_params.get("token", "")
@@ -2047,6 +2263,8 @@ async def secret_link_page(request: Request):
         return await _secret_link_dead(request)
     if (await _secret_link_signed_in_as(request)) not in (None, view["link"].user_id):
         return await _secret_link_other_account(request)
+    if view["intent"] == "google_connect":
+        return await _google_link_page(request, token, view)
     return await _secret_link_form(request, token, view)
 
 
@@ -2067,12 +2285,14 @@ async def secret_link_submit(request: Request):
     except Exception as exc:
         logger.warning("secret_link lookup failed: %s", type(exc).__name__)
         link = None
-    if link is None or link.intent != "credential":
+    if link is None or link.intent not in ("credential", "google_connect"):
         return await _secret_link_dead(request)
     if (await _secret_link_signed_in_as(request)) not in (None, link.user_id):
         return await _secret_link_other_account(request)
     if not _check_csrf(request, "secret-link", form.get("csrf_token")):
         return await _secret_link_page(request, "This form expired", "Reload the page and try again.", 403)
+    if link.intent == "google_connect":
+        return await _google_link_submit(request, form, link)
     action = form.get("action")
     if action not in ("save", "cancel"):
         return await _secret_link_page(request, "This form was interrupted", "Reload the page and try again.", 400)
@@ -2617,13 +2837,6 @@ async def google_connect(request: Request):
         return RedirectResponse(url="/istota/login", status_code=302)
     if not _oauth or not hasattr(_oauth, "google"):
         return Response("Google Workspace not configured", status_code=500)
-    hostname, scheme = _get_external_origin()
-    redirect_uri = f"{scheme}://{hostname}/istota/google/callback"
-
-    # The registered client carries the operator's whole ceiling as its
-    # default scope. Pass the *user's* resolved subset per request instead —
-    # authlib's create_authorization_url takes `scope` in kwargs and prefers
-    # it over client.scope, so this is an override, not an addition.
     requested = _google_requested_scopes(user["username"])
     if not requested:
         # An empty scope string would send the user to a consent screen that
@@ -2633,36 +2846,50 @@ async def google_connect(request: Request):
             "instance scope ceiling", user["username"],
         )
         return RedirectResponse(url="/istota/settings/connections?google=no_scopes", status_code=302)
+    return await _google_authorize(request, requested)
 
-    # ``access_type=offline`` is what makes Google issue a refresh token at
-    # all, and ``prompt=consent`` is what makes it issue one *again* on a
-    # reconnect — otherwise it returns only an access token for a grant the
-    # user has already consented to. ``google_callback`` refuses to store a
-    # response without a refresh token (it could not refresh an hour later),
-    # so without both, reconnecting after a scope change or a revoke fails
-    # with a bare ``?google=error`` and no indication of the cause. Changing
-    # the per-user selection is exactly such a reconnect.
-    return await _oauth.google.authorize_redirect(
-        request, redirect_uri,
-        scope=" ".join(requested),
-        access_type="offline", prompt="consent",
-    )
+
+class _GoogleLinkRefused(Exception):
+    """The bound link's account changed during the provider round trip."""
 
 
 @auth_router.get("/google/callback")
 async def google_callback(request: Request):
-    """Handle Google OAuth callback — store tokens in DB."""
+    """Handle Google OAuth callback — store tokens in DB.
+
+    Two ways in: a logged-in session, as before, or a session a
+    ``google_connect`` secret link bound to its user (`_google_link_submit`),
+    which needs no login. A logged-in session decides the user when there is
+    one. A link-bound callback ends on the link's card, never a raw error.
+    """
+    binding = _pop_google_link_binding(request)
     try:
         user = await asyncio.to_thread(_require_api_auth, request)
     except _UnauthorizedException:
+        user = None
+    if user is None and binding is None:
         return RedirectResponse(url="/istota/login", status_code=302)
+    user_id = user["username"] if user is not None else binding["user_id"]
+    via_link = binding is not None and binding["user_id"] == user_id
+
+    async def failed() -> Response:
+        if user is None:
+            return await _google_not_connected(request)
+        return RedirectResponse(url="/istota/settings/connections?google=error", status_code=302)
+
     if not _oauth or not hasattr(_oauth, "google"):
+        if user is None:
+            return await _google_unavailable(request)
         return Response("Google Workspace not configured", status_code=500)
     try:
         token = await _oauth.google.authorize_access_token(request)
     except Exception as e:
-        logger.error("Google OAuth callback failed: %s", e)
-        return RedirectResponse(url="/istota/settings/connections?google=error", status_code=302)
+        if user is None:
+            # The provider's text can quote the request; the type is enough here.
+            logger.error("Google OAuth callback failed for a link: %s", type(e).__name__)
+        else:
+            logger.error("Google OAuth callback failed: %s", e)
+        return await failed()
 
     access_token = token.get("access_token", "")
     refresh_token = token.get("refresh_token", "")
@@ -2672,26 +2899,51 @@ async def google_callback(request: Request):
     if not access_token or not refresh_token:
         logger.error("Google OAuth: missing tokens (access=%s, refresh=%s)",
                       bool(access_token), bool(refresh_token))
-        return RedirectResponse(url="/istota/settings/connections?google=error", status_code=302)
+        return await failed()
 
     import json
     expiry = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
     scopes_json = json.dumps(scopes.split()) if isinstance(scopes, str) else json.dumps(scopes)
 
     from istota import db
+    link = None
     try:
         with db.get_db(_config.db_path) as conn:
             # Revocation can occur during the provider round trip. Serialize
             # the final check and write with credential mutations.
             conn.execute("BEGIN IMMEDIATE")
-            _require_api_auth(request)
+            if user is not None:
+                _require_api_auth(request)
+            if via_link:
+                link = _bound_google_link(conn, binding)
+                # With no login the bound link is the only authority, so it must still hold.
+                if user is None and (link is None
+                                     or _secret_link_account_refusal(conn, user_id, vault=False)):
+                    raise _GoogleLinkRefused()
             db.upsert_google_token(
-                conn, user["username"], access_token, refresh_token, expiry, scopes_json,
+                conn, user_id, access_token, refresh_token, expiry, scopes_json,
             )
     except _UnauthorizedException:
         return RedirectResponse(url="/istota/login", status_code=302)
-    logger.info("Google account connected for user %s", user["username"])
+    except _GoogleLinkRefused:
+        logger.info("secret_link id=%s google_connect: refused at the callback", binding["link_id"])
+        return await failed()
+    if link is not None:
+        logger.info("secret_link id=%s google_connect: Google account connected for user %s",
+                    link.id, user_id)
+        await asyncio.to_thread(_secret_link_notice, link, "connected")
+        return RedirectResponse(url=_GOOGLE_CONNECTED_PATH, status_code=302)
+    logger.info("Google account connected for user %s", user_id)
     return RedirectResponse(url="/istota/settings/connections?google=connected", status_code=302)
+
+
+@auth_router.get("/google/connected")
+async def google_connected(request: Request):
+    """Where a link-started Google connection ends. Static: it says nothing about who."""
+    return await _secret_link_page(
+        request, "Google connected", "You can close this page and go back to the chat.", 200,
+        icon=_CIRCLE_CHECK_ICON,
+    )
 
 
 # ============================================================================
@@ -2785,37 +3037,19 @@ def _google_granted_scopes(username: str) -> list[str] | None:
 
 
 def _google_scope_selection(username: str) -> dict[str, str]:
-    """The user's stored per-service selection ({} when they never chose).
-
-    Fails soft: a DB that is unreachable here must not block a connect, and
-    the empty selection resolves to the operator's whole ceiling, which is
-    what the user got before the picker existed.
-    """
+    """The user's stored per-service selection ({} when they never chose)."""
     if not _config:
         return {}
-    try:
-        from istota import user_profiles
-        from istota.credentials import google_scopes
-        profile = user_profiles.get_profile(_config.db_path, username)
-        if profile is None:
-            return {}
-        return google_scopes.normalize_selection(profile.google_scopes)
-    except Exception:
-        logger.warning(
-            "google_workspace: could not read the scope selection for %s; "
-            "falling back to the instance ceiling", username, exc_info=True,
-        )
-        return {}
+    from istota.credentials import google_tokens
+    return google_tokens.scope_selection(_config, username)
 
 
 def _google_requested_scopes(username: str) -> list[str]:
     """What a connect for this user would ask Google for, ceiling-clamped."""
-    if not _config or not _config.google_workspace:
+    if not _config:
         return []
-    from istota.credentials import google_scopes
-    return google_scopes.resolve_selection(
-        _google_scope_selection(username), _config.google_workspace.scopes,
-    )
+    from istota.credentials import google_tokens
+    return google_tokens.requested_scopes(_config, username)
 
 
 def _get_location_config(username: str) -> tuple[str, str, str] | None:
