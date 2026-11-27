@@ -1380,10 +1380,19 @@ def test_credential_maintenance_prunes_history_and_audit(db_path):
                changed_sections_json, secret_names_json, diff_text, created_at)
                VALUES ('applied', 'alice', 'd', '', '[]', '[]', '', '2020-01-01T00:00:00Z')"""
         )
+        conn.execute(
+            "INSERT INTO secret_links (token_hash, user_id, intent, task_id, room_token, expires_at) "
+            "VALUES ('old', 'alice', 'credential', 1, 'r', '2020-01-01 00:00:00.000000')"
+        )
+        conn.execute(
+            "INSERT INTO secret_links (token_hash, user_id, intent, task_id, room_token, expires_at) "
+            "VALUES ('live', 'alice', 'credential', 1, 'r', '2999-01-01 00:00:00.000000')"
+        )
     gate.run(0)
     with db.get_db(db_path) as conn:
         assert conn.execute("SELECT count(*) FROM credential_audit").fetchone()[0] == 0
         assert conn.execute("SELECT count(*) FROM config_change_requests").fetchone()[0] == 0
+        assert [r[0] for r in conn.execute("SELECT token_hash FROM secret_links")] == ["live"]
 
 
 def test_the_daemon_installs_the_model_lists_before_any_worker_exists():

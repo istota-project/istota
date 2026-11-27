@@ -1439,6 +1439,15 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # max_discovery_fetches_per_minute = 30  # across every sender
 
 # ============================================================================
+# Secret links (docs/configuration/credentials.md)
+# ============================================================================
+# A single-use link to a form on [site] hostname, sent to a user's private chat
+# when they ask to give Istota a password or key, so the value never passes
+# through the conversation.
+# [secret_links]
+# ttl_seconds = 900               # how long a link works (60 to 3600)
+
+# ============================================================================
 # Servarr skill: Sonarr, Radarr, Lidarr and Prowlarr (docs/features/servarr.md)
 # ============================================================================
 # One install-wide connection per app. Admins get every verb; users listed in

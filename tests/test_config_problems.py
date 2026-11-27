@@ -101,6 +101,7 @@ BAD_HOOK_VALUES: dict[str, object] = {
     "sharing.ocm.max_pending_per_user": 0,
     "sharing.ocm.pending_days": 0,
     "sharing.ocm.max_discovery_fetches_per_minute": 0,
+    "secret_links.ttl_seconds": 5,
     "brain.claude_code.advisor_model": 5,
     "health.max_document_bytes": -1,
     "security.vault_fetch_limit_per_task": -1,
