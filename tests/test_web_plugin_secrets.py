@@ -1,9 +1,9 @@
-"""A skill plugin's secrets on Settings > Connections.
+"""Settings > Plugins: the installed skill plugins and their secrets.
 
-The properties that matter: a plugin's `plugin_*` service is listed and
-writable only while a plugin the signed-in user can use declares it, no
-response carries a stored value, and an operator entry over a plugin cannot
-make a built-in service (`mail_account`) writable through these routes.
+The properties that matter: a plugin and its `plugin_*` service are listed,
+and the service writable, only for a user who can use that plugin; no response
+carries a stored credential; and an operator entry over a plugin cannot make a
+built-in service (`mail_account`) writable through these routes.
 """
 
 import secrets
@@ -16,6 +16,7 @@ from tests.support.plugin_fixture import build_plugins, render_skill_md
 from tests.test_web_app import app, client, config  # noqa: F401 -- shared fixtures
 
 SERVICES = "/istota/api/settings/services"
+PLUGINS = "/istota/api/settings/plugins"
 SECRETS = "/istota/api/settings/secrets"
 ORIGIN = {"Origin": "https://example.com"}
 MARKER = "synthetic-plugin-token-7c1d"
@@ -48,10 +49,48 @@ async def signed_client(client, config, monkeypatch, tmp_path):  # noqa: F811
     return client
 
 
-async def cards(http):
-    response = await http.get(SERVICES)
+async def listing(http):
+    response = await http.get(PLUGINS)
     assert response.status_code == 200, response.text
-    return {card["service"]: card for card in response.json()["services"]}
+    return response.json()
+
+
+async def cards(http):
+    return {card["service"]: card for card in (await listing(http))["services"]}
+
+
+async def test_an_installed_plugin_is_listed(signed_client, plugin_builder):
+    p = plugin_builder.installed()
+
+    assert (await listing(signed_client))["plugins"] == [{
+        "skill": p.skill,
+        "description": "Example plugin skill",
+        "plugin": f"{p.dist_name} {p.version}",
+        "disabled": False,
+    }]
+
+
+async def test_no_plugin_lists_nothing(signed_client):
+    assert await listing(signed_client) == {"plugins": [], "services": []}
+
+
+async def test_a_plugin_with_no_secret_is_listed_with_no_card(signed_client, plugin_builder):
+    p = plugin_builder.installed(env=[])
+
+    body = await listing(signed_client)
+
+    assert [row["skill"] for row in body["plugins"]] == [p.skill]
+    assert body["services"] == []
+
+
+async def test_a_plugin_the_user_disabled_is_listed_as_disabled(signed_client, config, plugin_builder):  # noqa: F811
+    p = plugin_builder.installed()
+    config.users["alice"].disabled_skills = [p.skill]
+
+    body = await listing(signed_client)
+
+    assert [(row["skill"], row["disabled"]) for row in body["plugins"]] == [(p.skill, True)]
+    assert "plugin_example" in {card["service"] for card in body["services"]}
 
 
 async def put(http, service, key, value=MARKER):
@@ -70,9 +109,10 @@ async def test_a_plugin_service_has_a_card(signed_client, plugin_builder):
     assert card["configured_keys"] == []
     assert p.dist_name in card["hint"]
     assert card["custom_ui"] is False and card["oauth"] is False
-    # The static cards are still there, ahead of the plugin's.
-    listed = list(await cards(signed_client))
-    assert listed.index("karakeep") < listed.index("plugin_example")
+    # Connections lists the built-in services only.
+    connected = (await signed_client.get(SERVICES)).json()["services"]
+    assert "plugin_example" not in {entry["service"] for entry in connected}
+    assert "karakeep" in {entry["service"] for entry in connected}
 
 
 async def test_a_plugin_secret_is_stored_and_never_returned(signed_client, config, plugin_builder):  # noqa: F811
@@ -84,9 +124,9 @@ async def test_a_plugin_secret_is_stored_and_never_returned(signed_client, confi
     assert MARKER not in response.text
     assert store.get_secret(config.db_path, "alice", "plugin_example", "token") == MARKER
     assert store.get_secret(config.db_path, "bob", "plugin_example", "token") is None
-    listing = await signed_client.get(SERVICES)
-    assert MARKER not in listing.text
-    card = {c["service"]: c for c in listing.json()["services"]}["plugin_example"]
+    answer = await signed_client.get(PLUGINS)
+    assert MARKER not in answer.text
+    card = {c["service"]: c for c in answer.json()["services"]}["plugin_example"]
     assert card["status"] == "configured"
     assert card["configured_keys"] == ["token"]
     assert card["values"] == {}
@@ -121,9 +161,9 @@ async def test_an_entry_not_marked_sensitive_is_a_plain_field(signed_client, con
     assert card["values"] == {"url": URL}
 
     assert (await put(signed_client, "plugin_acme", "token")).status_code == 200
-    listing = await signed_client.get(SERVICES)
-    assert MARKER not in listing.text
-    card = {c["service"]: c for c in listing.json()["services"]}["plugin_acme"]
+    answer = await signed_client.get(PLUGINS)
+    assert MARKER not in answer.text
+    card = {c["service"]: c for c in answer.json()["services"]}["plugin_acme"]
     assert card["status"] == "configured"
     assert card["values"] == {"url": URL}
 
@@ -134,9 +174,9 @@ async def test_a_key_any_entry_marks_sensitive_is_never_returned(signed_client, 
 
     assert (await put(signed_client, "plugin_acme", "url", URL)).status_code == 200
 
-    listing = await signed_client.get(SERVICES)
-    assert URL not in listing.text
-    card = {c["service"]: c for c in listing.json()["services"]}["plugin_acme"]
+    answer = await signed_client.get(PLUGINS)
+    assert URL not in answer.text
+    card = {c["service"]: c for c in answer.json()["services"]}["plugin_acme"]
     assert {"key": "url", "label": "url", "type": "password"} in card["fields"]
     assert card["values"] == {}
 
@@ -180,7 +220,7 @@ async def test_an_admin_only_plugin_is_not_a_non_admins(signed_client, config, p
     assert not config.is_admin("alice")
     plugin_builder.installed(extra={"admin_only": True})
 
-    assert "plugin_example" not in await cards(signed_client)
+    assert await listing(signed_client) == {"plugins": [], "services": []}
     response = await put(signed_client, "plugin_example", "token")
 
     assert response.status_code == 404

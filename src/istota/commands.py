@@ -2892,7 +2892,7 @@ async def cmd_skills(ctx: CommandContext):
         get_skill_availability,
         load_skill_index,
     )
-    from .skills._types import is_plugin
+    from .skills._types import is_plugin, plugin_label
 
     skills_dir = config.skills_dir
     bundled_dir = getattr(config, "bundled_skills_dir", None)
@@ -2943,7 +2943,7 @@ async def cmd_skills(ctx: CommandContext):
         if meta.source_types:
             tags.append(f"sources: {', '.join(meta.source_types)}")
         if is_plugin(meta):
-            tags.append(f"plugin: {_plugin_label(meta)}")
+            tags.append(f"plugin: {plugin_label(meta)}")
         tag_str = f" ({'; '.join(tags)})" if tags else ""
         lines.append(f"- **{name}**: {meta.description}{tag_str}")
 
@@ -2953,7 +2953,7 @@ async def cmd_skills(ctx: CommandContext):
         for name, meta, missing_dep in unavailable:
             # A plugin's name is no extra of this project, so there is no install line to give.
             if is_plugin(meta):
-                lines.append(f"- {name} — missing `{missing_dep}` (plugin: {_plugin_label(meta)})")
+                lines.append(f"- {name} — missing `{missing_dep}` (plugin: {plugin_label(meta)})")
             else:
                 lines.append(f"- {name} — missing `{missing_dep}` (`uv sync --extra {name}`)")
 
@@ -2966,15 +2966,10 @@ async def cmd_skills(ctx: CommandContext):
     return "\n".join(lines)
 
 
-def _plugin_label(meta) -> str:
-    """``<dist> <version>``, or the package when the entry point had no distribution."""
-    return meta.plugin_dist or meta.module
-
-
 def _format_skill_detail(meta, name, disabled, is_admin):
     """Format detailed view for a single skill."""
     from .skills._loader import get_skill_availability
-    from .skills._types import is_plugin
+    from .skills._types import is_plugin, plugin_label
 
     lines = [f"**{name}**: {meta.description}", ""]
 
@@ -2988,7 +2983,7 @@ def _format_skill_detail(meta, name, disabled, is_admin):
     else:
         lines.append("Status: available")
     if is_plugin(meta):
-        lines.append(f"Plugin: {_plugin_label(meta)}")
+        lines.append(f"Plugin: {plugin_label(meta)}")
 
     if meta.always_include:
         lines.append("Selection: always included")

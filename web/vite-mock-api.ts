@@ -3947,9 +3947,29 @@ const _CONNECTED_SCHEMAS: ServiceSchema[] = [
       { key: 'password', label: 'Password (optional)', type: 'password' },
     ],
   },
-  // A skill plugin's secret service, as `plugin_service_schemas` builds it: the
-  // service name and the keys stand in for labels a manifest does not carry,
-  // and an entry the manifest does not mark sensitive is a plain field.
+];
+
+// Settings > Plugins. One plugin with a secret service and one with none, so
+// the list and a credential card both show. The card is what
+// `plugin_service_schemas` builds: the service name and the keys stand in for
+// labels a manifest does not carry, and an entry the manifest does not mark
+// sensitive is a plain field.
+const _MOCK_PLUGINS = [
+  {
+    skill: 'example',
+    description: 'Look things up in the example service.',
+    plugin: 'example-plugin 0.1.0',
+    disabled: false,
+  },
+  {
+    skill: 'weather_notes',
+    description: 'Keep a note of the weather each morning.',
+    plugin: 'weather-notes 1.2.0',
+    disabled: true,
+  },
+];
+
+const _PLUGIN_SCHEMAS: ServiceSchema[] = [
   {
     service: 'plugin_example',
     label: 'plugin_example',
@@ -4366,6 +4386,10 @@ function buildServiceCard(s: ServiceSchema) {
 
 function mockSettingsServices(): { services: unknown[] } {
   return { services: _CONNECTED_SCHEMAS.map(buildServiceCard) };
+}
+
+function mockSettingsPlugins(): { plugins: unknown[]; services: unknown[] } {
+  return { plugins: _MOCK_PLUGINS, services: _PLUGIN_SCHEMAS.map(buildServiceCard) };
 }
 
 // disabled_modules lives on the user profile and gates per-module status.
@@ -9714,6 +9738,9 @@ const handlers: MockHandler[] = [
     const { url, method, body } = req;
     if (url === '/istota/api/settings/services' && method === 'GET') {
       return mockSettingsServices();
+    }
+    if (url === '/istota/api/settings/plugins' && method === 'GET') {
+      return mockSettingsPlugins();
     }
     if (url === '/istota/api/settings/modules' && method === 'GET') {
       return mockModulesResponse();

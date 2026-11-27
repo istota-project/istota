@@ -22,7 +22,7 @@ holding a skill index passes it to `all_known_services`, `known_service_keys`
 or `service_accepts_key` and they are added (`plugin_service_keys`). The
 ``istota secret`` CLI and the settings plan pass the whole index. The web
 settings routes pass the skills the signed-in user can use, so a plugin's
-service has a card on ``/istota/settings/connections`` for those users and is
+service has a card on ``/istota/settings/plugins`` for those users and is
 unknown to the rest.
 
 A field marked ``plain: True`` is a setting stored beside the credentials

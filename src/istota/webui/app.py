@@ -16280,10 +16280,10 @@ def _build_service_card(
 async def settings_services(user: dict = Depends(_require_api_auth)) -> dict:
     """Connected services for the current user.
 
-    Returns the services in ``_CONNECTED_SERVICE_SCHEMA``, then one card per
-    secret service of a skill plugin the user can use. Module-specific
+    Returns only services in ``_CONNECTED_SERVICE_SCHEMA``. Module-specific
     services live on their per-module settings pages and are reachable via
-    ``/settings/module-services/{module}``.
+    ``/settings/module-services/{module}``; a skill plugin's are on
+    ``/settings/plugins``.
     """
     from istota.credentials import store as secrets_store
 
@@ -16307,13 +16307,45 @@ async def settings_services(user: dict = Depends(_require_api_auth)) -> dict:
         cards.append(
             _build_service_card(service, schema, stored, username=username, extra=extra)
         )
-    plugin_index = await asyncio.to_thread(_user_skill_index, _config, username)
-    static = _all_known_services()
-    for service, schema in _plugin_service_schemas(plugin_index).items():
-        if service in static:
-            continue
-        cards.append(_build_service_card(service, schema, stored, username=username))
     return {"services": cards}
+
+
+@api_router.get("/settings/plugins")
+async def settings_plugins(user: dict = Depends(_require_api_auth)) -> dict:
+    """The skill plugins the current user can use, and their secret services.
+
+    ``plugins`` is one row per plugin skill; ``services`` one card per
+    ``plugin_*`` secret service those plugins declare, in the shape
+    ``/settings/services`` returns, written through the same secret routes.
+    """
+    from istota.credentials import store as secrets_store
+    from istota.skills._types import is_plugin, plugin_label
+
+    if not _config:
+        return {"plugins": [], "services": []}
+
+    username = user["username"]
+    index = await asyncio.to_thread(_user_skill_index, _config, username)
+    uc = _config.get_user(username)
+    own_disabled = set(uc.disabled_skills) if uc else set()
+    plugins = [
+        {
+            "skill": name,
+            "description": meta.description,
+            "plugin": plugin_label(meta),
+            "disabled": name in own_disabled,
+        }
+        for name, meta in index.items()
+        if is_plugin(meta)
+    ]
+    stored = secrets_store.list_user_services(_config.db_path, username)
+    static = _all_known_services()
+    cards = [
+        _build_service_card(service, schema, stored, username=username)
+        for service, schema in _plugin_service_schemas(index).items()
+        if service not in static
+    ]
+    return {"plugins": plugins, "services": cards}
 
 
 _GRANT_FIELDS = frozenset({"scope_mode", "allow_scheduled", "rooms", "allow_http"})

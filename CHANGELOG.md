@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Skills can live in their own Python package.** Copy a plugin's wheel into `/srv/app/istota/plugins/src/` and run `istota-stack plugins sync`, or list it in the management role's `istota_skill_plugins`; plugins survive updates and rollbacks. A plugin runs unsandboxed with the daemon's access. See docs/development/adding-skills.md.
-- **A skill plugin's credentials can be entered in the web UI.** Settings, Connections shows a card for each plugin that needs credentials, to the users who can use it. Until now they could only be set from the command line or a settings plan.
+- **Settings has a Plugins section.** It lists the skill plugins installed on your server, with a card for each one that needs credentials, so you can enter them yourself. Until now a plugin's credentials could only be set from the command line or a settings plan.
 
 ### Changed
 

@@ -4,6 +4,7 @@ import {
   Send,
   KeyRound,
   Plug,
+  Puzzle,
   Wallet,
   CalendarClock,
   Bell,
@@ -39,5 +40,6 @@ export const USER_SETTINGS_SECTIONS: UserSettingsSection[] = [
   { href: '/jobs', label: 'Scheduled jobs', icon: CalendarClock },
   { href: '/assignments', label: 'Assignments', icon: Target, feature: 'assignments' },
   { href: '/connections', label: 'Connections', icon: Plug },
+  { href: '/plugins', label: 'Plugins', icon: Puzzle },
   { href: '/devices', label: 'Devices', icon: Smartphone },
 ];

@@ -2103,6 +2103,26 @@ export async function getSettingsServices(): Promise<ServicesResponse> {
   return apiFetch<ServicesResponse>('/settings/services');
 }
 
+/** One installed skill plugin the signed-in user can use. */
+export interface SettingsPlugin {
+  skill: string;
+  description: string;
+  // `<distribution> <version>`, or the package when it has no distribution.
+  plugin: string;
+  // Switched off by this user in Preferences; it stays installed.
+  disabled: boolean;
+}
+
+export interface PluginsResponse {
+  plugins: SettingsPlugin[];
+  // One card per secret service those plugins declare.
+  services: ServiceCard[];
+}
+
+export async function getSettingsPlugins(): Promise<PluginsResponse> {
+  return apiFetch<PluginsResponse>('/settings/plugins');
+}
+
 // --- Google Workspace (ISSUE-240) ---
 //
 // The instance scope list is a ceiling, not a request: it names what the

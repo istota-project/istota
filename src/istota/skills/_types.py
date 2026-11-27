@@ -124,6 +124,11 @@ def is_plugin(meta: SkillMeta) -> bool:
     return meta.module != ""
 
 
+def plugin_label(meta: SkillMeta) -> str:
+    """``<dist> <version>``, or the package when the entry point had no distribution."""
+    return meta.plugin_dist or meta.module
+
+
 @dataclass(frozen=True)
 class PluginProblem:
     """Why one ``istota.skills`` entry point is not in the index.
