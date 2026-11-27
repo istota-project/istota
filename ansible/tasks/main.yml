@@ -569,6 +569,14 @@
       vars:
         _istota_result: "{{ _istota_applied }}"
       when: _istota_applied.rc == 1
+
+    # The dry run's diff, every credential value already replaced. A config
+    # the plan does not mark managed can be edited on the VM, and a play run
+    # that would undo such an edit shows it here first.
+    - name: Report the config changes --check would write
+      ansible.builtin.debug:
+        msg: "{{ ['A play run would write these changes to config.toml. To keep an edit made on the VM that they undo, take `istota snapshot --format ansible` into the inventory first.'] + ((_istota_applied.stdout | from_json).operations | selectattr('section', 'equalto', 'config') | map(attribute='changes') | sum(start=[]) | selectattr('diff', 'defined') | map(attribute='diff') | sum(start=[])) }}"
+      when: ansible_check_mode and _istota_applied.rc == 2
   always:
     - name: Remove the config input file
       ansible.builtin.file:

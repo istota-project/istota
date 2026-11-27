@@ -42,7 +42,7 @@ These keys are shown read-only, each with the reason and where it is changed ins
 
 ## Managed resources
 
-If the optional [Ansible management role](../deployment/ansible.md) (or a plan with `[meta] managed = true`) owns a resource, the editor shows it read-only, because the next play would revert a web change. Ownership is per resource (config, credentials, admins) and is recorded in `config/managed.json`. To hand a resource to the web, remove it from the role's variables (`istota_config`, `istota_secrets` or `istota_admins`), or run `istota-stack apply` once with `managed = false`. A `managed.json` that cannot be read makes every resource read-only until `istota-stack apply` rewrites it.
+If a plan with `[meta] managed = true` owns the config, or the optional [Ansible management role](../deployment/ansible.md) owns the credentials or admins it sets, the editor shows it read-only, because the next play would revert a web change. Ownership is per resource (config, credentials, admins) and is recorded in `config/managed.json`. To hand a resource to the web, remove it from the role's variables (`istota_secrets` or `istota_admins`), or for the config set `meta.managed = false` in the plan and apply it once. The role's config stays editable here unless its plan sets `meta.managed = true`, and the editor does not say that a role writes it: the next play run replaces the whole file with the inventory's plan, so take a change into the inventory (`istota snapshot --format ansible`) before then. A `managed.json` that cannot be read makes every resource read-only until `istota-stack apply` rewrites it.
 
 ## Tables, the whole file, and ignored keys
 

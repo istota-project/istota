@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from istota import apply, db, user_profiles
 from istota.lib import toml_write
 
@@ -50,12 +52,12 @@ def test_migration_converter_sidecar_fits_a_snapshot_plan():
     rendered = _render(converted.vars | {"istota_plan": snapshot})
     envelope = json.loads(json.dumps({k: v for k, v in rendered.items() if k in ROLE_VARIABLES}))
     plan, sidecar = convert_role_input(envelope)
-    assert plan["meta"] == {"source": "ansible", "version": 1, "managed": True}
+    assert plan["meta"] == snapshot["meta"]
     assert sidecar["users"]["alice"]["karakeep"]["api_key"] == "private-migration-value"
     assert "private-migration-value" not in json.dumps(plan) + " ".join(converted.notes)
 
 
-def test_canonical_payload_keeps_schema_and_modes_and_adopts_only_config():
+def test_canonical_payload_keeps_schema_modes_and_meta():
     from copy import deepcopy
     from istota.settings_plan.role_input import convert_role_input
 
@@ -64,8 +66,100 @@ def test_canonical_payload_keeps_schema_and_modes_and_adopts_only_config():
         "istota_plan_secrets": {}}
     original = deepcopy(document)
     plan, sidecar = convert_role_input(json.loads(json.dumps(document)))
-    assert plan == original["istota_plan"] | {"meta": {"source": "ansible", "version": 1, "managed": True}}
+    assert plan == original["istota_plan"]
     assert document == original and sidecar == {}
+
+
+def test_the_role_names_itself_as_the_source_and_nothing_more():
+    """The plan's `[meta]` decides whether the config is managed (ISSUE-993).
+    The role adds one thing, `source`: where a plan with a config names none,
+    and over `snapshot` where the plan states `managed`, since a snapshot's
+    source matters only while it leaves the marker alone."""
+    from istota.settings_plan.role_input import convert_role_input
+
+    def meta(plan):
+        return convert_role_input({"istota_plan": plan})[0].get("meta")
+
+    config = {"bot_name": "Helper"}
+    assert meta({"config": config}) == {"source": "ansible"}
+    assert meta({"config": config, "meta": {"managed": False}}) == {"managed": False, "source": "ansible"}
+    assert meta({"config": config, "meta": {"managed": True}}) == {"managed": True, "source": "ansible"}
+    assert meta({"config": config, "meta": {"source": "estate"}}) == {"source": "estate"}
+    assert meta({"config": config, "meta": {"source": "snapshot"}}) == {"source": "snapshot"}
+    assert meta({"config": config, "meta": {"source": "snapshot", "managed": False}}) == {
+        "source": "ansible", "managed": False}
+    assert meta({"users": {}}) is None
+
+
+class TestTheRolePathAndTheManagementMarker:
+    """`istota apply --input-format role-vars`, as the role runs it, against
+    `config/managed.json` (ISSUE-993: the role path marked every config it
+    applied managed, whatever the plan's `[meta]` said)."""
+
+    LOCKED = {"config": {"managed": True, "source": "ansible", "at": "2026-11-01T00:00:00Z"}}
+
+    def _install(self, tmp_path, marker=None):
+        database = tmp_path / "framework.db"
+        db.init_db(database)
+        config = tmp_path / "config.toml"
+        document = {"db_path": str(database)}
+        config.write_text(toml_write.dumps(document))
+        if marker is not None:
+            (tmp_path / "managed.json").write_text(json.dumps(marker))
+        return config, document
+
+    def _apply(self, tmp_path, config, plan, **options):
+        payload = tmp_path / "role.json"
+        payload.write_text(json.dumps({"istota_plan": plan}))
+        payload.chmod(0o600)
+        out, err = [], []
+        code = apply.run(payload, config, dry_run=False, input_format="role-vars",
+                         out=out.append, err=err.append, **options)
+        return code, out, err
+
+    def _entry(self, tmp_path):
+        entry = json.loads((tmp_path / "managed.json").read_text())["config"]
+        return entry["managed"], entry["source"]
+
+    def test_a_plan_with_no_meta_leaves_the_config_editable(self, tmp_path):
+        config, document = self._install(tmp_path)
+        code, _, err = self._apply(tmp_path, config, {"config": document})
+        assert code == 0, err
+        assert self._entry(tmp_path) == (False, "ansible")
+
+    def test_a_plan_that_says_managed_locks_it(self, tmp_path):
+        config, document = self._install(tmp_path)
+        code, _, err = self._apply(tmp_path, config, {"meta": {"managed": True}, "config": document})
+        assert code == 0, err
+        assert self._entry(tmp_path) == (True, "ansible")
+
+    @pytest.mark.parametrize("marker", [
+        LOCKED, {"config": {"managed": False, "source": "setup", "at": "2026-11-01T00:00:00Z"}},
+    ])
+    def test_a_snapshot_plan_leaves_the_marker_as_it_found_it(self, tmp_path, marker):
+        """Which also means an install the old role path locked stays locked
+        until the plan says otherwise."""
+        config, document = self._install(tmp_path, marker)
+        before = (tmp_path / "managed.json").read_bytes()
+        plan = {"meta": {"version": 1, "generated_by": "snapshot", "source": "snapshot"}, "config": document}
+        code, out, err = self._apply(tmp_path, config, plan)
+        assert code == 0, err
+        assert (tmp_path / "managed.json").read_bytes() == before
+        assert "management marker" not in "".join(out)
+
+    def test_managed_false_releases_a_locked_install_without_a_restart(self, tmp_path):
+        """The release: `meta.managed: false` in `istota_plan` and one play
+        run. The result document is what `istota-stack apply` restarts from."""
+        config, document = self._install(tmp_path, self.LOCKED)
+        before = config.read_bytes()
+        plan = {"meta": {"version": 1, "generated_by": "snapshot", "source": "snapshot", "managed": False},
+                "config": document}
+        code, out, err = self._apply(tmp_path, config, plan, output_format="json")
+        assert code == 0, err
+        result = json.loads(out[-1])
+        assert result["changed"] is False and result["restart_required"] is False
+        assert self._entry(tmp_path) == (False, "ansible")
+        assert config.read_bytes() == before
 
 
 def test_cli_canonical_sidecar_and_check_stdin(tmp_path, monkeypatch, capsys):

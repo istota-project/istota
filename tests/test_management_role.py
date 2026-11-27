@@ -378,7 +378,8 @@ class TestRootWritesNothingUid10001Owns:
 class TestTheRoleClaimsWhatItWrites:
     """The role marks what it manages, so the web's config editor shows those
     resources read-only rather than taking an edit the next play reverts. The
-    plan's `[meta]` claims the config; the `put-files` request's `managed`
+    config is the plan's to claim, with `[meta] managed`, and the role claims
+    none of it for the plan (ISSUE-993); the `put-files` request's `managed`
     claims the secrets and the admins, each only while the role sets them."""
 
     def _env(self):
@@ -396,15 +397,27 @@ class TestTheRoleClaimsWhatItWrites:
             context[name] = env.from_string(template).render(context)
         return json.loads(context["_istota_put_files"])
 
-    def test_the_plan_claims_the_config(self):
-        """The envelope goes through `convert_role_input`, which marks the
-        config the role submits as the role's."""
+    @pytest.mark.parametrize(("meta", "applied"), [
+        ({"source": "snapshot"}, {"source": "snapshot"}),
+        ({"source": "snapshot", "managed": False}, {"source": "ansible", "managed": False}),
+        ({"source": "estate", "managed": True}, {"source": "estate", "managed": True}),
+    ])
+    def test_the_plan_decides_whether_the_config_is_claimed(self, meta, applied):
+        """The envelope the role writes carries the plan's `[meta]`, and
+        `convert_role_input` keeps its `managed`, naming only the source."""
         from istota.settings_plan.role_input import convert_role_input
 
-        config, _ = _settings_parts({"istota_plan": {"meta": {"source": "snapshot"}, "config": {"bot_name": "Zed"}}})
+        config, _ = _settings_parts({"istota_plan": {"meta": meta, "config": {"bot_name": "Zed"}}})
         plan, _ = convert_role_input(config)
-        assert plan["meta"]["managed"] is True and plan["meta"]["source"] == "ansible"
+        assert plan["meta"] == applied
         assert plan["config"] == {"bot_name": "Zed"}
+
+    def test_a_plan_with_no_meta_claims_nothing(self):
+        from istota.settings_plan.role_input import convert_role_input
+
+        config, _ = _settings_parts({"istota_plan": {"config": {"bot_name": "Zed"}}})
+        plan, _ = convert_role_input(config)
+        assert plan["meta"] == {"source": "ansible"}
 
     def test_put_files_claims_what_the_role_sets(self):
         request = self._put_files({"anthropic_api_key": "sk"}, ["alice"])
@@ -555,7 +568,7 @@ class TestTheSettingsInput:
         assert users == {"istota_plan": {k: v for k, v in plan.items() if k != "config"},
                          "istota_plan_secrets": {"users": secrets["users"]}}
         converted, sidecar = convert_role_input(config)
-        assert converted["config"] == plan["config"] and converted["meta"]["managed"] is True
+        assert converted["config"] == plan["config"] and converted["meta"] == plan["meta"]
         assert sidecar == {"config": secrets["config"]}
         converted, sidecar = convert_role_input(users)
         assert "config" not in converted and converted["users"] == plan["users"]
@@ -734,6 +747,39 @@ class TestAFailedApplyIsReportedFromItsResult:
         name, register = self.NAMES[0]
         message = _failure_message(name, {register: {"rc": 1, "stdout": "", "stderr": "update the stack first."}})
         assert "without a result document" in message and "update the stack first." in message, message
+
+
+class TestACheckShowsTheConfigChangesAPlayWouldWrite:
+    """A config the plan does not mark managed can be edited on the VM, in the
+    web config editor, and the plan's `config` is the whole file. So under
+    --check the role prints the dry run's diff, which is where a play run
+    that would undo such an edit says so (ISSUE-993)."""
+
+    NAME = "Report the config changes --check would write"
+
+    def _lines(self, operations: list) -> list:
+        _, native_env = _envs()
+        document = {"version": 1, "dry_run": True, "changed": True, "partial": False,
+                    "restart_required": True, "operations": operations, "warnings": [], "errors": []}
+        task = _tasks()[_index(self.NAME)]
+        context = {"_istota_applied": {"rc": 2, "stdout": json.dumps(document) + "\n"}}
+        return native_env.from_string(task["ansible.builtin.debug"]["msg"]).render(context)
+
+    def test_it_prints_the_diff_of_the_config_operation(self):
+        diff = ["--- config.toml", "+++ plan", '-bot_name = "Web edit"', '+bot_name = "Inventory"']
+        lines = self._lines([{"section": "config", "identity": "config", "action": "update",
+                              "status": "planned", "changes": [{"diff": diff}]}])
+        assert lines[1:] == diff
+        assert "config.toml" in lines[0] and "istota snapshot --format ansible" in lines[0]
+
+    def test_it_runs_under_check_alone_and_only_for_a_change(self):
+        task = _tasks()[_index(self.NAME)]
+        assert _when(task) == "ansible_check_mode and _istota_applied.rc == 2"
+        block = next(t for t in _tasks() if t.get("name") == "Apply the config")
+        names = [t.get("name") for t in block["block"]]
+        assert names.index(self.NAME) > names.index("istota-stack apply")
+        # Reporting is not a second change: the apply task already counted it.
+        assert "changed_when" not in task
 
 
 def _assert_fails(task_name: str, variables: dict) -> list[str]:

@@ -28,12 +28,16 @@ def convert_role_input(document: dict) -> tuple[dict, dict]:
         raise SchemaError(["istota_plan_secrets"], "istota_plan_secrets requires istota_plan")
     plan = deepcopy(document.get("istota_plan", {}))
     sidecar = deepcopy(document.get("istota_plan_secrets", {}))
-    # A role owns the config it submits, independently of per-user modes.
+    # The plan's own [meta] decides whether the config is managed, as on the
+    # plan path; the role only names itself as the source. A snapshot with no
+    # `managed` keeps its source, since that is what leaves the marker alone.
     if "config" in plan:
         meta = plan.setdefault("meta", {})
         if not isinstance(meta, dict):
             raise SchemaError(["meta"], "must be a mapping")
-        meta.update(managed=True, source="ansible")
+        source = meta.get("source")
+        if source is None or (source == "snapshot" and "managed" in meta):
+            meta["source"] = "ansible"
     parse_plan(plan)
     parse_sidecar(sidecar)
     return plan, sidecar
