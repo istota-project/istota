@@ -74,7 +74,7 @@ The applications hold your records, the scheduler runs background work, and the 
 - **Work between conversations.** Reminders, recurring prompts, briefings, and heartbeat checks run through the scheduler. Repeatable operations can run as scheduled commands without calling a model.
 - **Memory you can inspect.** Markdown memory, conversation search, a temporal knowledge graph, and reusable playbooks carry context between tasks. Memory is scoped to users, rooms, and groups.
 
-The toolset is extensible. Operators can override a skill's instructions, users can add their own instructions to a skill, and contributors can add new skills. See the [skills index](docs/reference/skills-index.md), [per-skill overlays](docs/configuration/per-user.md#per-skill-overlays), and [adding skills](docs/development/adding-skills.md).
+The toolset is extensible. Operators can override a skill's instructions, users can add their own instructions to a skill, contributors can add new skills, and anyone can ship a skill in its own package as a plugin. See the [skills index](docs/reference/skills-index.md), [per-skill overlays](docs/configuration/per-user.md#per-skill-overlays), [adding skills](docs/development/adding-skills.md) and [skill plugins](docs/plugins/overview.md).
 
 ## A web UI for the work and its records
 

@@ -146,7 +146,7 @@ These skip when the developer skill has no forge token configured.
 | Check | What it answers |
 |---|---|
 | `config.skill_overlays` | Every per-skill user overlay loads, or is named with the reason it does not |
-| `skills.plugins` | Which [skill plugins](../development/adding-skills.md#external-skill-packages) loaded, with their distribution and package. `skills.plugins.problems` fails for an installed plugin that did not load, with the reason; `skills.plugins.wheels` fails for a wheel in `/app/plugins/src` that loaded as no plugin (never synced, or hidden by a distribution of the same name in the image); `skills.plugins.entry` warns for a `cli: true` plugin with no `__main__.py` |
+| `skills.plugins` | Which [skill plugins](../plugins/installing.md#checking-what-loaded) loaded, with their distribution and package. `skills.plugins.problems` fails for an installed plugin that did not load, with the reason; `skills.plugins.wheels` fails for a wheel in `/app/plugins/src` that loaded as no plugin (never synced, or hidden by a distribution of the same name in the image); `skills.plugins.entry` warns for a `cli: true` plugin with no `__main__.py` |
 | `skills.plugin_imports` | With `--deep` only: each loaded plugin's package imports in a child process, one result per plugin (`skills.plugin_imports.<skill>`) |
 | `config.operator_persona` | Which persona is in force, and whether a shipped update is waiting to be merged |
 | `users.email_address_uniqueness` | No email address is held by more than one user |

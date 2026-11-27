@@ -109,7 +109,7 @@ ansible-playbook site.yml --limit istota-vm --tags istota_update -e istota_updat
 
 ### Skill plugins
 
-A skill plugin is a skill packaged as its own Python wheel, outside this repository ([adding skills](../docs/development/adding-skills.md) has the package contract). `istota_skill_plugins` lists the wheels the VM runs, as paths on the controller:
+A skill plugin is a skill packaged as its own Python wheel, outside this repository ([installing plugins](../docs/plugins/installing.md) and [writing a plugin](../docs/plugins/writing.md) have the details). `istota_skill_plugins` lists the wheels the VM runs, as paths on the controller:
 
 ```yaml
 istota_skill_plugins:

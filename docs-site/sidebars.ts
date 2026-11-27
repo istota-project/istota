@@ -66,6 +66,16 @@ const sidebars: SidebarsConfig = {
       ],
     },
     {
+      type: 'category',
+      label: 'Plugins',
+      items: [
+        'plugins/overview',
+        'plugins/installing',
+        'plugins/writing',
+        'plugins/security',
+      ],
+    },
+    {
       // The conversation surfaces — the ones a person sends to and gets a
       // reply from, each sitting behind the same Transport seam. Deliberately
       // not everything that can reach a user: `features/notifications` is the
