@@ -3568,6 +3568,7 @@ const mockSecrets: Record<string, Record<string, string>> = {
   monarch: {},
   feeds: {},
   overland: {},
+  plugin_example: { url: 'https://example.com' },
 };
 
 /**
@@ -3906,6 +3907,7 @@ interface ServiceSchema {
   label: string;
   fields: { key: string; label: string; type: string; plain?: boolean }[];
   used_by?: string[];
+  hint?: string;
   oauth?: boolean;
   custom_ui?: boolean;
 }
@@ -3943,6 +3945,19 @@ const _CONNECTED_SCHEMAS: ServiceSchema[] = [
       { key: 'token', label: 'Access token (optional)', type: 'password' },
       { key: 'username', label: 'Username (optional)', type: 'text' },
       { key: 'password', label: 'Password (optional)', type: 'password' },
+    ],
+  },
+  // A skill plugin's secret service, as `plugin_service_schemas` builds it: the
+  // service name and the keys stand in for labels a manifest does not carry,
+  // and an entry the manifest does not mark sensitive is a plain field.
+  {
+    service: 'plugin_example',
+    label: 'plugin_example',
+    used_by: ['example'],
+    hint: 'Credentials for a skill plugin (example-plugin 0.1.0).',
+    fields: [
+      { key: 'token', label: 'token', type: 'password' },
+      { key: 'url', label: 'url', type: 'text', plain: true },
     ],
   },
 ];

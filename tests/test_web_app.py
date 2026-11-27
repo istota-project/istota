@@ -2837,29 +2837,6 @@ class TestSettingsEndpoints:
         )
         assert resp.status_code == 404
 
-    async def test_a_plugin_service_is_not_writable_from_the_web(self, tmp_path, client, app):
-        """The settings page lists no plugin secret fields in v1: the routes call
-        the registry with no skill index, so an installed plugin's service is
-        the same 404 as a typo (spec: external-skill-packages)."""
-        from tests.support.plugin_fixture import build_plugins
-
-        builder = build_plugins(tmp_path)
-        plugins = next(builder)
-        try:
-            plugins.installed()
-            cfg = self._make_test_config(tmp_path)
-            _patch_app(cfg)
-            cookies = await self._login_alice(client, app)
-            for method in ("put", "delete"):
-                kwargs = {"json": {"value": "x"}} if method == "put" else {}
-                resp = await getattr(client, method)(
-                    "/istota/api/settings/secrets/plugin_example/token",
-                    cookies=cookies, headers={"origin": "https://example.com"}, **kwargs,
-                )
-                assert resp.status_code == 404
-        finally:
-            builder.close()
-
     async def test_set_secret_rejects_unknown_key(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)
