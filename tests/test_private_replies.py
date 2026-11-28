@@ -1894,6 +1894,22 @@ class TestSecretLink:
         assert _rows(config, "SELECT id FROM notifications") == []
         assert _room_count(config) == before
 
+    def test_a_queued_link_goes_with_its_users_profile(self, config):
+        # ISSUE-998: the request held the link and drained into a re-created
+        # account as a "not delivered" alert.
+        from istota import user_profiles
+
+        with db.get_db(config.db_path) as conn:
+            web = _web_room(conn)
+            ident = _running(conn, "alice", web)
+        token, _, _ = _secret_link(config, ident, web)
+        user_profiles.delete_profile(config.db_path, "alice")
+        user_profiles.ensure_profile(config.db_path, "alice", display_name="Alice")
+        _drain(config)
+        assert _rows(config, "SELECT id FROM whatsapp_skill_requests WHERE kind='secret_link'") == []
+        assert _rows(config, "SELECT id FROM messages WHERE body LIKE ?", (f"%{token}%",)) == []
+        assert _rows(config, "SELECT id FROM notifications WHERE user_id='alice'") == []
+
     def test_from_a_shared_talk_room_it_reaches_the_private_talk_room_only(self, config, talk):
         from istota.context import build_talk_context
 
