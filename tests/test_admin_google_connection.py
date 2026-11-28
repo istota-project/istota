@@ -327,24 +327,73 @@ class TestConnectingFromALink:
         assert redirect.call_args.kwargs == {"scope": DRIVE_RO, "access_type": "offline",
                                              "prompt": "consent"}
         row = self._row(config, link.id)
-        assert row["used_at"] is not None and row["outcome"] == "connected"
+        assert row["used_at"] is not None and row["outcome"] == "consent_started"
         # The link is spent: a second continue goes nowhere near Google.
         page = await client.get("/istota/secret", params={"token": token})
         assert page.status_code == 400 and "expired or was already used" in page.text
 
     async def test_the_callback_stores_the_token_for_the_link_user_and_clears_the_binding(
             self, app, client, config):
-        token, _ = self._issue(config)
+        token, link = self._issue(config)
         await self._post(client, token)
         response = await client.get(CALLBACK)
         assert response.status_code == 302 and response.headers["location"] == CONNECTED
         assert self._scopes(config, "alice") == [DRIVE_RO]
         assert self._scopes(config, "bob") is None
+        assert self._row(config, link.id)["outcome"] == "connected"
         (notice,) = self._notices(config)
         assert notice["title"] == "Google connected"
         again = await client.get(CALLBACK)
         assert again.status_code == 302 and again.headers["location"] == "/istota/login"
         app._oauth.google.authorize_access_token.assert_awaited_once()
+
+    async def test_an_abandoned_consent_leaves_the_link_consent_started(self, app, client, config):
+        # #1000: pressing Continue is not a connection. Nothing came back from Google.
+        token, link = self._issue(config)
+        await self._post(client, token)
+        row = self._row(config, link.id)
+        assert row["used_at"] is not None and row["outcome"] == "consent_started"
+        assert self._scopes(config, "alice") is None
+        assert self._notices(config) == []
+
+    async def test_a_replayed_binding_for_a_connected_link_is_refused(self, app, client, config):
+        # The session cookie from the POST, sent again after the link already
+        # connected, must not store a second token with no login behind it.
+        token, link = self._issue(config)
+        await self._post(client, token)
+        bound = dict(client.cookies)
+        assert (await client.get(CALLBACK)).headers["location"] == CONNECTED
+        app._oauth.google.authorize_access_token = AsyncMock(return_value={
+            "access_token": "other-access", "refresh_token": "other-refresh",
+            "expires_in": 3600, "scope": GMAIL_MODIFY,
+        })
+        client.cookies.clear()
+        client.cookies.update(bound)
+        response = await client.get(CALLBACK)
+        assert response.status_code == 400 and "Google wasn" in response.text
+        assert self._scopes(config, "alice") == [DRIVE_RO]
+        assert self._row(config, link.id)["outcome"] == "connected"
+        assert len(self._notices(config)) == 1
+
+    async def test_the_link_and_the_token_are_written_together(
+            self, app, client, config, monkeypatch):
+        # `upsert_google_token` commits, so the link must be marked before it:
+        # a failed mark stores no token and ends on the card, not a 500.
+        import sqlite3
+
+        from istota.webui import secret_links
+
+        def locked(conn, link_id):
+            raise sqlite3.OperationalError("database is locked")
+
+        token, link = self._issue(config)
+        await self._post(client, token)
+        monkeypatch.setattr(secret_links, "finish_consent", locked)
+        response = await client.get(CALLBACK)
+        assert response.status_code == 400 and "Google wasn" in response.text
+        assert self._scopes(config, "alice") is None
+        assert self._row(config, link.id)["outcome"] == "consent_started"
+        assert self._notices(config) == []
 
     async def test_a_callback_with_neither_login_nor_link_goes_to_login(self, app, client, config):
         response = await client.get(CALLBACK)
@@ -365,12 +414,13 @@ class TestConnectingFromALink:
     async def test_a_failed_exchange_ends_on_the_card(self, app, client, config):
         app._oauth.google.authorize_access_token = AsyncMock(
             side_effect=RuntimeError("provider said access_denied for code=abc"))
-        token, _ = self._issue(config)
+        token, link = self._issue(config)
         await self._post(client, token)
         response = await client.get(CALLBACK)
         assert response.status_code == 400
         assert "Google wasn" in response.text and "code=abc" not in response.text
         assert self._scopes(config, "alice") is None
+        assert self._row(config, link.id)["outcome"] == "consent_started"
         assert (await client.get(CALLBACK)).headers["location"] == "/istota/login"
 
     async def test_no_refresh_token_ends_on_the_card(self, app, client, config):
@@ -391,11 +441,12 @@ class TestConnectingFromALink:
 
     async def test_a_signed_in_owner_lands_on_the_connected_page(self, app, client, config):
         await self._sign_in(app, client, "alice")
-        token, _ = self._issue(config)
+        token, link = self._issue(config)
         await self._post(client, token)
         response = await client.get(CALLBACK)
         assert response.status_code == 302 and response.headers["location"] == CONNECTED
         assert self._scopes(config, "alice") == [DRIVE_RO]
+        assert self._row(config, link.id)["outcome"] == "connected"
 
     async def test_another_accounts_session_is_refused(self, app, client, config):
         await self._sign_in(app, client, "bob")

@@ -1436,6 +1436,7 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     _rebuild_skill_request_kinds(conn, "location_share")
     _rebuild_skill_request_kinds(conn, "assignment_activation")
     _rebuild_skill_request_kinds(conn, "secret_link")
+    _migrate_secret_links_consent_started(conn)
     # Reads the `scheduled_jobs` columns added above. Its own transaction.
     _migrate_egress_seed_open(conn)
     _migrate_egress_retire_subjects(conn)
@@ -8817,6 +8818,65 @@ def _rebuild_skill_request_kinds(conn: sqlite3.Connection, kind: str) -> None:
             conn.execute(f"PRAGMA foreign_keys={'ON' if foreign_keys else 'OFF'}")
     except sqlite3.Error as e:
         logger.warning("whatsapp_skill_requests rebuild failed, will retry: %s", e)
+
+
+# The rebuilt `secret_links`. A copy of schema.sql's, because this runs before
+# schema.sql; `tests/test_secret_links.py` holds an upgraded table to a fresh one.
+_SECRET_LINKS_DDL = """CREATE TABLE secret_links_rebuild (
+    id INTEGER PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    user_id TEXT NOT NULL,
+    intent TEXT NOT NULL CHECK (intent IN ('credential', 'google_connect')),
+    params TEXT NOT NULL DEFAULT '{}',
+    task_id INTEGER NOT NULL,
+    room_token TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    outcome TEXT CHECK (outcome IN ('stored', 'cancelled', 'failed', 'superseded', 'consent_started', 'connected')),
+    failures INTEGER NOT NULL DEFAULT 0
+)"""
+
+
+def _migrate_secret_links_consent_started(conn: sqlite3.Connection) -> None:
+    """Admit the `consent_started` outcome a Google link is spent with (#1000).
+
+    A CHECK cannot be altered, so the table is rebuilt: create, copy, drop,
+    rename, indexes back, in one transaction. Nothing references the table
+    by foreign key or trigger. Existing `connected` rows stay as they are:
+    they may be consents that never finished, and nothing now can tell.
+    A failure rolls back and the next boot retries. Idempotent on the
+    table's own SQL.
+    """
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='secret_links'"
+        ).fetchone()
+        if row is None or "consent_started" in (row[0] or ""):
+            return
+        cols = ",".join(r[1] for r in conn.execute("PRAGMA table_info(secret_links)"))
+        indexes = [r[0] for r in conn.execute(
+            "SELECT sql FROM sqlite_master WHERE tbl_name='secret_links' "
+            "AND type='index' AND sql IS NOT NULL"
+        )]
+        conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("DROP TABLE IF EXISTS secret_links_rebuild")
+            conn.execute(_SECRET_LINKS_DDL)
+            conn.execute(
+                f"INSERT INTO secret_links_rebuild ({cols}) SELECT {cols} FROM secret_links"
+            )
+            conn.execute("DROP TABLE secret_links")
+            conn.execute("ALTER TABLE secret_links_rebuild RENAME TO secret_links")
+            for statement in indexes:
+                conn.execute(statement)
+        except BaseException:
+            conn.rollback()
+            raise
+        conn.commit()
+    except sqlite3.Error as e:
+        logger.warning("secret_links rebuild failed, will retry: %s", e)
 
 
 def _migrate_room_members(conn: sqlite3.Connection) -> None:

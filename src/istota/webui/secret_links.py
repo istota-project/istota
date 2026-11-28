@@ -7,7 +7,7 @@ discipline: a SHA-256 digest is the only thing stored, a token is spent by an
 ``UPDATE ... WHERE used_at IS NULL`` whose rowcount decides who won, and a peek
 writes nothing, because link previews fetch the page.
 
-``issue``, ``live_for_update``, ``spend`` and ``record_failure`` take the
+``issue``, ``live_for_update``, ``spend``, ``finish_consent`` and ``record_failure`` take the
 caller's connection, and the caller owns the transaction. ``peek`` and
 ``prune`` open their own.
 
@@ -31,7 +31,9 @@ from istota.db import get_db
 from istota.webui.auth import _timestamp
 
 INTENTS = ("credential", "google_connect")
-OUTCOMES = ("stored", "cancelled", "failed", "superseded", "connected")
+# A Google link is spent `consent_started` when the browser leaves for Google,
+# and becomes `connected` only once the callback has stored the token.
+OUTCOMES = ("stored", "cancelled", "failed", "superseded", "consent_started", "connected")
 MAX_LIVE_PER_USER = 5
 MAX_FAILURES = 5
 PRUNE_AFTER_DAYS = 7
@@ -247,6 +249,15 @@ def spend(conn: sqlite3.Connection, link_id: int, outcome: str) -> bool:
     cursor = conn.execute(
         "UPDATE secret_links SET used_at = ?, outcome = ? WHERE id = ? AND used_at IS NULL",
         (_timestamp(), outcome, link_id),
+    )
+    return cursor.rowcount == 1
+
+
+def finish_consent(conn: sqlite3.Connection, link_id: int) -> bool:
+    """Move a ``consent_started`` link to ``connected``. True only for the call that moved it."""
+    cursor = conn.execute(
+        "UPDATE secret_links SET outcome = 'connected' WHERE id = ? AND outcome = 'consent_started'",
+        (link_id,),
     )
     return cursor.rowcount == 1
 
