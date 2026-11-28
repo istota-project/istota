@@ -37,6 +37,7 @@ Refusals come back as `{"status": "error", "reason": ...}`:
 - `not_configured`: Google Workspace is not set up on this server. Only the operator can fix that.
 - `not_owner_turn`, `scheduled_turn`, `incognito`: a link is only sent in answer to the user's own message, outside scheduled runs and incognito rooms. Tell them to ask themselves, in a normal chat.
 - `no_private_room`, `no_external_origin`, `too_many_links`: say what it means in plain words. Never ask for a password or a code in chat instead.
+- `link_already_sent`: this request already sent a link, and a task sends one. If `connected` is true, Google is connected now; carry on with the request. Otherwise tell the user the link is in their private chat, and that if it expired or did not work they ask again in a new message.
 
 ## Commands
 

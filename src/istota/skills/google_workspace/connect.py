@@ -34,6 +34,29 @@ def _refusal(exc) -> dict:
     return error_envelope(exc.message, reason=exc.reason)
 
 
+def _one_link_per_task(task_id: int):
+    """The ``check`` for ``issue_and_queue``: a task sends at most one Google link (#999).
+
+    Counts every ``google_connect`` row the task issued, spent or superseded
+    included, so a model calling the verb in a loop sends the user one link.
+    A credential link has the attempt's vault write budget and is not counted.
+    """
+    from istota.webui import secret_links
+
+    def check(conn) -> None:
+        sent = conn.execute(
+            "SELECT 1 FROM secret_links WHERE task_id = ? AND intent = 'google_connect' LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if sent is not None:
+            raise secret_links.LinkRefused(
+                "link_already_sent",
+                "A link was already sent for this request; the user should use that one",
+            )
+
+    return check
+
+
 def connect_link(argv: list[str]) -> dict:
     """Issue the link and queue it for the user's private room; the envelope for the model."""
     from istota import db
@@ -85,10 +108,12 @@ def connect_link(argv: list[str]) -> dict:
             connected = db.has_google_token(conn, user_id)
         link, delivered_to = secret_links.issue_and_queue(
             config, user_id=user_id, task_id=task_id, intent="google_connect", params={},
-            compose=compose,
+            compose=compose, check=_one_link_per_task(task_id),
         )
     except secret_links.LinkRefused as exc:
         logger.info("connect-link refused task_id=%s reason=%s", task_id, exc.reason)
+        if exc.reason == "link_already_sent":
+            return error_envelope(exc.message, reason=exc.reason, connected=connected)
         return _refusal(exc)
     except Exception as exc:
         logger.error("connect-link task_id=%s failed: %s", task_id, type(exc).__name__)
