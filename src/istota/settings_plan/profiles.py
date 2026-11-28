@@ -252,6 +252,19 @@ def plan_profile(plan, user, context, options):
             user_profiles.provision_user(config.db_path, user, fields, conn=conn, **arguments)
         except (user_profiles.ProvisioningRefused, ExecutionError):
             raise ExecutionError("state_changed", path) from None
+        # A seed apply fills only empty fields, so it reverts nothing.
+        if current is not None and changes and provision.mode != "seed":
+            _tell_user(conn, user, [change["path"][0] for change in changes],
+                       managed=provision.mode == "managed")
 
     context.units.append(Unit("profile", user, operations, transaction,
                               lambda conn: _profile_state(conn, user), write, expected_state=expected))
+
+
+def _tell_user(conn, user, fields, *, managed):
+    """A plan is often a snapshot older than the user's own edits, so an apply
+    that changes an existing profile can be a silent revert (ISSUE-1003)."""
+    from istota.notifications.resolvers import admin_profile_change
+    from istota.notifications.store import hand_to_daemon
+
+    hand_to_daemon(conn, [admin_profile_change.write_from_plan(conn, user, fields, managed=managed)])

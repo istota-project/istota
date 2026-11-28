@@ -317,3 +317,80 @@ def test_push_category_plan_rejects_invalid_values(value):
     from istota.settings_plan.schema import SchemaError
     with pytest.raises(SchemaError):
         parse_plan({"users": {"alice": {"profile": {"push_inbox_categories": value}}}})
+
+
+def _plan_notices(database, user):
+    with db.get_db(database) as conn:
+        return [dict(zip(("source", "dedup_key", "title", "body"), row)) for row in conn.execute(
+            "SELECT source, dedup_key, title, body FROM notifications WHERE user_id = ?", (user,))]
+
+
+def _handoffs(database):
+    from istota.notifications.store import HANDOFF_NAMESPACE
+
+    with db.get_db(database) as conn:
+        return conn.execute("SELECT COUNT(*) FROM shared_kv WHERE namespace = ?", (HANDOFF_NAMESPACE,)).fetchone()[0]
+
+
+def test_an_apply_that_changes_an_existing_profile_tells_the_user(install):
+    """ISSUE-1003: a stale snapshot plan put back a timezone the travel follow had
+    set, and switched the follow off, and nobody was told."""
+    _, database = install
+    user_profiles.provision_user(database, "alice", {"display_name": "Alice", "timezone": "Europe/Warsaw",
+                                                     "timezone_follow_location": True})
+    plan = {"alice": {"profile": {"display_name": "Alice", "timezone": "America/Los_Angeles",
+                                  "timezone_follow_location": False}}}
+    context, operations = preview(install, plan, dry_run=True)
+    engine.execute_plan(operations, context)
+    assert _plan_notices(database, "alice") == []
+
+    context, operations = preview(install, plan)
+    assert engine.execute_plan(operations, context).exit_code == 2
+    [notice] = _plan_notices(database, "alice")
+    assert notice["source"] == "admin_profile_change"
+    assert notice["dedup_key"] == "plan:timezone+timezone_follow_location"
+    assert "timezone and travel timezone setting" in notice["body"]
+    # The push follows alert routing, which can reach a shared room: names only.
+    assert "Los_Angeles" not in notice["body"] and "Warsaw" not in notice["body"]
+    assert _handoffs(database) == 1
+
+    context, operations = preview(install, plan)
+    assert engine.execute_plan(operations, context).exit_code == 0
+    assert len(_plan_notices(database, "alice")) == 1
+
+
+def test_a_managed_apply_says_the_fields_are_now_locked(install):
+    _, database = install
+    user_profiles.provision_user(database, "alice", {"timezone": "Europe/Warsaw"})
+    context, operations = preview(install, {"alice": {"profile_mode": "managed",
+                                                      "profile": {"timezone": "America/Los_Angeles"}}})
+    assert engine.execute_plan(operations, context).exit_code == 2
+    [notice] = _plan_notices(database, "alice")
+    assert "Settings no longer changes them" in notice["body"]
+    assert "set them again" not in notice["body"]
+
+
+def test_a_seed_apply_that_fills_an_empty_field_sends_no_notice(install):
+    _, database = install
+    user_profiles.provision_user(database, "alice", {"display_name": "Alice"})
+    context, operations = preview(install, {"alice": {"profile_mode": "seed",
+                                                      "profile": {"sms_phone_number": "+12025550123"}}})
+    assert engine.execute_plan(operations, context).exit_code == 2
+    assert user_profiles.get_profile(database, "alice").sms_phone_number == "+12025550123"
+    assert _plan_notices(database, "alice") == []
+    assert _handoffs(database) == 0
+
+
+def test_an_apply_that_creates_a_profile_sends_no_notice(install):
+    _, database = install
+    context, operations = preview(install, {"bob": {"profile": {"timezone": "Europe/Lisbon"}}})
+    assert engine.execute_plan(operations, context).exit_code == 2
+    assert _plan_notices(database, "bob") == []
+    assert _handoffs(database) == 0
+
+
+def test_every_plan_profile_field_has_words_for_the_notice():
+    from istota.notifications.resolvers import admin_profile_change
+    from istota.settings_plan.schema import PROFILE_FIELDS
+
+    assert set(PROFILE_FIELDS) | {"enrollment"} == set(admin_profile_change.PLAN_FIELDS)

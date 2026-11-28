@@ -34,7 +34,7 @@ The stable metadata identifies the document as a snapshot. Profiles use `profile
 
 ## Missing fields and pruning
 
-An absent section is untouched. An absent user is never deleted. Profile updates affect only supplied fields; explicit empty strings, lists, maps and false values reset fields where the domain permits them. Configuration is a whole-document replacement, so omitted configuration fields take loader defaults.
+An absent section is untouched. An absent user is never deleted. Profile updates affect only supplied fields; explicit empty strings, lists, maps and false values reset fields where the domain permits them. An apply that changes a field of an existing profile leaves that user an inbox notice naming the fields, never their values, because a snapshot older than the user's own edits in Settings puts those edits back. Configuration is a whole-document replacement, so omitted configuration fields take loader defaults.
 
 Named collections merge by identity. Briefing blocks and sources use their array positions: supplied entries replace the corresponding prefix, and existing tails survive unless pruning is enabled. Supplied block options and source configuration replace those mappings in full.
 

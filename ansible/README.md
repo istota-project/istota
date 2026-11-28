@@ -61,7 +61,7 @@ plan=$(ssh vm sudo istota snapshot --format ansible) \
 
 The snapshot goes into a variable first because a failed snapshot writes nothing to stdout, and piping it straight into `ansible-vault encrypt` would replace the inventory's plan with an encrypted empty file.
 
-Run that again whenever the VM's settings should become the inventory's. The output holds no credential values; it does hold names, addresses and paths, which is why it goes in the vault. The snapshot writes the same bytes when nothing changed, but `ansible-vault encrypt` salts each run, so the encrypted file changes in git every time; compare with `ansible-vault view` to see whether a setting did. The play applies the inventory's copy, so a setting changed in the web UI since the last snapshot is put back by the next play; take a snapshot first when the VM is the source of truth. `ansible-playbook --check` after a snapshot shows no drift.
+Run that again whenever the VM's settings should become the inventory's. The output holds no credential values; it does hold names, addresses and paths, which is why it goes in the vault. The snapshot writes the same bytes when nothing changed, but `ansible-vault encrypt` salts each run, so the encrypted file changes in git every time; compare with `ansible-vault view` to see whether a setting did. The play applies the inventory's copy, so a setting changed in the web UI since the last snapshot is put back by the next play, and the user gets an inbox notice naming the fields; take a snapshot first when the VM is the source of truth. `ansible-playbook --check` after a snapshot shows no drift.
 
 ```yaml
 istota_plan_secrets:

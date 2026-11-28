@@ -7811,6 +7811,15 @@ def check_travel_timezone(
                 )
                 if profile is None or not profile.timezone_follow_location:
                     continue
+                # Provisioning rewrites a managed field on every converge, so a
+                # write here would only start a follow-and-revert loop (ISSUE-1003).
+                # DEBUG: it holds on every pass, and Settings tells the user.
+                if "timezone" in user_profiles.managed_fields(fw_conn, user_id):
+                    logger.debug(
+                        "travel timezone skipped user=%s: timezone is managed by "
+                        "provisioning", user_id,
+                    )
+                    continue
 
                 current_tz = profile.timezone or "UTC"
                 ctx = resolve_for_user(user_id, config, conn=fw_conn)
