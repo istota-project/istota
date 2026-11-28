@@ -11835,7 +11835,9 @@ def _chat_create_web_task(
             target = db.get_reply_target(conn, reply_to_msg_id)
             if target is None or target[0] != token:
                 return ("reply_target_gone", 0)
-            reply_to_content = target[1][:_REPLY_SNAPSHOT_CHARS]
+            from istota.rooms.private_replies import reply_snapshot
+
+            reply_to_content = reply_snapshot(target[1], target[2])
         # Ahead of the cancel below, so a refused link changes nothing. A
         # replay records nothing new, so it is not asked again.
         about_room_token: str | None = None
@@ -15599,10 +15601,6 @@ _MAX_ATTACHMENT_NAME_CHARS = 200
 # than validated. Long enough for any sane identity scheme, short enough that
 # it cannot be used as storage.
 _MAX_CLIENT_MSG_ID_CHARS = 64
-# Prompt snapshot of a cited parent, stored on `tasks.reply_to_content`. Same
-# cap Talk has always used (`transport/talk/inbound.py`). Distinct from the
-# display excerpt below: this one is read by the model.
-_REPLY_SNAPSHOT_CHARS = 1000
 # Display excerpt on a rendered citation. Without it every reply in a page
 # carries a full assistant answer to render as two lines.
 _REPLY_EXCERPT_CHARS = 200

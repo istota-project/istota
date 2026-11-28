@@ -109,6 +109,38 @@ def _legacy_sweeps(config, requests):
     return {work.token: "<work>", cafe.token: "<cafe>", shared.token: "<shared>"}
 
 
+def test_a_secret_link_row_alerts_without_its_body(wire):
+    # ISSUE-997: preview is on, and the newest unread row is the link itself.
+    config, requests = wire
+    token = "TOKEN-sentinel-997"
+    with db.get_db(config.db_path) as conn:
+        devices.register_device(conn, "alice", "ab" * 32, "sandbox", auth_method="nextcloud", auth_epoch=0)
+        room = db.create_web_chat_room(conn, "alice", "general")
+        _message(conn, room, NOW - 31, "Sure, here is a link.")
+        db.add_message(conn, room.token, role="system", origin_surface="web",
+                       body=f"Enter the password for acme here: https://example.com/istota/secret?token={token}",
+                       about_room_token=room.token, delivery_reference="private-secret_link:41")
+        link_id = db.room_max_message_id(conn, room.token)
+        conn.execute("UPDATE messages SET created_at=? WHERE id=?", (_stamp(NOW - 30), link_id))
+    dispatch.run_push_dispatch(config)
+    alerts = [json.loads(r.content) for r in requests if "alert" in json.loads(r.content)["aps"]]
+    assert len(alerts) == 1
+    assert alerts[0]["aps"]["alert"]["body"] == "A link you asked for is in the chat"
+    wire_text = "".join(r.content.decode() for r in requests)
+    assert token not in wire_text and "/istota/secret" not in wire_text
+
+
+def test_a_secret_link_row_keeps_preview_off_empty_and_an_older_one_never_previews():
+    link = {"room_token": "rm_a", "room_id": 1, "room_name": "general",
+            "created_at": "2033-05-18T03:33:20Z", "delivery_reference": "private-secret_link:41",
+            "body": "https://example.com/istota/secret?token=TOKEN-sentinel-997"}
+    later = dict(link, delivery_reference=None, body="Anything else?")
+    (off,) = dispatch._chat_pushes([later, link], 4, False, 0)
+    assert off.body == ""
+    (older,) = dispatch._chat_pushes([link, later], 4, True, 0)
+    assert older.body == "2 new messages: Anything else?"
+
+
 def test_legacy_wire_output_matches_the_snapshot(wire):
     config, requests = wire
     replacements = _legacy_sweeps(config, requests)

@@ -256,6 +256,24 @@ def private_room_for(conn, config, user_id: str, about_token: str) -> PrivateDes
 #: The prompt snapshot of a quoted parent, as web and Talk cap theirs.
 REPLY_SNAPSHOT_CHARS = 1000
 
+#: The delivery reference of a secret-link row (`enqueue_secret_link`). Its body
+#: is a live capability, so no reply snapshot or push preview may copy it.
+SECRET_LINK_REFERENCE_PREFIX = "private-secret_link:"
+#: What a reply to or quote of a secret-link row reads as in the next prompt.
+SECRET_LINK_SNAPSHOT = "the secret link message"
+
+
+def is_secret_link_reference(reference: object) -> bool:
+    """Whether a `messages.delivery_reference` (or Talk `referenceId`) names a secret link."""
+    return isinstance(reference, str) and reference.startswith(SECRET_LINK_REFERENCE_PREFIX)
+
+
+def reply_snapshot(body: str | None, reference: object) -> str:
+    """The prompt snapshot of a quoted parent: its body capped, or fixed text for a secret link."""
+    if is_secret_link_reference(reference):
+        return SECRET_LINK_SNAPSHOT
+    return (body or "")[:REPLY_SNAPSHOT_CHARS]
+
 
 def linked_about(conn, parent_message_id: int | None, room_token: str | None) -> str | None:
     """The shared room a reply to ``parent_message_id`` is linked to, or None.
@@ -351,7 +369,7 @@ def quoted_private_reply(conn, *, user_id: str, quoted_id: str | None,
         ).fetchone()
         if answer is None:
             return None
-        return int(answer["id"]), answer["body"][:REPLY_SNAPSHOT_CHARS]
+        return int(answer["id"]), reply_snapshot(answer["body"], None)
     raw = key[len(WHATSAPP_KEY_PREFIX):]
     if not raw.isdecimal():
         return None
@@ -367,7 +385,7 @@ def quoted_private_reply(conn, *, user_id: str, quoted_id: str | None,
         or not (message["delivery_reference"] or "").startswith("private-")
     ):
         return None
-    return int(message["id"]), message["body"][:REPLY_SNAPSHOT_CHARS]
+    return int(message["id"]), reply_snapshot(message["body"], message["delivery_reference"])
 
 
 def linked_room(conn, task) -> str | None:

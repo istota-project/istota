@@ -206,6 +206,31 @@ class TestSendWithReply:
                 conn, room["token"], note,
             ) is None
 
+    async def test_a_reply_to_a_secret_link_row_snapshots_fixed_text(self, chat_client):
+        # ISSUE-996: the row carries a live capability the model must never read.
+        cookies = await _login(chat_client, "alice")
+        room = await _default_room(chat_client, cookies)
+        token = "TOKEN-sentinel-996"
+        with db.get_db(_db_path()) as conn:
+            link_row = db.add_message(
+                conn, room["token"], role="system", origin_surface="web",
+                body=f"Enter the password for acme here: https://example.com/istota/secret?token={token}",
+                about_room_token=room["token"], delivery_reference="private-secret_link:41",
+            )
+
+        resp = await _send(chat_client, cookies, room["id"], {
+            "text": "done, thanks", "reply_to_msg_id": link_row,
+        })
+        assert resp.status_code == 200
+        task_id = resp.json()["task_id"]
+        task = _task(task_id)
+        assert task.reply_to_message_id == link_row
+        assert task.reply_to_content == "the secret link message"
+        with db.get_db(_db_path()) as conn:
+            stored = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        assert token not in repr(tuple(stored))
+        assert "/istota/secret" not in repr(tuple(stored))
+
     async def test_retry_with_same_client_msg_id_makes_no_second_citation(
         self, chat_client,
     ):

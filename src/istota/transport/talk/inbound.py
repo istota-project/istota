@@ -1966,11 +1966,14 @@ async def _process_poll_results(
                 reply_to_content = None
                 parent = msg.get("parent")
                 if isinstance(parent, dict) and parent.get("id") and not parent.get("deleted"):
+                    from istota.rooms.private_replies import reply_snapshot
+
                     reply_to_talk_id = parent["id"]
-                    # Store parent message content as fallback
-                    parent_content = parent.get("message", "")
-                    if parent_content:
-                        reply_to_content = parent_content[:1000]
+                    # A secret link is posted under its delivery reference, which
+                    # Talk hands back on the parent (ISSUE-996).
+                    reply_to_content = reply_snapshot(
+                        parent.get("message", ""), parent.get("referenceId"),
+                    ) or None
 
                 # A reply to a relay question is its answer, checked before the
                 # confirmation intercept: a quoted "yes" to one must never

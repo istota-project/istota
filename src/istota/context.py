@@ -13,6 +13,7 @@ from .db import ConversationMessage, TalkMessage
 from istota.lib.llm_json import find_fenced_block
 from istota.lib.untrusted import frame_untrusted
 from istota.nextcloud.talk import clean_message_content
+from istota.rooms.private_replies import SECRET_LINK_REFERENCE_PREFIX
 
 # What a triage inference reports it spent. The caller supplies the sink because
 # it is the caller that knows which task, user and source_type the row belongs
@@ -536,7 +537,7 @@ _REFERENCE_ID_PATTERN = re.compile(r"^istota:task:(\d+):(\w+)$")
 _RELAY_REFERENCE_PREFIXES = (
     "relay-question:", "relay-return:",
     "private-whisper:", "private-confirmation:", "private-proposal:",
-    "private-pass_on:", "private-secret_link:",
+    "private-pass_on:", SECRET_LINK_REFERENCE_PREFIX,
 )
 
 

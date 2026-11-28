@@ -1278,6 +1278,43 @@ class TestPollTalkConversations:
             assert task.reply_to_content == "Original message content"
 
     @pytest.mark.asyncio
+    async def test_a_reply_to_a_secret_link_post_snapshots_fixed_text(self, make_config):
+        # ISSUE-996: `send_private` posts the link under its delivery reference,
+        # and Talk hands the parent back whole, link included.
+        config = make_config()
+        token = "TOKEN-sentinel-996"
+        msg = _msg(
+            id=300,
+            actor_id="alice",
+            message="done",
+            parent={"id": 250, "deleted": False, "actorId": "istota",
+                    "referenceId": "private-secret_link:41",
+                    "message": f"Enter the password for acme here: "
+                               f"https://nc.test/istota/secret?token={token}"},
+        )
+
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.list_conversations = AsyncMock(return_value=[
+                {"token": "room1", "type": 1},
+            ])
+            mock_instance.poll_messages = AsyncMock(return_value=[msg])
+
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "room1", 50)
+
+            result = await poll_talk_conversations(config)
+
+        assert len(result) == 1
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, result[0])
+            stored = conn.execute("SELECT * FROM tasks WHERE id = ?", (result[0],)).fetchone()
+        assert task.reply_to_talk_id == 250
+        assert task.reply_to_content == "the secret link message"
+        assert token not in repr(tuple(stored))
+        assert "/istota/secret" not in repr(tuple(stored))
+
+    @pytest.mark.asyncio
     async def test_slow_room_does_not_block_fast_room(self, make_config):
         """A quiet room long-polling should not delay processing of a room with messages."""
         config = make_config()
