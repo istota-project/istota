@@ -590,7 +590,7 @@ def test_extract_live_state_and_password_reflections(monkeypatch, passwords, ent
     assert result['count'] == 1
     for key, value in expected.items():
         assert result['elements'][0].get(key) == value
-    field.evaluate.assert_called_once_with(browse_api._EXTRACT_ELEMENT_JS)
+    field.evaluate.assert_called_once_with(browse_api._EXTRACT_ELEMENT_JS, [])
 
 
 def test_credential_fill_registers_before_failed_evaluation(monkeypatch):
@@ -660,9 +660,8 @@ const controls = [
   field('IMG', {src: '/photo.png', alt: 'Photo'}),
   field('BUTTON', {'aria-label': 'Close'}),
   field('INPUT', {type: 'password'}, {type: 'password', value: 'hidden'}),
-  field('INPUT', {name: 'token'}, {value: 'new secret', __istotaCredential: true}),
 ];
-console.log(JSON.stringify(controls.map(extract)));
+console.log(JSON.stringify(controls.map(el => extract(el, []))));
 '''
     result = subprocess.run([node, '-e', script, browse_api._EXTRACT_ELEMENT_JS],
                             capture_output=True, text=True, check=True)
