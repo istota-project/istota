@@ -191,6 +191,101 @@ class TestSpend:
         assert results == [True, False]
 
 
+class TestFinishConsent:
+    """A Google link is spent `consent_started`, and only the callback that
+    stored the token moves it to `connected` (#1000)."""
+
+    def _started(self, db_path):
+        _token, link = _issued(db_path, intent="google_connect", params={})
+        with db.get_db(db_path) as conn:
+            assert secret_links.spend(conn, link.id, "consent_started") is True
+        return link
+
+    def test_a_started_consent_finishes_once(self, db_path):
+        link = self._started(db_path)
+        with db.get_db(db_path) as conn:
+            assert secret_links.finish_consent(conn, link.id) is True
+            assert secret_links.finish_consent(conn, link.id) is False
+            assert secret_links.spent_link(conn, link.id)[1] == "connected"
+
+    @pytest.mark.parametrize("outcome", ["cancelled", "failed", "stored"])
+    def test_any_other_spend_does_not_finish(self, db_path, outcome):
+        _token, link = _issued(db_path, intent="google_connect", params={})
+        with db.get_db(db_path) as conn:
+            secret_links.spend(conn, link.id, outcome)
+            assert secret_links.finish_consent(conn, link.id) is False
+            assert secret_links.spent_link(conn, link.id)[1] == outcome
+
+    def test_a_live_link_does_not_finish(self, db_path):
+        _token, link = _issued(db_path, intent="google_connect", params={})
+        with db.get_db(db_path) as conn:
+            assert secret_links.finish_consent(conn, link.id) is False
+            assert conn.execute("SELECT used_at FROM secret_links WHERE id=?",
+                                (link.id,)).fetchone()[0] is None
+
+
+# The table as it stood before #1000, with no `consent_started` outcome.
+_PRE_CONSENT_STARTED = """CREATE TABLE secret_links (
+    id INTEGER PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    user_id TEXT NOT NULL,
+    intent TEXT NOT NULL CHECK (intent IN ('credential', 'google_connect')),
+    params TEXT NOT NULL DEFAULT '{}',
+    task_id INTEGER NOT NULL,
+    room_token TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    outcome TEXT CHECK (outcome IN ('stored', 'cancelled', 'failed', 'superseded', 'connected')),
+    failures INTEGER NOT NULL DEFAULT 0
+)"""
+
+
+def _table_shape(conn):
+    import re
+
+    out = []
+    for kind, name, sql in conn.execute(
+            "SELECT type, name, sql FROM sqlite_master WHERE tbl_name='secret_links' "
+            "AND sql IS NOT NULL ORDER BY type, name"):
+        sql = re.sub(r"--[^\n]*", "", sql).replace('"', "").replace(" IF NOT EXISTS", "")
+        sql = sql.replace("secret_links_rebuild", "secret_links")
+        out.append((kind, name, re.sub(r"\s+", " ", sql).replace("( ", "(").replace(" )", ")").strip()))
+    return out
+
+
+class TestTheConsentStartedMigration:
+    def _old(self, tmp_path):
+        old = tmp_path / "pre-1000.db"
+        db.init_db(old)
+        conn = sqlite3.connect(old)
+        try:
+            conn.execute("DROP TABLE secret_links")
+            conn.execute(_PRE_CONSENT_STARTED)
+            conn.execute("CREATE INDEX idx_secret_links_user ON secret_links(user_id, used_at, expires_at)")
+            conn.execute(
+                "INSERT INTO secret_links (id, token_hash, user_id, intent, task_id, room_token, "
+                "expires_at, used_at, outcome) VALUES (3, 'digest', 'alice', 'google_connect', 7, "
+                "'room-abc', '2026-11-28T00:15:00Z', '2026-11-28T00:01:00Z', 'connected')")
+            conn.commit()
+        finally:
+            conn.close()
+        return old
+
+    def test_an_upgraded_table_matches_a_fresh_one_and_keeps_its_rows(self, tmp_path, db_path):
+        old = self._old(tmp_path)
+        db.init_db(old)
+        db.init_db(old)
+        with db.get_db(db_path) as fresh, db.get_db(old) as upgraded:
+            assert _table_shape(upgraded) == _table_shape(fresh)
+            row = upgraded.execute("SELECT * FROM secret_links WHERE id=3").fetchone()
+            assert (row["token_hash"], row["room_token"], row["outcome"]) == (
+                "digest", "room-abc", "connected")
+            upgraded.execute("UPDATE secret_links SET outcome='consent_started' WHERE id=3")
+            with pytest.raises(sqlite3.IntegrityError):
+                upgraded.execute("UPDATE secret_links SET outcome='anything' WHERE id=3")
+
+
 class TestRecordFailure:
     def test_failures_count_and_the_fifth_spends(self, db_path):
         token, link = _issued(db_path)

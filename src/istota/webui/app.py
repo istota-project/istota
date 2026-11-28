@@ -2213,7 +2213,7 @@ async def _google_link_submit(request: Request, form, link) -> Response:
         logger.error("secret_link id=%s google_connect: consent could not start: %s", link.id, type(exc).__name__)
         return await _secret_link_page(
             request, "Google couldn’t be reached", "Nothing was connected. Try this link again in a minute.", 502)
-    result, spent = await asyncio.to_thread(_spend_google_link, token, "connected")
+    result, spent = await asyncio.to_thread(_spend_google_link, token, "consent_started")
     if result != "spent":
         if result == "refused":
             logger.info("secret_link id=%s google_connect: refused, the account changed since issue", spent.id)
@@ -2242,13 +2242,17 @@ def _pop_google_link_binding(request: Request) -> dict | None:
 
 
 def _bound_google_link(conn, binding: dict):
-    """The bound link, when it is the user's ``google_connect`` link this flow spent; else None."""
+    """The bound link, when it is the user's ``google_connect`` link this flow spent; else None.
+
+    Only a ``consent_started`` link qualifies: one already ``connected`` has
+    served its callback, and a replay of the session must not store again.
+    """
     from istota.webui import secret_links
 
     link, outcome = secret_links.spent_link(conn, binding["link_id"])
     if link is None or link.user_id != binding["user_id"] or link.intent != "google_connect":
         return None
-    return link if outcome == "connected" else None
+    return link if outcome == "consent_started" else None
 
 
 @auth_router.get("/secret")
@@ -2906,6 +2910,7 @@ async def google_callback(request: Request):
     scopes_json = json.dumps(scopes.split()) if isinstance(scopes, str) else json.dumps(scopes)
 
     from istota import db
+    from istota.webui import secret_links
     link = None
     try:
         with db.get_db(_config.db_path) as conn:
@@ -2920,6 +2925,9 @@ async def google_callback(request: Request):
                 if user is None and (link is None
                                      or _secret_link_account_refusal(conn, user_id, vault=False)):
                     raise _GoogleLinkRefused()
+            # Before the upsert, whose own commit then carries both writes.
+            if link is not None and not secret_links.finish_consent(conn, link.id):
+                raise _GoogleLinkRefused()
             db.upsert_google_token(
                 conn, user_id, access_token, refresh_token, expiry, scopes_json,
             )
@@ -2927,6 +2935,12 @@ async def google_callback(request: Request):
         return RedirectResponse(url="/istota/login", status_code=302)
     except _GoogleLinkRefused:
         logger.info("secret_link id=%s google_connect: refused at the callback", binding["link_id"])
+        return await failed()
+    except Exception as exc:
+        if link is None:
+            raise
+        logger.error("secret_link id=%s google_connect: the token could not be stored: %s",
+                     link.id, type(exc).__name__)
         return await failed()
     if link is not None:
         logger.info("secret_link id=%s google_connect: Google account connected for user %s",

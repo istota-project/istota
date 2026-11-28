@@ -2962,7 +2962,7 @@ CREATE TABLE IF NOT EXISTS secret_links (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     expires_at TEXT NOT NULL,
     used_at TEXT,
-    outcome TEXT CHECK (outcome IN ('stored', 'cancelled', 'failed', 'superseded', 'connected')),
+    outcome TEXT CHECK (outcome IN ('stored', 'cancelled', 'failed', 'superseded', 'consent_started', 'connected')),
     failures INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_secret_links_user ON secret_links(user_id, used_at, expires_at);
