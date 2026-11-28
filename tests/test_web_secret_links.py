@@ -362,7 +362,7 @@ class TestFailures:
         (notice,) = _notices(config)
         assert "cancelled" in notice["title"].lower()
 
-    @pytest.mark.parametrize("change", ["removed", "isolation", "deleted", "disabled"])
+    @pytest.mark.parametrize("change", ["removed", "isolation", "no_profile", "disabled"])
     async def test_an_account_that_changed_since_issue_spends_the_link(self, client, configured,
                                                                       monkeypatch, change):
         config = configured._config
@@ -372,14 +372,34 @@ class TestFailures:
             del config.users["alice"]
         elif change == "isolation":
             monkeypatch.setattr(configured, "_web_vault_refusal", lambda user_id: "not isolated")
-        elif change == "deleted":
-            user_profiles.delete_profile(config.db_path, "alice")
+        elif change == "no_profile":
+            # Not `delete_profile`, which takes the link with it: a configured
+            # user with no profile row reaches the form's own refusal.
+            with db.get_db(config.db_path) as conn:
+                conn.execute("DELETE FROM user_profiles WHERE user_id='alice'")
         else:
             web_auth.set_disabled(config.db_path, "alice", True)
         answer = await _post(client, token, csrf=csrf)
         assert answer.status_code == 400 and "expired or was already used" in answer.text
         assert _link_row(config, link.id)["outcome"] == "failed"
         assert not _is_local(config)
+
+    async def test_a_user_re_created_under_the_same_id_cannot_use_the_old_link(self, client, configured):
+        config = configured._config
+        token, _ = _issue(config)
+        bobs_token, bobs_link = _issue(config, user_id="bob")
+        user_profiles.delete_profile(config.db_path, "alice")
+        user_profiles.ensure_profile(config.db_path, "alice", display_name="Alice")
+        page = await client.get("/istota/secret", params={"token": token})
+        assert page.status_code == 400 and "expired or was already used" in page.text
+        answer = await client.post("/istota/secret", data={
+            "token": token, "csrf_token": "x", "action": "save", "value": VALUE})
+        assert answer.status_code == 400
+        assert not _is_local(config)
+        with db.get_db(config.db_path) as conn:
+            assert conn.execute("SELECT count(*) FROM secret_links WHERE user_id='alice'").fetchone()[0] == 0
+        assert _link_row(config, bobs_link.id)["used_at"] is None
+        assert (await client.get("/istota/secret", params={"token": bobs_token})).status_code == 200
 
     async def test_a_name_taken_elsewhere_since_issue_spends_the_link(self, client, configured):
         config = configured._config
