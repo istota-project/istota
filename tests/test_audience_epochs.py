@@ -271,6 +271,71 @@ class TestWhenAJoinSplits:
         with db.get_db(config.db_path) as conn:
             assert [e["epoch"] for e in _epochs(conn, token)] == [1, 2]
 
+    def _room_with_a_guest(self, conn):
+        """Alice's room, one turn, then a guest nobody has mapped, one more."""
+        room = db.create_web_chat_room(conn, "alice", "Plans")
+        _turn(conn, room.token, "alice", "before max joined", "Ok.", source="web")
+        db.upsert_room_participant(
+            conn, room_token=room.token, surface="whatsapp",
+            surface_ref="999@s.whatsapp.net", kind="guest",
+        )
+        _turn(conn, room.token, "alice", "said while max was a guest", "Ok.",
+              source="web")
+        cutoff = db.front_stage_cutoff(conn, room.token)
+        assert [e["person"] for e in _epochs(conn, room.token)] == [
+            "whatsapp:999@s.whatsapp.net",
+        ]
+        return room.token, cutoff
+
+    def test_a_guest_bound_to_a_user_keeps_their_join_boundary(self, config):
+        """ISSUE-995: a roster that maps the guest's number to a user
+        respells them `u:<user>`. Their join epoch must follow, or the turns
+        from before they joined come back while they read the room."""
+        with db.get_db(config.db_path) as conn:
+            token, as_guest = self._room_with_a_guest(conn)
+            db.upsert_room_participant(
+                conn, room_token=token, surface="whatsapp",
+                surface_ref="999@s.whatsapp.net", kind="guest", user_id="max",
+            )
+            assert db.front_stage_cutoff(conn, token) == as_guest
+            db.note_member_turn(conn, token, "max")
+            db.upsert_room_participant(
+                conn, room_token=token, surface="whatsapp",
+                surface_ref="999@s.whatsapp.net", kind="principal", user_id="max",
+            )
+            assert db.front_stage_cutoff(conn, token) == as_guest
+            assert [e["person"] for e in _epochs(conn, token)] == ["u:max"]
+
+    def test_binding_a_present_participant_carries_the_epoch(self, config):
+        """The step `record_inbound` takes before a bound guest's first turn,
+        so their membership finds them already in the audience."""
+        with db.get_db(config.db_path) as conn:
+            token, as_guest = self._room_with_a_guest(conn)
+            assert db.bind_room_participant_user(
+                conn, token, surface="whatsapp",
+                surface_ref="999@s.whatsapp.net", user_id="max",
+            )
+            db.note_member_turn(conn, token, "max")
+            assert db.front_stage_cutoff(conn, token) == as_guest
+            assert [e["person"] for e in _epochs(conn, token)] == ["u:max"]
+            # Nobody present under that ref without a user: nothing to bind.
+            assert not db.bind_room_participant_user(
+                conn, token, surface="whatsapp",
+                surface_ref="999@s.whatsapp.net", user_id="max",
+            )
+
+    def test_a_new_user_joining_after_a_binding_still_splits(self, config):
+        with db.get_db(config.db_path) as conn:
+            token, _ = self._room_with_a_guest(conn)
+            db.bind_room_participant_user(
+                conn, token, surface="whatsapp",
+                surface_ref="999@s.whatsapp.net", user_id="max",
+            )
+            db.add_room_member(conn, token, "carol")
+            assert [e["person"] for e in _epochs(conn, token)] == [
+                "u:max", "u:carol",
+            ]
+
     def test_a_guest_speaking_before_the_roster_shows_them_splits(self, config):
         from istota.transport._types import ParticipantRef
         from istota.transport.ingest import record_inbound

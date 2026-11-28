@@ -903,6 +903,11 @@ def handle_group_message(
     if not _claim(conn, event, user_id or "", f"group:{event.message_type}"):
         _report_stranded_media(event, "duplicate")
         return WhatsAppEventResult("duplicate", user_id=user_id)
+    if sender_jid:
+        # A guest first seen by LID now writes with their number: the same
+        # move a roster makes, so `record_inbound` finds them present.
+        _relabel(conn, room.token, identity_rules.normalize_lid(event.group.sender_lid),
+                 sender_jid, user_id)
     attached = False
 
     def done(result: "WhatsAppEventResult") -> "WhatsAppEventResult":
