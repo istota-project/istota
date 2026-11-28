@@ -120,7 +120,7 @@ Chat selection URLs are written by `createUrlSelection` in `routes/chat/+page.sv
 
 - Parent is the canonical `messages.id` (`reply_to_msg_id`), stored on `tasks.reply_to_message_id` and `messages.reply_to_message_id`, no foreign key so a deleted parent can be shown.
 - **Not `reply_to_talk_id`**: canonical and Talk ids collide silently in a bound room. `record_inbound` takes `reply_to_canonical_id` beside surface-native `reply_to_message_id`; do not merge them. `_ensure_reply_parent_in_history` tries `db.get_reply_parent_task_by_message_id` first.
-- **The snapshot is server-derived** (1000 chars from `messages.body`); a client quote would be forgeable. Unknown or foreign parent → 404, no task.
+- **The snapshot is server-derived** (`private_replies.reply_snapshot`: 1000 chars from `messages.body`, or fixed text for a secret-link row, ISSUE-996); a client quote would be forgeable. Unknown or foreign parent → 404, no task.
 - `build_prompt` renders the snapshot as a request blockquote always; `_ensure_reply_parent_in_history` force-includes the parent turn. Snapshot-only: system rows, retention-deleted, unfinished turns.
 - `reply_to` (`{msg_id, role, excerpt, author?, deleted}`) from all three producers via a live `LEFT JOIN`; excerpt 200 chars, same as the chip; `buildHistoryMessage` is the one builder. `author` names a `user` parent by `webui.app._author_name`, the rule a turn's own header uses, and is absent for the viewer's own row, which the quote labels with the viewer's name (#764).
 - **`reply_target_gone`**: the row is removed and text returns to the composer, the one exception to ISSUE-200, since Retry cannot work.

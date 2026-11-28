@@ -7748,20 +7748,22 @@ def get_message_room(conn: sqlite3.Connection, message_id: int) -> str | None:
 
 def get_reply_target(
     conn: sqlite3.Connection, message_id: int,
-) -> tuple[str, str] | None:
-    """``(room_token, body)`` for a message a client wants to cite, or None.
+) -> tuple[str, str, str | None] | None:
+    """``(room_token, body, delivery_reference)`` for a message a client wants to cite, or None.
 
     One read serving both halves of the send-side validation: the room the
     parent lives in (which must equal the room being posted into) and the body
     the server snapshots into `tasks.reply_to_content`. The snapshot is derived
     here rather than accepted from the client — it becomes text the model reads
     as an authoritative record of what it previously said, and there is no
-    reason to trust a caller for a row we hold.
+    reason to trust a caller for a row we hold. The reference is what
+    `private_replies.reply_snapshot` reads to keep a secret link out of it.
     """
     row = conn.execute(
-        "SELECT room_token, body FROM messages WHERE id = ?", (message_id,)
+        "SELECT room_token, body, delivery_reference FROM messages WHERE id = ?",
+        (message_id,),
     ).fetchone()
-    return (row["room_token"], row["body"]) if row else None
+    return (row["room_token"], row["body"], row["delivery_reference"]) if row else None
 
 
 def is_bot_message_in_room(

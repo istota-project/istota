@@ -1939,6 +1939,28 @@ class TestSecretLink:
         (row,) = _rows(config, "SELECT room_token FROM messages WHERE body LIKE ?", (f"%{token}%",))
         assert row["room_token"] == phone != web
 
+    def test_a_quote_of_it_on_whatsapp_never_puts_the_link_in_the_next_prompt(self, config, sent):
+        # ISSUE-996: the quote resolves to the row, which used to be snapshotted whole.
+        with db.get_db(config.db_path) as conn:
+            phone = _phone_room(conn)
+            ident = _running(conn, "alice", phone, source_type="whatsapp")
+        token, _, _ = _secret_link(config, ident, phone)
+        _drain(config)
+        (request,) = sent
+        assert token in request.text
+        result = _receive(config, _baileys_event("done, which one was it?", quote="BOT1"))
+        assert result.disposition == "task"
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, result.task_id)
+            stored = conn.execute("SELECT * FROM tasks WHERE id = ?", (result.task_id,)).fetchone()
+            (link_row,) = conn.execute(
+                "SELECT id FROM messages WHERE delivery_reference LIKE 'private-secret_link:%'",
+            ).fetchall()
+        assert task.reply_to_message_id == link_row["id"]
+        assert task.reply_to_content == "the secret link message"
+        assert token not in repr(tuple(stored))
+        assert "/istota/secret" not in repr(tuple(stored))
+
     def test_from_the_users_own_talk_room_it_answers_there_not_in_web(self, config, talk):
         with db.get_db(config.db_path) as conn:
             web = _web_room(conn)
