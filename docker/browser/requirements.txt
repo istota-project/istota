@@ -7,6 +7,9 @@ trafilatura==2.1.0
 # PDF text (pdf_text.py, pdf_child.py): pure Python, run in a confined child.
 # Held equal to pyproject's dev pin by tests/test_browser_pdf_text.py.
 pypdf==6.20.1
+# Screenshot masking of filled card fields (browse_api._masked_screenshot).
+# Held equal to uv.lock's pin by tests/test_browser_credential_traces.py.
+Pillow==12.1.1
 # pypdf's AES provider: without it a PDF locked by an owner password alone,
 # which is common, reads as empty or unparseable.
 cryptography==50.0.2

@@ -10,6 +10,7 @@ import atexit
 from contextlib import contextmanager
 import ctypes
 from html import escape
+import io
 import json
 import egress_proxy
 import ipaddress
@@ -24,6 +25,7 @@ import sys
 import threading
 import time
 import uuid
+from typing import NamedTuple
 from urllib.parse import quote, urlsplit
 
 from collections import Counter
@@ -32,6 +34,7 @@ from urllib.parse import parse_qs
 import base64
 
 from flask import Flask, Response, jsonify, request
+from PIL import Image, ImageDraw
 from werkzeug.local import LocalProxy
 from lib.istota_user_scope import scoped_user_dir
 
@@ -547,6 +550,7 @@ def _close_page(page, ctx):
     this runs from _cleanup_expired() at the top of every endpoint, and a
     teardown that raised would fail requests over tabs nobody asked about.
     """
+    _forget_filled(page)
     try:
         if len(ctx.pages) <= 1:
             page.goto("about:blank", timeout=5000)
@@ -1487,6 +1491,63 @@ def browse():
         return _navigation_error_response(e, _credential_values, mask_secrets=data.get("mask_secrets", False))
 
 
+CARD_MASK_COLOR = (0, 0, 0)
+# CSS pixels added around a field's box, for its border and focus ring.
+CARD_MASK_PAD = 2
+
+
+def _card_field_boxes(page):
+    boxes = []
+    for field in _filled_fields.get(page, ()):
+        if not field.masked:
+            continue
+        try:
+            box = field.handle.bounding_box()
+        except Exception:
+            continue
+        if box:
+            boxes.append(box)
+    return boxes
+
+
+def _masked_screenshot(page, full_page):
+    """A capture with every filled card number and CVC field painted over.
+
+    Done to the image rather than the page, where any style that hides the
+    digits is one the page can read (ISSUE-1002). The boxes are read before and
+    after the capture, so a field that moved during it is covered in both
+    places. `bounding_box` is a CDP call and runs no script in the page; the
+    page state it is scaled by is one evaluate, taken even under `measure:
+    false`, since a capture without it could leave the digits showing.
+    """
+    before = _card_field_boxes(page)
+    png = page.screenshot(full_page=full_page)
+    boxes = before + _card_field_boxes(page)
+    if not boxes:
+        return png
+    state = visual.page_state(page)
+    if not state or not state.get("dpr"):
+        raise RuntimeError("could not place the card field mask on the screenshot; "
+                           "the capture was not returned")
+    scale = state["dpr"]
+    scroll_x, scroll_y = state.get("scroll") or (0, 0)
+    if not full_page:
+        scroll_x = scroll_y = 0
+    image = Image.open(io.BytesIO(png))
+    image.load()
+    draw = ImageDraw.Draw(image)
+    for box in boxes:
+        left = (box["x"] + scroll_x - CARD_MASK_PAD) * scale
+        top = (box["y"] + scroll_y - CARD_MASK_PAD) * scale
+        right = (box["x"] + scroll_x + box["width"] + CARD_MASK_PAD) * scale
+        bottom = (box["y"] + scroll_y + box["height"] + CARD_MASK_PAD) * scale
+        fill = CARD_MASK_COLOR + (255,) if image.mode == "RGBA" else CARD_MASK_COLOR
+        draw.rectangle([left, top, right, bottom], fill=fill)
+    out = io.BytesIO()
+    image.save(out, format="PNG")
+    return out.getvalue()
+
+
 @app.route("/screenshot", methods=["POST"])
 def screenshot():
     """Take a screenshot of the current page.
@@ -1572,7 +1633,7 @@ def screenshot():
         # pointer was not addressing. Fronting here makes the picture and the
         # pointer agree by construction rather than by coincidence.
         verdict = _capture_foreground(page)
-        img_bytes = page.screenshot(full_page=full_page)
+        img_bytes = _masked_screenshot(page, full_page)
         if len(img_bytes) > visual.MAX_SCREENSHOT_BYTES:
             # Refused rather than truncated: a truncated PNG is a corrupt PNG.
             # Only full_page gets anywhere near this, and the remedy is named.
@@ -1713,7 +1774,65 @@ _credentials_by_user = {}
 CARD_SECRET_FIELDS = ("number", "cvc")
 _credential_values = LocalProxy(lambda: _credentials_by_user.setdefault(str(_user_scope), set()))
 
-_EXTRACT_ELEMENT_JS = """el => {
+
+class FilledField(NamedTuple):
+    frame: object
+    handle: object
+    masked: bool
+
+
+# The fields a credential fill wrote, per page. Kept here rather than as a mark
+# on the element: anything set on the node from the page's own world is the
+# page's to read and to delete (ISSUE-1002). A plain dict, because every entry
+# holds its page through its frame; `_close_page` and `_remember_filled` drop
+# a page's entry.
+_filled_fields = {}
+FILLED_FIELDS_MAX = 32
+
+
+def _dispose(handle):
+    try:
+        handle.dispose()
+    except Exception:
+        pass
+
+
+def _forget_filled(page):
+    for field in _filled_fields.pop(page, ()):
+        _dispose(field.handle)
+
+
+def _remember_filled(page, frame, handle, masked):
+    for other in [other for other in _filled_fields if other is not page and _page_is_gone(other)]:
+        _forget_filled(other)
+    fields = _filled_fields.setdefault(page, [])
+    fields.append(FilledField(frame, handle, masked))
+    while len(fields) > FILLED_FIELDS_MAX:
+        _dispose(fields.pop(0).handle)
+
+
+def _live_filled(page):
+    """This page's filled fields whose document is still there; the rest are dropped.
+
+    A handle into a document that has gone raises on use, and one of them in an
+    argument list would fail the whole read it was passed to.
+    """
+    live = []
+    for field in _filled_fields.get(page, ()):
+        try:
+            field.handle.evaluate("el => true")
+        except Exception:
+            _dispose(field.handle)
+            continue
+        live.append(field)
+    if page in _filled_fields:
+        _filled_fields[page] = live
+    return live
+
+
+# `filled` is compared by identity in a plain loop, so no prototype method the
+# page could have replaced decides whether a value is withheld.
+_EXTRACT_ELEMENT_JS = """(el, filled = []) => {
   const a = n => el.getAttribute(n);
   const entry = {
     text: (el.innerText || '').trim() || a('aria-label') || a('placeholder')
@@ -1728,7 +1847,9 @@ _EXTRACT_ELEMENT_JS = """el => {
   }
   if ('value' in el) {
     entry.value_present = String(el.value).length > 0;
-    if (el.type !== 'password' && !el.__istotaCredential) entry.value = String(el.value);
+    let credential = false;
+    for (let i = 0; i < filled.length; i++) if (filled[i] === el) credential = true;
+    if (el.type !== 'password' && !credential) entry.value = String(el.value);
   }
   if ('checked' in el) entry.checked = el.checked;
   return entry;
@@ -1949,9 +2070,10 @@ def extract():
         # values only into the redactor, never into the returned element data.
         secrets = _credential_values | set(page.evaluate(_PASSWORD_VALUES_JS))
         elements = page.query_selector_all(selector)
+        filled = [field.handle for field in _live_filled(page) if field.frame is page.main_frame]
         results = []
         for el in elements[:limit]:
-            entry = el.evaluate(_EXTRACT_ELEMENT_JS)
+            entry = el.evaluate(_EXTRACT_ELEMENT_JS, filled)
             value = entry.get("value", "")
             if any(secret and _secret_pattern(secret).search(value) for secret in secrets):
                 entry.pop("value", None)
@@ -2898,11 +3020,23 @@ def _cdp_selector_action(page, action, path, why):
 
 
 _CREDENTIAL_FILL_JS = """(el, {value, origin, card_field}) => {
-    if (document.location.origin !== origin || el.ownerDocument !== document || !el.isConnected)
-        return {ok: false, error: "credential_origin_mismatch"};
-    if (el.disabled || el.readOnly)
-        return {ok: false, error: "credential_field_unfillable"};
+    const refusal = () => {
+        if (document.location.origin !== origin || el.ownerDocument !== document || !el.isConnected)
+            return {ok: false, error: "credential_origin_mismatch"};
+        if (el.disabled || el.readOnly)
+            return {ok: false, error: "credential_field_unfillable"};
+        return null;
+    };
+    let refused = refusal();
+    if (refused) return refused;
+    // A password manager fills a focused field. A focus handler runs
+    // synchronously and can detach the node, replace the document or rebuild
+    // a select's options, so the checks and the option lookup come after it.
+    let write;
     if (card_field && el instanceof HTMLSelectElement) {
+        el.focus();
+        refused = refusal();
+        if (refused) return refused;
         let equivalents = [value];
         if (card_field === "exp_month") {
             const month = Number(value);
@@ -2919,28 +3053,30 @@ _CREDENTIAL_FILL_JS = """(el, {value, origin, card_field}) => {
         const option = Array.from(el.options).find(option =>
             !option.disabled && !option.parentElement.disabled &&
             (equivalents.includes(option.value) || equivalents.includes(option.text.trim())));
-        if (!option) return {ok: false, error: "credential_option_missing"};
-        el.__istotaCredential = true;
-        Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(el, option.value);
-        el.dispatchEvent(new Event("input", {bubbles: true}));
-        el.dispatchEvent(new Event("change", {bubbles: true}));
-        return {ok: true};
+        if (!option) {
+            el.blur();
+            return {ok: false, error: "credential_option_missing"};
+        }
+        const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set;
+        write = () => setter.call(el, option.value);
+    } else {
+        let setter;
+        if (el instanceof HTMLInputElement &&
+            ["text", "email", "password", "search", "tel", "url", "number"].includes(el.type))
+            setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+        else if (el instanceof HTMLTextAreaElement)
+            setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set;
+        else if (!el.isContentEditable)
+            return {ok: false, error: "credential_field_unfillable"};
+        write = setter ? () => setter.call(el, value) : () => { el.textContent = value; };
+        el.focus();
+        refused = refusal();
+        if (refused) return refused;
     }
-    let setter;
-    if (el instanceof HTMLInputElement &&
-        ["text", "email", "password", "search", "tel", "url", "number"].includes(el.type))
-        setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
-    else if (el instanceof HTMLTextAreaElement)
-        setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set;
-    else if (!el.isContentEditable)
-        return {ok: false, error: "credential_field_unfillable"};
-    el.__istotaCredential = true;
-    if (el instanceof HTMLInputElement && ["number", "cvc"].includes(card_field))
-        el.style.setProperty("-webkit-text-security", "disc", "important");
-    if (setter) setter.call(el, value);
-    else el.textContent = value;
-    el.dispatchEvent(new InputEvent("input", {bubbles: true, inputType: "insertText", data: value}));
+    write();
+    el.dispatchEvent(new Event("input", {bubbles: true}));
     el.dispatchEvent(new Event("change", {bubbles: true}));
+    el.blur();
     return {ok: true};
 }"""
 
@@ -3219,12 +3355,15 @@ def _selector_action(session, page, action, others=(), owned=()):
         card_field = action.get("card_field")
         if value and (not card_field or card_field in CARD_SECRET_FIELDS):
             _credential_values.add(value)
-        # Even ElementHandle.fill uses keyboard insertion internally. Keep the
-        # origin check and DOM write in one evaluation, with no focus dispatch.
+        # Even ElementHandle.fill uses keyboard insertion internally, which goes
+        # to whatever has focus. Keep the origin check and the write to `el`
+        # itself in one evaluation.
         fill_args = {"value": value, "origin": origin}
         if action.get("card_field"):
             fill_args["card_field"] = action["card_field"]
         result = handle.evaluate(_CREDENTIAL_FILL_JS, fill_args)
+        if isinstance(result, dict) and result.get("ok") is True:
+            _remember_filled(page, frame, handle, card_field in CARD_SECRET_FIELDS)
         return {"action": "fill", "selector": selector, **result,
                 "path": "cdp", "path_reason": "credential origin checked"}
     if not selector:
