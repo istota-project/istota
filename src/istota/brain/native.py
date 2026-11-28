@@ -53,7 +53,7 @@ from urllib.parse import urlparse
 
 from istota.build_info import RUNNING_VERSION as _ISTOTA_VERSION
 from istota.usage import telemetry as usage_types
-from istota.agent.events import AgentEvent, _describe_tool_use, _lone_relay_ask, _tool_invocation
+from istota.agent.events import AgentEvent, _describe_tool_use, _lone_relay_ask, _lone_secret_link, _tool_invocation
 from istota.agent.loop import run_agent_loop, run_agent_loop_continue
 from istota.agent.sanitize import sanitize_tool_pairs
 from istota.agent.types import (
@@ -3275,6 +3275,7 @@ def _tool_use_event(tool_name: str, description: str, tool_call_id: str = "", ar
     return ToolUseEvent(
         tool_name=tool_name, description=description, tool_call_id=tool_call_id,
         lone_relay_ask=_lone_relay_ask(tool_name, args),
+        lone_secret_link=_lone_secret_link(tool_name, args),
     )
 
 

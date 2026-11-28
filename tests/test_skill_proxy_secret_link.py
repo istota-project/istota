@@ -115,8 +115,9 @@ class TestTheHappyPath:
                          "delivered_to": "web"}
         assert link["user_id"] == "alice" and link["intent"] == "credential"
         assert link["task_id"] == task_id and link["room_token"] == room
+        # No tool call was counted, so nothing vouches that the turn asked cleanly.
         assert json.loads(link["params"]) == {
-            "name": "acme", "url": "https://acme.example", "username": True}
+            "name": "acme", "url": "https://acme.example", "username": True, "clean": False}
         assert request["kind"] == "secret_link" and request["state"] == "queued"
         assert request["requester_user_id"] == request["recipient_user_id"] == "alice"
 

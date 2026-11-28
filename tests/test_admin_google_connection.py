@@ -252,7 +252,7 @@ class TestConnectingFromALink:
                                base_url="https://example.com") as client:
             yield client
 
-    def _issue(self, config, user_id="alice"):
+    def _issue(self, config, user_id="alice", params=None):
         from istota.webui import secret_links
 
         with db.get_db(config.db_path) as conn:
@@ -262,7 +262,7 @@ class TestConnectingFromALink:
         with db.get_db(config.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
             token, link = secret_links.issue(conn, user_id=user_id, intent="google_connect",
-                                             params={}, task_id=task_id, room_token=room,
+                                             params=params or {}, task_id=task_id, room_token=room,
                                              ttl_seconds=900)
         return token, link
 
@@ -311,6 +311,16 @@ class TestConnectingFromALink:
         assert page.headers["cache-control"] == "no-store"
         assert self._row(config, link.id) == before
         app._oauth.google.authorize_redirect.assert_not_awaited()
+
+    @pytest.mark.parametrize("clean,cautioned", [(True, False), (False, True)])
+    async def test_a_link_not_asked_for_cleanly_says_so(self, app, client, config, clean, cautioned):
+        token, _ = self._issue(config, params={"clean": clean})
+        page = await client.get("/istota/secret", params={"token": token})
+        assert page.status_code == 200
+        assert ("partway through other work" in page.text) is cautioned
+        if cautioned:
+            assert "Only continue if you want to connect your own Google account" in page.text
+            assert page.text.index("partway through other work") < page.text.index("Continue to Google")
 
     async def test_continue_goes_to_google_with_the_users_own_scopes(self, app, client, config):
         from istota import user_profiles

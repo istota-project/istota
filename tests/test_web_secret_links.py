@@ -75,9 +75,11 @@ def _task(config, user_id="alice"):
 
 
 def _issue(config, *, user_id="alice", name="acme", url="https://acme.example", username=True,
-           intent="credential"):
+           intent="credential", clean=None):
     task_id, room = _task(config, user_id)
     params = {"name": name, "url": url, "username": username} if intent == "credential" else {}
+    if clean is not None:
+        params["clean"] = clean
     with db.get_db(config.db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         token, link = secret_links.issue(conn, user_id=user_id, intent=intent, params=params,
@@ -183,6 +185,23 @@ class TestTheForm:
         assert "requested.example" not in page.text
 
 
+    async def test_a_link_asked_for_cleanly_shows_no_caution(self, client, configured):
+        token, _ = _issue(configured._config, clean=True)
+        page = await client.get("/istota/secret", params={"token": token})
+        assert page.status_code == 200
+        assert "partway through other work" not in page.text
+        assert 'class="form-alert"' not in page.text
+
+    @pytest.mark.parametrize("clean", [False, None], ids=["not_clean", "unrecorded"])
+    async def test_a_link_not_asked_for_cleanly_says_so_above_the_fields(self, client, configured, clean):
+        token, _ = _issue(configured._config, clean=clean)
+        page = await client.get("/istota/secret", params={"token": token})
+        assert page.status_code == 200
+        caution = re.search(r'<p class="form-alert"[^>]*>.*?</p>', page.text, re.S)
+        assert caution and "partway through other work" in caution[0]
+        assert "Only continue if you asked to give me a password" in caution[0]
+        assert page.text.index("partway through other work") < page.text.index('name="value"')
+
 class TestDeadLinks:
     async def _generic(self, client, token):
         page = await client.get("/istota/secret", params={"token": token})
@@ -274,6 +293,48 @@ class TestSaving:
         assert "If that wasn't you" in notice["body"]
         assert VALUE not in notice["body"]
         assert _handoffs(config) == 1
+
+    async def test_the_asking_task_is_not_granted_the_new_credential(self, client, configured):
+        config = configured._config
+        token, link = _issue(config)
+        with db.get_db(config.db_path) as conn:
+            # The asking task froze its snapshot when it started.
+            grants.ensure_credential_grants(conn, link.task_id, "alice")
+            conn.commit()
+        assert "Saved" in (await _post(client, token)).text
+        with db.get_db(config.db_path) as conn:
+            assert grants.get_grant(conn, "alice", "acme")["rooms"] == [link.room_token]
+            assert conn.execute("SELECT count(*) FROM credential_task_grants WHERE task_id=?",
+                                (link.task_id,)).fetchone()[0] == 0
+            assert grants.check_credential_use(conn, link.task_id, "alice", "acme") == "credential_not_granted"
+            conn.rollback()
+
+    async def test_a_subtask_of_the_asking_task_is_not_granted_it(self, client, configured):
+        # A subtask the asking task deferred can start after the save; it is
+        # still the asking turn's work, not the user's next message.
+        config = configured._config
+        token, link = _issue(config)
+        assert "Saved" in (await _post(client, token)).text
+        with db.get_db(config.db_path) as conn:
+            child = db.create_task(conn, user_id="alice", source_type="subtask", prompt="fill it",
+                                   conversation_token=link.room_token, parent_task_id=link.task_id)
+            grandchild = db.create_task(conn, user_id="alice", source_type="subtask", prompt="now",
+                                        conversation_token=link.room_token, parent_task_id=child)
+            for task_id in (child, grandchild):
+                assert "acme" not in grants.ensure_credential_grants(conn, task_id, "alice")
+                assert grants.check_credential_use(conn, task_id, "alice", "acme") == "credential_not_granted"
+            conn.rollback()
+
+    async def test_the_next_task_in_the_room_is_granted_it(self, client, configured):
+        config = configured._config
+        token, link = _issue(config)
+        assert "Saved" in (await _post(client, token)).text
+        with db.get_db(config.db_path) as conn:
+            later = db.create_task(conn, user_id="alice", source_type="web", prompt="sign in now",
+                                   conversation_token=link.room_token)
+            assert "acme" in grants.ensure_credential_grants(conn, later, "alice")
+            assert grants.check_credential_use(conn, later, "alice", "acme") is None
+            conn.rollback()
 
     async def test_the_link_works_once(self, client, configured):
         token, _ = _issue(configured._config)

@@ -71,6 +71,7 @@ class TaskStreamAdapter:
         self._private_tool_calls: set[str] = set()
         self._tool_calls = 0
         self._first_tool_relay = False
+        self._first_tool_link = False
 
         # Stream surfaces (web chat, repl) get the answer text streamed live as
         # ``text_delta`` events; push surfaces (Talk/email/ntfy/istota_file) are
@@ -265,6 +266,7 @@ class TaskStreamAdapter:
         self._tool_calls += 1
         if self._tool_calls == 1:
             self._first_tool_relay = is_relay
+            self._first_tool_link = event.lone_secret_link
         db_path = Path(self.config.db_path)
         if not self.task.id or not db_path.exists():
             return
@@ -275,6 +277,7 @@ class TaskStreamAdapter:
                 db.record_attempt_tool_call(
                     conn, self.task.id,
                     calls_seen=self._tool_calls, first_is_relay=self._first_tool_relay,
+                    first_is_link=self._first_tool_link,
                 )
         except Exception:
             # A lost write leaves the count low for now; the next call's write

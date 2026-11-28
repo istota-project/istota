@@ -151,7 +151,7 @@ def auto_grant_vault_entries(conn, user_id, owners, *, declined, scoped):
     return count
 
 
-def grant_created_entry(conn, user_id, owner, task_id):
+def grant_created_entry(conn, user_id, owner, task_id, *, extend_snapshot=True):
     """Grant an entry a task just created to that task's conversation (ISSUE-684).
 
     Rooms scope, scheduled use off, no HTTP: later turns in the conversation
@@ -159,7 +159,9 @@ def grant_created_entry(conn, user_id, owner, task_id):
     The marker is set to ``granted`` so the sync's ``generated/`` decline
     never touches it again, and a grant the user narrows or revokes stays so.
     The creating task's own snapshot gains the grant when it is in scope, so a
-    retry of an interrupted signup can still use the entry it made.
+    retry of an interrupted signup can still use the entry it made. With
+    ``extend_snapshot=False`` it does not: a credential the user typed into a
+    secret link is for their next turn, not for the task that asked (#1001).
     No conversation, no host binding (an apply that failed, or no URL) or a
     grant already present: nothing changes. Returns ``(room, scheduled)``,
     where ``scheduled`` says the creator itself is outside the grant, or None.
@@ -178,7 +180,7 @@ def grant_created_entry(conn, user_id, owner, task_id):
         return None
     grant = put_grant(conn, user_id, owner, scope_mode="rooms", rooms=[room], allow_scheduled=False)
     db.kv_set(conn, user_id, NAMESPACE, AUTO_GRANT_PREFIX + grant["name"], AUTO_GRANT_DONE)
-    if _in_scope(grant, task, scheduled):
+    if extend_snapshot and _in_scope(grant, task, scheduled):
         conn.execute("INSERT OR REPLACE INTO credential_task_grants VALUES (?, ?, ?, ?)",
                      (task_id, user_id, grant["name"], grant["policy_revision"]))
     return room, scheduled
@@ -224,6 +226,28 @@ def _withheld(binding, withheld_scopes):
     return True
 
 
+def _link_saved_for_lineage(conn, task_id, user_id, name):
+    """Whether ``name`` was saved through a secret link this task or one of its ancestors asked for.
+
+    Such a credential is for the user's next turn (#1001), so a subtask the
+    asking task deferred, which may start after the save, does not get it
+    either. The walk is bounded, as `_task_context`'s is by its cycle check.
+    """
+    return conn.execute(
+        """WITH RECURSIVE lineage(id, parent, depth) AS (
+               SELECT id, parent_task_id, 0 FROM tasks WHERE id = ? AND user_id = ?
+               UNION ALL
+               SELECT t.id, t.parent_task_id, l.depth + 1 FROM tasks t
+               JOIN lineage l ON t.id = l.parent WHERE l.depth < 64
+           )
+           SELECT 1 FROM secret_links
+           WHERE user_id = ? AND intent = 'credential' AND outcome = 'stored'
+             AND json_extract(params, '$.name') = ?
+             AND task_id IN (SELECT id FROM lineage) LIMIT 1""",
+        (task_id, user_id, user_id, name),
+    ).fetchone() is not None
+
+
 def ensure_credential_grants(conn, task_id, user_id, *, withheld_scopes=frozenset()):
     """Freeze the maximum set once, even when it is empty. Caller commits.
 
@@ -241,7 +265,8 @@ def ensure_credential_grants(conn, task_id, user_id, *, withheld_scopes=frozense
             grant = get_grant(conn, user_id, name)
             binding = get_entry_binding(conn, user_id, name)
             if (binding and binding["hosts"] and _in_scope(grant, task, scheduled)
-                    and not _withheld(binding, withheld_scopes)):
+                    and not _withheld(binding, withheld_scopes)
+                    and not _link_saved_for_lineage(conn, task_id, user_id, name)):
                 conn.execute("INSERT OR IGNORE INTO credential_task_grants VALUES (?, ?, ?, ?)",
                              (task_id, user_id, name, grant["policy_revision"]))
         conn.execute("UPDATE tasks SET credential_grants_initialized=1 WHERE id=? AND user_id=?",

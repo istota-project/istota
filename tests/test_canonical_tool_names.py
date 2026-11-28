@@ -148,7 +148,7 @@ class TestTheGuard:
                 return real(name, input_data)
             return wrapper
 
-        for helper in ("_describe_tool_use", "_tool_invocation", "_lone_relay_ask"):
+        for helper in ("_describe_tool_use", "_tool_invocation", "_lone_relay_ask", "_lone_secret_link"):
             real = getattr(agent_events, helper)
             monkeypatch.setattr(stream_events, helper, recording(helper, real))
         monkeypatch.setattr(agent_events, "_private_relay_tool",
@@ -161,6 +161,7 @@ class TestTheGuard:
 
         helpers = {helper for helper, _ in received}
         # The guard is vacuous unless every helper was reached through the sites.
-        assert helpers == {"_describe_tool_use", "_tool_invocation", "_lone_relay_ask", "_private_relay_tool"}
+        assert helpers == {"_describe_tool_use", "_tool_invocation", "_lone_relay_ask", "_lone_secret_link",
+                           "_private_relay_tool"}
         assert [name for _, name in received if name.startswith("mcp__")] == []
         assert ("_describe_tool_use", "WebFetch") in received

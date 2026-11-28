@@ -90,23 +90,23 @@ def _private_relay_tool(name: str, input_data: dict) -> bool:
 _UNQUOTED_SHELL_SYNTAX = frozenset(";&|<>()$`*?[]{}~")
 
 
-def _lone_relay_ask(name: str, input_data: dict) -> bool:
-    """Whether a tool call is exactly one `istota-skill relay ask` and nothing else.
+def _lone_command_argv(name: str, input_data: dict) -> list[str] | None:
+    """The argv of a Bash call that is one plain command and nothing else, or None.
 
-    The clean-turn rule (ISSUE-565) authorizes on this flag, so it is strict
-    where `_private_relay_tool` is loose: that one hides output, and matching
-    too much there costs nothing. Here a false positive lets a question shaped
-    by something the task read skip approval. One simple command, argv[0]
-    literally `istota-skill`, no separators, pipes, redirects, substitutions,
-    expansions, globs, newlines or assignment prefixes. Single-quoted text is
-    literal and may hold anything but a newline; double-quoted text may not
-    hold `$` or a backtick, which the shell would still expand there.
+    The clean-turn rules (ISSUE-565, #1001) decide on what this returns, so it
+    is strict where `_private_relay_tool` is loose: that one hides output, and
+    matching too much there costs nothing. Here a false positive lets a call
+    shaped by something the task read count as the user's own. One simple
+    command, no separators, pipes, redirects, substitutions, expansions,
+    globs, newlines or assignment prefixes. Single-quoted text is literal and
+    may hold anything but a newline; double-quoted text may not hold `$` or a
+    backtick, which the shell would still expand there.
     """
     if name != "Bash" or not isinstance(input_data, dict):
-        return False
+        return None
     command = input_data.get("command")
     if not isinstance(command, str) or "\n" in command or "\r" in command:
-        return False
+        return None
     quote = None
     i = 0
     while i < len(command):
@@ -120,22 +120,42 @@ def _lone_relay_ask(name: str, input_data: dict) -> bool:
             elif ch == '"':
                 quote = None
             elif ch in "$`":
-                return False
+                return None
         elif ch == "\\":
             i += 1
         elif ch in "'\"":
             quote = ch
         elif ch in _UNQUOTED_SHELL_SYNTAX:
-            return False
+            return None
         i += 1
     if quote is not None:
-        return False
+        return None
     try:
-        argv = shlex.split(command)
+        return shlex.split(command)
     except ValueError:
-        return False
-    # `room post` takes the same clean-turn rule (multiplayer D4).
-    return argv[:3] in (["istota-skill", "relay", "ask"], ["istota-skill", "room", "post"])
+        return None
+
+
+def _lone_relay_ask(name: str, input_data: dict) -> bool:
+    """Whether a tool call is exactly one `istota-skill relay ask` and nothing else.
+
+    `room post` takes the same clean-turn rule (multiplayer D4).
+    """
+    argv = _lone_command_argv(name, input_data)
+    return argv is not None and argv[:3] in (
+        ["istota-skill", "relay", "ask"], ["istota-skill", "room", "post"])
+
+
+def _lone_secret_link(name: str, input_data: dict) -> bool:
+    """Whether a tool call is exactly one secret-link verb and nothing else (#1001).
+
+    A link asked for otherwise is still sent, with a caution; this flag is
+    kept apart from the relay one so neither rule reads the other's call.
+    """
+    argv = _lone_command_argv(name, input_data)
+    return argv is not None and (
+        argv[:2] == ["istota-credential", "request-link"]
+        or argv[:3] == ["istota-skill", "google_workspace", "connect-link"])
 
 
 def _describe_tool_use(name: str, input_data: dict) -> str:

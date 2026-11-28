@@ -664,7 +664,9 @@ class TestConnectLink:
             "connected": False, "expires_at": stored[:10] + "T" + stored[11:19] + "Z",
             "delivered_to": "web",
         }
-        assert link["intent"] == "google_connect" and json.loads(link["params"]) == {}
+        # No tool call was counted, so the link carries the caution (#1001).
+        assert link["intent"] == "google_connect" and json.loads(link["params"]) == {"clean": False}
+        assert "partway through other work" in request["service_body"]
         assert link["user_id"] == "alice" and link["task_id"] == task_id
         assert link["room_token"] == room
         assert request["kind"] == "secret_link" and request["recipient_user_id"] == "alice"

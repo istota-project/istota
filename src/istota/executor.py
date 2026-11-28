@@ -8420,7 +8420,8 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
             "URL is the site's hostname or https address with no path. The link goes "
             "to the user's private chat and works once; you never see it or the "
             "value, so tell them it is on its way. Once saved, the name appears in "
-            "`istota-credential list`. Never ask the user to paste a secret in chat, "
+            "`istota-credential list` and is usable from their next message, not in "
+            "this task, so do not wait for it. Never ask the user to paste a secret in chat, "
             "and if the command refuses, tell them why in plain words instead."
         )
 

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 # Tool-use rendering moved to istota.agent.events in Phase 0 of the agent-loop
 # migration (brain-agnostic; reused by the native loop). Re-exported here so
 # existing imports from this module keep working.
-from ..agent.events import _TOOL_EMOJI, _describe_tool_use, _lone_relay_ask, _tool_invocation  # noqa: F401
+from ..agent.events import _TOOL_EMOJI, _describe_tool_use, _lone_relay_ask, _lone_secret_link, _tool_invocation  # noqa: F401
 from ..agent.events import canonical_tool_name
 
 logger = logging.getLogger("istota.brain.events")
@@ -42,6 +42,9 @@ class ToolUseEvent:
     # (`agent.events._lone_relay_ask`, over the raw input). The clean-turn relay
     # rule authorizes on it; `description` only says the output is hidden.
     lone_relay_ask: bool = False
+    # This call is exactly one secret-link verb (`agent.events._lone_secret_link`).
+    # A link asked for otherwise carries a caution (#1001).
+    lone_secret_link: bool = False
 
 
 @dataclass
@@ -427,6 +430,7 @@ def parse_stream_line(
                         tool_name=name, description=desc, tool_call_id=block_id,
                         invocation=_tool_invocation(name, input_data) or "",
                         lone_relay_ask=_lone_relay_ask(name, input_data),
+                        lone_secret_link=_lone_secret_link(name, input_data),
                     )
                 )
 
