@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
-import { render, cleanup, screen, waitFor } from '@testing-library/svelte';
+import { render, cleanup, screen, waitFor, fireEvent } from '@testing-library/svelte';
 import type { User, UserProfile } from '$lib/api';
 
 function profile(managed: string[]): UserProfile {
@@ -116,6 +116,25 @@ describe('managed fields on /settings', () => {
     const quiet = screen.getByRole('textbox', { name: /Quiet email senders/ });
     expect(quiet).not.toBeDisabled();
   });
+});
+
+it('says the travel follow cannot run while the timezone is managed', async () => {
+  currentProfile.value = profile(['timezone']);
+  render(Harness, { component: AccountPage, layout: SettingsLayout, user: person });
+  await fireEvent.click(
+    await screen.findByRole('button', { name: 'About Update timezone when I travel' }),
+  );
+  expect(await screen.findByText(/not changed when you travel/)).toBeInTheDocument();
+  expect(screen.queryByText(/Once you have settled in a new timezone/)).not.toBeInTheDocument();
+});
+
+it('describes the travel follow when the timezone is the user’s own', async () => {
+  render(Harness, { component: AccountPage, layout: SettingsLayout, user: person });
+  await fireEvent.click(
+    await screen.findByRole('button', { name: 'About Update timezone when I travel' }),
+  );
+  expect(await screen.findByText(/Once you have settled in a new timezone/)).toBeInTheDocument();
+  expect(screen.queryByText(/not changed when you travel/)).not.toBeInTheDocument();
 });
 
 it('disables the managed navigation preference', async () => {

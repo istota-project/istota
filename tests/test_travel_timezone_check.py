@@ -95,6 +95,28 @@ class TestTravelTimezoneGating:
         assert changed == []
         assert notify.call_count == 0
 
+    def test_a_managed_timezone_is_left_alone(self, tmp_path, caplog):
+        """ISSUE-1003: provisioning rewrites a managed field on every converge,
+        so a follow that wrote it would fight the play: follow, revert, follow."""
+        config = _config(tmp_path)
+        _seed_location_db(config, "alice", WARSAW)
+        with db.get_db(config.db_path) as conn:
+            user_profiles.set_managed_fields(conn, "alice", {"timezone"})
+            conn.commit()
+
+        with self._detects(), patch("istota.scheduler.send_notification") as notify, \
+                caplog.at_level("DEBUG", logger="istota.scheduler"):
+            changed = check_travel_timezone(config, now=NOW)
+
+        assert changed == []
+        assert user_profiles.get_profile(
+            config.db_path, "alice",
+        ).timezone == "America/Los_Angeles"
+        assert notify.call_count == 0
+        assert "timezone is managed" in caplog.text
+        with db.get_db(config.db_path) as conn:
+            assert db.kv_get(conn, "alice", "location", "auto_timezone") is None
+
     def test_a_user_with_no_location_db_is_skipped(self, tmp_path):
         config = _config(tmp_path)
 

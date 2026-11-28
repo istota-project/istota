@@ -186,7 +186,9 @@
         label="Update timezone when I travel"
         checkbox
         badge={managedBadge(profile, 'timezone_follow_location')}
-        hint="Needs the location module. Once you have settled in a new timezone for about an hour, the field above is set to it and you get a message saying so. Off by default, because it overwrites the timezone you chose. A journey in progress does not count — it waits until you have stayed somewhere."
+        hint={isManaged(profile, 'timezone')
+          ? 'Your administrator sets your timezone, so it is not changed when you travel, even with this on.'
+          : 'Needs the location module. Once you have settled in a new timezone for about an hour, the field above is set to it and you get a message saying so. Off by default, because it overwrites the timezone you chose. A journey in progress does not count — it waits until you have stayed somewhere.'}
       >
         <Checkbox
           bind:checked={profile.timezone_follow_location}
