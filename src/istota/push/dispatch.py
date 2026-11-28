@@ -17,10 +17,12 @@ from istota.config import Config
 from istota.lib.markdown_plain import to_plain_text
 from istota.notifications import sources, store
 from istota.push import delivery, devices, envelope, preferences
+from istota.rooms.private_replies import is_secret_link_reference
 
 logger = logging.getLogger(__name__)
 # Enough source for 180 characters of preview, and a bound on the flattening work.
 _PREVIEW_SOURCE_MAX = 4000
+SECRET_LINK_PUSH_BODY = "A link you asked for is in the chat"
 _warned_unavailable = False
 _warned_signing_key = False
 _dispatch_lock = threading.Lock()
@@ -47,10 +49,16 @@ def _chat_pushes(rows: list[dict], badge: int, preview: bool, oldest: float):
         newest = messages[-1]
         name = newest["room_name"] or "Chat"
         title = name if preview else "New message in " + name
-        # Stripped before _sanitize truncates, so markup cannot spend the budget.
-        body = to_plain_text(newest["body"][:_PREVIEW_SOURCE_MAX]) if preview else ""
-        if preview and len(messages) > 1:
-            body = f"{len(messages)} new messages: {body}"
+        if not preview:
+            body = ""
+        elif is_secret_link_reference(newest.get("delivery_reference")):
+            # The row's body is a live link; the lock screen is outside the room.
+            body = SECRET_LINK_PUSH_BODY
+        else:
+            # Stripped before _sanitize truncates, so markup cannot spend the budget.
+            body = to_plain_text(newest["body"][:_PREVIEW_SOURCE_MAX])
+            if len(messages) > 1:
+                body = f"{len(messages)} new messages: {body}"
         target = {"kind": "chat", "room_token": token}
         if newest["room_id"] is not None:
             target["room_id"] = newest["room_id"]

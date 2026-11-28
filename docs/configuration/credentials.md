@@ -180,9 +180,7 @@ The risk that remains is the one every emailed sign-in link carries. Whoever ope
 
 The token is in the query string. On the stack, nginx keeps no access log for `/istota/secret` and the web process logs no access lines, and the log redactor removes query strings from any address that is logged. Log lines name the link's number and the credential's name, never the token, the value or the username. The pages are not cached, send no referrer, cannot be framed and ask search engines not to index them. Only a digest of each token is stored, and a link's record is deleted seven days after it expires.
 
-If you reply to or quote the link's message, on the web, in Talk or on WhatsApp, Istota's next task reads the quote as "the secret link message" and never sees the link.
-
-One place can still show the link after it is sent. On iOS, a push alert for a message in a web room shows the start of that message on your lock screen, and the alert travels through Apple's push service like any other. The link still works only once.
+If you reply to or quote the link's message, on the web, in Talk or on WhatsApp, Istota's next task reads the quote as "the secret link message" and never sees the link. When the link goes to a web room, the Istota iOS app's push alert says "A link you asked for is in the chat" rather than showing the message. A link sent to Talk or WhatsApp is an ordinary message in that app, and its notification preview can show the link on your lock screen. The link still works only once.
 
 ## Import and export
 
