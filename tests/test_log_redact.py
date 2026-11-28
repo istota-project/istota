@@ -49,6 +49,19 @@ class TestWebAddresses:
             "open https://istota.example.com/istota/setup#[redacted] and https://h.example.com/set-password?[redacted]"
         )
 
+    def test_a_secret_link_loses_its_token(self):
+        # The token rides in the query so this redaction covers it (secret-entry-links spec).
+        # The shape of `secrets.token_urlsafe(32)`: 43 URL-safe characters.
+        token = "placeholder-link-" + "x" * 25 + "_"
+        lines = (
+            f"sent https://zorg.example/istota/secret?token={token} to the private room",
+            f'10.0.0.1 - "GET /istota/secret?token={token} HTTP/1.1" 200',
+        )
+        for line in lines:
+            out = redact_web_addresses(line)
+            assert token not in out
+            assert "/istota/secret?[redacted]" in out
+
     def test_an_address_with_neither_is_left_alone(self):
         line = "fetched https://example.com/feed.xml (200), see https://example.com/."
         assert redact_web_addresses(line) == line

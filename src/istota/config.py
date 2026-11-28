@@ -376,6 +376,21 @@ class SharingConfig:
 ICS_POLL_INTERVAL_MIN = 300
 
 
+@dataclass
+class SecretLinksConfig:
+    """Links that let a user enter a secret without a web session (`[secret_links]`).
+
+    ``ttl_seconds`` is how long a link stays usable, clamped to
+    ``SECRET_LINK_TTL_RANGE``.
+    """
+    ttl_seconds: int = 900
+
+
+#: One minute to one hour: long enough to reach a password manager, short
+#: enough that a link left in a chat backup is dead.
+SECRET_LINK_TTL_RANGE = (60, 3600)
+
+
 # What a host in `[private_hosts]` may look like: a host name (with an optional
 # trailing dot) or an IP literal. The consumers match by exact name, so a URL, a
 # port or a wildcard matches nothing. `mail/accounts.py` validates with this
@@ -2788,6 +2803,7 @@ class Config:
     wordpress: WordPressConfig = field(default_factory=WordPressConfig)
     mail_accounts: MailAccountsConfig = field(default_factory=MailAccountsConfig)
     sharing: SharingConfig = field(default_factory=SharingConfig)
+    secret_links: SecretLinksConfig = field(default_factory=SecretLinksConfig)
     servarr: ServarrConfig = field(default_factory=ServarrConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     briefings: BriefingsModuleConfig = field(default_factory=BriefingsModuleConfig)
@@ -5087,6 +5103,24 @@ def _at_least(minimum: int) -> Hook:
     return hook
 
 
+def _between(minimum: int, maximum: int) -> Hook:
+    """A hook for an integer with both bounds, clamped with a problem as `_at_least` is."""
+    def hook(raw: object, key: str) -> object:
+        value = coerce_int(raw, key)
+        if value is _KEEP:
+            return _KEEP
+        clamped = max(minimum, min(maximum, value))
+        if clamped != value:
+            report_problem(
+                "discarded", key_path(key),
+                "[config] %s=%s is outside %d..%d; using %d",
+                key, Value(raw), minimum, maximum, clamped,
+            )
+        return clamped
+
+    return hook
+
+
 def _positive_int(raw: object, key: str) -> object:
     """A duration or count where zero is not a smaller value but a different mode.
 
@@ -5905,6 +5939,7 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     "sharing.ocm.max_pending_per_user": _positive_int,
     "sharing.ocm.pending_days": _positive_int,
     "sharing.ocm.max_discovery_fetches_per_minute": _positive_int,
+    "secret_links.ttl_seconds": _between(*SECRET_LINK_TTL_RANGE),
     "brain.claude_code.advisor_model": _advisor_model,
     # 0 means unlimited here, so a negative value cannot be clamped to 0 -- that
     # reads as the opposite of what someone typing one meant.

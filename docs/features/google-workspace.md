@@ -96,6 +96,14 @@ Each user connects their own Google account from **Settings → Connections → 
 
 OAuth tokens are stored per-user in the database and auto-refreshed on each task execution. Users can disconnect at any time from the same card.
 
+### Connecting from chat
+
+A user who talks to Istota only on WhatsApp, SMS or Talk can connect without signing in to the web interface. When they ask to connect Google, or a Google command fails because they have no token, the agent runs `istota-skill google_workspace connect-link`. Istota sends a one-use link to the user's private chat. It is the same kind of link as a [secret link](../configuration/credentials.md#secret-links), and it follows the same rules: it is only sent in answer to the user's own message, never from a scheduled run, a correspondent's mail or an incognito room, and it expires after `[secret_links] ttl_seconds` (15 minutes by default). The agent never sees the link.
+
+The link opens a page naming the account, the Google services that will be connected and their levels, and the expiry. Opening it changes nothing, so a chat app's link preview cannot use it. **Continue to Google** spends the link and goes to Google's consent screen, which asks for the services the user selected on the card above, or the instance ceiling if they never chose. After consent the token is stored for the link's user and the browser lands on a page saying Google is connected. A notice in the user's chat confirms it, so a forwarded link that someone else used shows up at once. Whoever completes the consent screen attaches their own Google account to the link's user; they cannot reach anyone else's.
+
+If no services are selected, the agent gets `no_scopes` and sends the settings address instead. A failed or cancelled consent ends on the same page with a one-line reason, and the user asks for a new link to try again.
+
 ### What the card shows
 
 The card reads the granted scopes back out of the stored token, so it reports what the user consented to rather than what was asked for. Each service's row carries the whole account of that service — the level to ask for next time, what Google currently holds, and whether that grant is partial — rather than splitting it across a picker and a separate grant list; the connection state itself is a status pill beside the card title, as on every other service card. Three states are worth knowing:

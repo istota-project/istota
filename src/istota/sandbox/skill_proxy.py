@@ -810,6 +810,10 @@ class SkillProxy:
                 self._serve_vault_create(conn, request)
                 return
 
+            if req_type == "vault_link_request":
+                self._serve_vault_link_request(conn, request)
+                return
+
             skill = request.get("skill", "")
             args = request.get("args", [])
 
@@ -1399,6 +1403,104 @@ class SkillProxy:
             "name": name, "username_name": username_name,
             "url_name": url_name, "username": username,
             "confirmation_readable": confirmation_readable,
+        })
+
+    def _serve_vault_link_request(self, conn: socket.socket, request: dict) -> None:
+        """Send the user a one-use link to enter a credential themselves; return metadata only.
+
+        The link is issued and its message queued for the user's private room
+        in one transaction (`secret_links.issue_and_queue`, which the
+        `google_workspace connect-link` verb shares), so neither the token nor
+        the address reaches the reply, a log line or the task. The gates run in
+        a fixed order, each refusal a fixed ``reason`` (secret-entry-links spec,
+        "Gates at issue time"); a refusal after the budget writes nothing.
+        """
+        from istota.credentials import local
+        from istota.credentials import names as secrets_vault
+        from istota.webui import secret_links
+
+        if not self._spend_vault_write(conn):
+            return
+
+        def refuse(reason: str, message: str) -> None:
+            logger.info("vault_link_request refused task_id=%s reason=%s", self.task_id, reason)
+            self._send_response(conn, {"error": message, "reason": reason})
+
+        config, user_id, task_id = self.config, self.user_id, self.task_id
+        if config is None or not user_id or type(task_id) is not int:
+            refuse("vault_not_configured", "No credential store is available to this task")
+            return
+        name, url, username = request.get("name"), request.get("url"), request.get("username", False)
+        try:
+            refused = secret_links.turn_refusal(config, user_id, task_id)
+        except Exception as exc:
+            logger.error("vault_link_request task_id=%s failed: %s", task_id, type(exc).__name__)
+            refuse("store_failed", "Could not create the link")
+            return
+        if refused is not None:
+            refuse(refused.reason, refused.message)
+            return
+        refusal = secrets_vault.vault_isolation_refusal(config, user_id)
+        if refusal:
+            refuse("vault_isolation", refusal)
+            return
+        refused = secret_links.origin_refusal(config)
+        if refused is not None:
+            refuse(refused.reason, refused.message)
+            return
+        try:
+            local._check_name(name)
+        except local.LocalCredentialError as exc:
+            refuse("bad_name", str(exc))
+            return
+        if type(username) is not bool:
+            refuse("bad_request", "username must be true or false")
+            return
+
+        host = secret_links.link_host(url)
+        # For an existing name the save keeps the stored binding, so the message
+        # names its hosts, as the form does, rather than the URL asked with.
+        shown = {"hosts": host}
+
+        def check(database) -> None:
+            from istota.credentials.broker import bindings
+
+            if (name in local._taken_names(database, user_id)
+                    and not local.is_local(database, user_id, name)):
+                raise secret_links.LinkRefused("not_local", "That name belongs to a credential edited elsewhere")
+            if host is None:
+                raise secret_links.LinkRefused("bad_url", "Give the site as a hostname or https URL, with no path")
+            if local.is_local(database, user_id, name):
+                stored = (bindings.get_entry_binding(database, user_id, name) or {}).get("hosts") or []
+                if stored:
+                    shown["hosts"] = ", ".join(stored)
+
+        what = "username and password" if username else "password"
+
+        def compose(address: str, expires: str) -> str:
+            return (f"Enter the {what} for `{name}` ({shown['hosts']}) here: {address}\n"
+                    f"It works once and expires at {expires}. I only send these when you ask for one.")
+
+        try:
+            link, delivered_to = secret_links.issue_and_queue(
+                config, user_id=user_id, task_id=task_id, intent="credential",
+                params={"name": name, "url": url, "username": username},
+                compose=compose, check=check,
+            )
+        except secret_links.LinkRefused as exc:
+            refuse(exc.reason, exc.message)
+            return
+        except Exception as exc:
+            logger.error("vault_link_request task_id=%s failed: %s", task_id, type(exc).__name__)
+            refuse("store_failed", "Could not create the link")
+            return
+        logger.info(
+            "vault_link_request task_id=%s link_id=%s name=%s delivered_to=%s",
+            task_id, link.id, label_for_display(name), delivered_to,
+        )
+        self._send_response(conn, {
+            "name": name, "host": shown["hosts"], "expires_at": secret_links.iso_expiry(link),
+            "delivered_to": delivered_to,
         })
 
     def _serve_vault_otp_set(self, conn: socket.socket, request: dict) -> None:

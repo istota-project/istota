@@ -51,6 +51,7 @@ REWRITE_COLUMNS: dict[tuple[str, str], str] = {
     ("notifications", "room_token"): "room_token",
     ("location_share_grants", "room_token"): "room_token",
     ("location_share_cards", "room_token"): "room_token",
+    ("secret_links", "room_token"): "room_token",
     ("user_profiles", "default_room"): "room_token",
     # Parse the descriptor: room:/web: identities differ from talk: refs.
     ("tasks", "output_target"): "descriptor",
@@ -111,6 +112,7 @@ PRESERVE_COLUMNS: dict[tuple[str, str], str] = {
     ("web_user_tokens", "refresh_token"): "credential ciphertext",
     ("web_auth_tokens", "token_hash"): "authentication token digest",
     ("location_ingest_tokens", "token_hash"): "ingest token digest",
+    ("secret_links", "token_hash"): "secret link token digest",
     ("calendar_feed_tokens", "token_sha256"): "calendar feed token digest",
     ("location_ingest_tokens", "token_tail"): "ingest token display suffix",
     ("device_tokens", "token_hash"): "device token digest",

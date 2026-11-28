@@ -110,7 +110,7 @@ def room_label(room: db.Room | None) -> str:
 
 
 
-KINDS = ("whisper", "confirmation", "proposal", "answer_notice", "pass_on")
+KINDS = ("whisper", "confirmation", "proposal", "answer_notice", "pass_on", "secret_link")
 #: The kinds with no park behind them: no bell row is owed by anyone else, so
 #: one that reaches nobody becomes its own `private_note` bell row.
 _UNPARKED_KINDS = ("whisper", "pass_on")
@@ -673,7 +673,9 @@ def deliver_private(conn, config, *, user_id: str, about_token: str, kind: str,
     delivery_reference = f"private-{kind}:{reference}"
     try:
         dest = _existing(conn, delivery_reference, user_id)
-        if dest is None:
+        if dest is None and kind == "secret_link":
+            dest = _secret_link_destination(conn, config, user_id, about)
+        elif dest is None:
             dest = private_room_for(conn, config, user_id, about)
     except _Taken:
         logger.warning("private %s %s: reference already used in another room; using the bell",
@@ -779,10 +781,15 @@ async def _send(config, delivery: PrivateDelivery, *, header_room_label, body: s
 
     if delivery.notice is not None:
         await asyncio.to_thread(deliver_pending, config, [delivery.notice])
-    label = await asyncio.to_thread(_parent_label, config, delivery.about_token)
-    if header_room_label:
-        label = flatten(header_room_label)[:_LABEL_MAX] or label
-    text = f"{HEADER_PREFIX}{label}\n\n{body}"
+    if delivery.kind == "secret_link":
+        # The host's own fixed text, which names what it is for; it may be
+        # about the private room itself, which has no "re:" to give.
+        text = body
+    else:
+        label = await asyncio.to_thread(_parent_label, config, delivery.about_token)
+        if header_room_label:
+            label = flatten(header_room_label)[:_LABEL_MAX] or label
+        text = f"{HEADER_PREFIX}{label}\n\n{body}"
     delivered = False
     pushed = False
     dest = delivery.dest
@@ -1332,6 +1339,77 @@ def enqueue_whisper(conn, config, *, actor_user_id: str, task_id: int,
         return response
 
 
+SECRET_LINK_KEY_PREFIX = "secret-link-"
+
+
+def _secret_link_destination(conn, config, user_id: str, about: str) -> PrivateDestination | None:
+    """The room a secret link asked for in ``about`` reaches ``user_id`` in.
+
+    The asking room itself when it is one of the user's own private rooms on a
+    surface a note can reach, so a link asked for in a 1:1 WhatsApp chat
+    answers there rather than in a web room a chat-only user never opens.
+    Otherwise `private_room_for`, as for a note about a shared room.
+    """
+    from istota.transport.routing import phone_room
+
+    # `is_private_room_of` reads members only; a thread room or a Talk group
+    # with guests has one member and is still read by others.
+    if about and not db.room_is_shared(conn, about) and db.get_room_binding(conn, about, "email") is None:
+        phone = phone_room(conn, about)
+        if phone is None:
+            talk = db.get_room_binding(conn, about, "talk") is not None
+            dest = _checked(conn, about, user_id, surface="talk" if talk else "web")
+            if dest is not None and (dest.talk_ref or not talk):
+                return dest
+        elif phone.surface == "whatsapp" and not phone.group:
+            dest = _checked(conn, about, user_id, surface="whatsapp", allow_phone=True)
+            if dest is not None:
+                return dest
+    return private_room_for(conn, config, user_id, about)
+
+
+def secret_link_room(conn, config, task) -> tuple[str, PrivateDestination | None]:
+    """``(about, destination)`` for a secret link asked for in ``task``: the
+    task's canonical room, and the private room the link goes to, or None."""
+    own = task.conversation_token or ""
+    about = (canonical_token(conn, own) or own) if own else ""
+    return about, _secret_link_destination(conn, config, task.user_id, about)
+
+
+def enqueue_secret_link(conn, config, *, actor_user_id: str, task_id: int,
+                        link_id: int, text: str) -> dict:
+    """Queue the host's message carrying secret link ``link_id`` to its user's private room.
+
+    The skill proxy's alone, inside its transaction: ``text`` holds a live
+    link, so it is never returned, and the answer names only the surface.
+    A sibling of `enqueue_whisper` that any room may ask from, a 1:1 room
+    included, since the message is the host's rather than the task's. It
+    never falls back to the bell, which would copy the link into the
+    notification store and whatever mirrors it: no private room is
+    `no_private_room`, now and again at delivery (`_claim`), where a link
+    spent or expired by then is not sent either.
+
+    The request key is derived from the text, which carries the token, so a
+    task cannot plant a request under the key ahead of it.
+    """
+    _validate_input(SECRET_LINK_KEY_PREFIX + "x", text)
+    task = _owned_running_task(conn, actor_user_id=actor_user_id, task_id=task_id)
+    with write_transaction(conn):
+        about, dest = secret_link_room(conn, config, task)
+        if dest is None:
+            raise RequestError("no_private_room")
+        row = _store_request(
+            conn, actor_user_id=actor_user_id, task_id=task_id,
+            request_key=SECRET_LINK_KEY_PREFIX + text_hash(text)[:48],
+            kind="secret_link", recipient_user_id=actor_user_id, text=text,
+            service_body=text, template_body=None, provider="room",
+            binding_fingerprint=_fingerprint(actor_user_id, about),
+            destination={"kind": "private_reply", "about": about, "user": actor_user_id,
+                         "secret_link_id": link_id},
+        )
+    return {"status": row["state"], "delivered_to": dest.surface}
+
+
 PRIVATE_ANSWER_REFERENCE = "private-answer:"
 #: Where a member's own turn can be asked again privately: the surfaces whose
 #: `tasks.prompt` is the member's own words in the room.
@@ -1615,6 +1693,26 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                              reference=reference, whatsapp_group=whatsapp_group,
                              talk_reply_to=quoted_ids.get("talk"),
                              whatsapp_reply_to=quoted_ids.get("whatsapp"))
+            elif row["kind"] == "secret_link":
+                from istota.webui import secret_links
+
+                parent = destination.get("about") or ""
+                if (destination.get("kind") != "private_reply" or destination.get("user") != user
+                        or _fingerprint(user, parent) != row["binding_fingerprint"]):
+                    raise RequestError("destination_changed")
+                # A link superseded, spent or expired while queued is dead; sending
+                # it would only teach the user to expect links that do not work.
+                if not secret_links.is_live(conn, destination.get("secret_link_id"), user):
+                    _, outcome = secret_links.spent_link(conn, destination.get("secret_link_id"))
+                    raise RequestError("link_superseded" if outcome == "superseded" else "link_unavailable")
+                delivery = deliver_private(
+                    conn, config, user_id=user, about_token=parent, kind="secret_link",
+                    reference=request_id, body=body,
+                    task_id=row["origin_task_id"],
+                )
+                if delivery.dest is None:
+                    raise RequestError("no_private_room")
+                claim["delivery"] = delivery
             else:
                 # A whisper (stored kind `side_whisper`): the principal's own
                 # private room, resolved now rather than at enqueue.
@@ -1690,8 +1788,10 @@ def _finish(config, request_id: str, reason: str) -> None:
                 "updated_at=datetime('now') WHERE id=? AND state IN ('queued','sending')",
                 (state, reason, request_id),
             ).rowcount
-            if changed and row is not None:
-                what = "Room post" if row["kind"] == "room_post" else "Private note"
+            # A superseded link's newer one is on its way; an alert would contradict it.
+            if changed and row is not None and reason != "link_superseded":
+                what = {"room_post": "Room post", "secret_link": "Secret link"}.get(
+                    row["kind"], "Private note")
                 notice = task_alert.write(
                     conn, row["requester_user_id"], dedup_key=f"private-reply-request:{request_id}",
                     title=f"{what} not delivered",
@@ -1756,7 +1856,13 @@ async def deliver_request(config, row) -> None:
             picture_surface = True
     else:
         # Never raises; a whisper that reached nobody becomes a bell row there.
-        await send_private(config, claim["delivery"], body=claim["body"])
+        delivered = await send_private(config, claim["delivery"], body=claim["body"])
+        dest = claim["delivery"].dest
+        if claim["kind"] == "secret_link" and dest is not None and dest.pushes and not delivered:
+            # The model already said a link is on its way; a body-free alert
+            # says it is not, since the bell must never carry the link.
+            await asyncio.to_thread(_finish, config, claim["request_id"], "not_delivered")
+            return
     await asyncio.to_thread(_settle, config, claim, talk_id)
     # Web draws the card itself; Talk and a WhatsApp group were promised a
     # picture, so one that failed or could not be drawn is announced.

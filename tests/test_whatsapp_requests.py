@@ -428,3 +428,46 @@ def test_purchase_kind_upgrade_preserves_references(tmp_path, path):
         assert upgraded.execute("SELECT request_id FROM message_relays").fetchone()[0] == 'r'
         upgraded.execute("DELETE FROM tasks WHERE id=1")
         assert upgraded.execute("SELECT origin_task_id FROM whatsapp_skill_requests").fetchone()[0] is None
+
+
+_KINDS_BEFORE_SECRET_LINK = (
+    "self_send", "relay_question", "side_whisper", "room_post", "purchase",
+    "recovery_fill", "location_share", "assignment_activation",
+)
+
+
+def test_secret_link_kind_upgrade_preserves_every_kind(tmp_path, path):
+    old = tmp_path / "pre-secret-link.db"
+    schema = (Path(__file__).parents[1] / "schema.sql").read_text()
+    assert ", 'secret_link'" in schema
+    schema = schema.replace(", 'secret_link'", "")
+    # A private-reply destination: `private_replies_v1` drops a whisper bound
+    # anywhere else, which is a different migration's business.
+    destination = json.dumps({"kind": "private_reply", "about": "room-a", "user": "alice"})
+    with sqlite3.connect(old) as conn:
+        conn.executescript(schema)
+        conn.execute("INSERT INTO tasks (id,user_id,source_type,prompt) VALUES (1,'alice','web','x')")
+        for n, kind in enumerate(_KINDS_BEFORE_SECRET_LINK):
+            conn.execute(
+                "INSERT INTO whatsapp_skill_requests (id,requester_user_id,origin_task_id,request_key,"
+                "kind,recipient_user_id,content_hash,service_hash,provider,binding_fingerprint,state,"
+                "destination) VALUES (?,'alice',1,?,?,'alice','h','s','room','fp','sent',?)",
+                (f"r{n}", f"k{n}", kind, destination))
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("UPDATE whatsapp_skill_requests SET kind='secret_link' WHERE id='r0'")
+    db.init_db(old)
+    db.init_db(old)
+    with db.get_db(path) as fresh, db.get_db(old) as upgraded:
+        assert _request_shape(fresh) == _request_shape(upgraded)
+        kinds = {r[0]: r[1] for r in upgraded.execute("SELECT id, kind FROM whatsapp_skill_requests")}
+        assert kinds == {f"r{n}": kind for n, kind in enumerate(_KINDS_BEFORE_SECRET_LINK)}
+        upgraded.execute(
+            "INSERT INTO whatsapp_skill_requests (id,requester_user_id,origin_task_id,request_key,"
+            "kind,recipient_user_id,content_hash,service_hash,provider,binding_fingerprint,state) "
+            "VALUES ('link','alice',1,'kl','secret_link','alice','h','s','room','fp','queued')")
+        with pytest.raises(sqlite3.IntegrityError):
+            upgraded.execute("UPDATE whatsapp_skill_requests SET kind='anything' WHERE id='link'")
+        assert upgraded.execute("PRAGMA foreign_key_check").fetchall() == []
+        upgraded.execute("DELETE FROM tasks WHERE id=1")
+        assert upgraded.execute(
+            "SELECT origin_task_id FROM whatsapp_skill_requests WHERE id='link'").fetchone()[0] is None

@@ -16,9 +16,9 @@ from testbed import profiles
 from testbed.stack import lean_config
 
 REPO = Path(__file__).resolve().parent.parent
-# Email sign-in is a typed code (ISSUE-574), so set-password is the one route
-# left that carries a credential in its query string.
-TOKEN_PATHS = ("/istota/auth/set-password",)
+# Email sign-in is a typed code (ISSUE-574), so set-password and a secret link
+# are the routes that carry a credential in their query string.
+TOKEN_PATHS = ("/istota/auth/set-password", "/istota/secret")
 NGINX = ("docker/nginx/istota.conf.template",)
 LAUNCHERS = ("docker/docker-compose.yml",)
 
@@ -141,9 +141,12 @@ def test_nginx_caps_every_sign_in_form_just_above_the_app():
 
     posts = sorted(route.path for route in web_app.auth_router.routes if "POST" in route.methods)
     assert "/istota/login/email" in posts and "/istota/auth/set-password" in posts
+    assert "/istota/secret" in posts
     text = nginx_render(NGINX[0])
-    limit = web_app._AUTH_FORM_BODY_LIMIT
+    # The secret link form carries a credential value at the store's cap.
+    limits = {"/istota/secret": web_app._SECRET_FORM_BODY_LIMIT}
     for path in posts:
+        limit = limits.get(path, web_app._AUTH_FORM_BODY_LIMIT)
         block = nginx_location_for(text, path)
         assert block is not None, f"no location for {path}"
         found = re.search(r"client_max_body_size\s+(\S+);", block)

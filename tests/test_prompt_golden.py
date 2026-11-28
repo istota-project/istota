@@ -501,6 +501,10 @@ class Case:
     #: skill selected for the source type, and a non-UTC shared-block
     #: timezone, so the header's clock is visibly not the profile-less UTC.
     shared_block_research: bool = False
+    #: `[site] hostname`, which the secret-link line is gated on (the link
+    #: needs the deployment's own web origin). Unset everywhere else, so
+    #: `base_nextcloud` is the no-hostname control.
+    site_hostname: str = ""
 
 
 #: The research identity, which has no profile.
@@ -617,6 +621,10 @@ CASES: tuple[Case, ...] = (
     # values are in neither golden, because they are in neither prompt.
     Case("shared_credentials", shared_credentials=True),
     Case("shared_credentials_no_broker", shared_credentials=True, broker=False),
+    # A deployment with a web origin, against `base_nextcloud`, which differs
+    # from it in nothing else: the diff is the secret-link line, present with
+    # no stored credentials, since the user who needs a link has none yet.
+    Case("secret_link", site_hostname="istota.example.test"),
     # The room card (multiplayer Stage 12), against `room_web`, which differs
     # from it in nothing but the second member: the diff is the card and the
     # ambient memory a shared room leaves out (ISSUE-576).
@@ -811,6 +819,7 @@ def _build_config(case: Case, tmp_path: Path) -> Config:
     if case.shared_block_research:
         config.browser.enabled = True
         config.briefings.shared_block_timezone = SHARED_BLOCK_TZ
+    config.site.hostname = case.site_hostname
     return config
 
 
@@ -1285,6 +1294,67 @@ def test_a_members_turn_in_a_shared_room_has_no_feeds_or_folders_line(tmp_path, 
     assert "istota-skill shares" in rendered
     assert FEED_NAME_SENTINEL not in rendered
     assert FOLDER_NAME_SENTINEL not in rendered
+
+
+SECRET_LINK_MARKER = "- Secret links: "
+
+
+def test_the_secret_link_line_is_standing_instruction(tmp_path, monkeypatch):
+    system, user = split_halves(assemble(CASES_BY_NAME["secret_link"], tmp_path, monkeypatch))
+    assert system.count(SECRET_LINK_MARKER) == 1
+    assert "istota-credential request-link NAME --url URL" in system
+    assert SECRET_LINK_MARKER not in user
+
+
+def test_no_secret_link_line_without_a_web_origin(tmp_path, monkeypatch):
+    # `base_nextcloud` is `secret_link` with `[site] hostname` unset: the link
+    # needs the deployment's own origin, so the verb would only refuse.
+    assert CASES_BY_NAME["base_nextcloud"].site_hostname == ""
+    assert SECRET_LINK_MARKER not in assemble(CASES_BY_NAME["base_nextcloud"], tmp_path, monkeypatch)
+
+
+def test_no_secret_link_line_on_a_guests_turn(tmp_path, monkeypatch):
+    # A guest's turn is restricted: the proxy gives it no vault writes and
+    # refuses the verb as not the owner's turn.
+    case = replace(CASES_BY_NAME["guest_turn"], name="guest_link", site_hostname="istota.example.test")
+    assert SECRET_LINK_MARKER not in assemble(case, tmp_path, monkeypatch)
+
+
+class TestSecretLinksOffered:
+    """The prompt gate, against the refusals the proxy can foresee from config
+    and the task. Each case flips one input of an otherwise offered task."""
+
+    def _config(self, tmp_path, **security):
+        config = _build_config(CASES_BY_NAME["secret_link"], tmp_path)
+        for key, value in security.items():
+            setattr(config.security, key, value)
+        return config
+
+    def _task(self, **fields):
+        return replace(_build_task(CASES_BY_NAME["secret_link"]), **{"source_type": "talk", **fields})
+
+    def test_an_interactive_owner_turn_is_offered(self, tmp_path):
+        assert executor.secret_links_offered(self._config(tmp_path), self._task(), restricted=False)
+
+    @pytest.mark.parametrize("fields", [
+        {"source_type": "scheduled"},
+        {"scheduled_job_id": 7},
+        {"incognito": True},
+    ], ids=["scheduled", "cron_job", "incognito"])
+    def test_a_turn_the_proxy_refuses_is_not_offered(self, tmp_path, fields):
+        assert not executor.secret_links_offered(self._config(tmp_path), self._task(**fields), restricted=False)
+
+    def test_a_restricted_turn_is_not_offered(self, tmp_path):
+        assert not executor.secret_links_offered(self._config(tmp_path), self._task(), restricted=True)
+
+    def test_no_skill_proxy_means_no_shim(self, tmp_path):
+        config = self._config(tmp_path, skill_proxy_enabled=False)
+        assert not executor.secret_links_offered(config, self._task(), restricted=False)
+
+    def test_vault_isolation_refusing_is_not_offered(self, tmp_path, monkeypatch):
+        config = self._config(tmp_path)
+        monkeypatch.setattr(executor.secrets_vault, "vault_isolation_refusal", lambda *a, **k: "isolated")
+        assert not executor.secret_links_offered(config, self._task(), restricted=False)
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c.name)

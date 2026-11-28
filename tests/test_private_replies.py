@@ -1851,3 +1851,237 @@ class TestALimitedTasksRoomVerbs:
                 private_replies.enqueue_whisper(
                     conn, config, actor_user_id="alice", task_id=ident,
                     request_key="w1", text="canary")
+
+
+# ---------------------------------------------------------------------------
+# Secret links: the host's own note to a user, never through the model
+# ---------------------------------------------------------------------------
+
+
+def _secret_link(config, ident, room, *, name="acme", ttl=900):
+    """Issue a link and queue its message, as the skill proxy does, in one transaction."""
+    from istota.webui import secret_links
+
+    with db.get_db(config.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        token, link = secret_links.issue(conn, user_id="alice", intent="credential",
+                                         params={"name": name}, task_id=ident,
+                                         room_token=room, ttl_seconds=ttl)
+        text = f"Enter the password for {name} here: https://zorg.example/istota/secret?token={token}"
+        result = private_replies.enqueue_secret_link(
+            conn, config, actor_user_id="alice", task_id=ident, link_id=link.id, text=text)
+    return token, link, result
+
+
+class TestSecretLink:
+    def test_from_a_one_to_one_room_it_lands_in_that_room_and_nowhere_else(self, config):
+        with db.get_db(config.db_path) as conn:
+            web = _web_room(conn)
+            ident = _running(conn, "alice", web)
+        before = _room_count(config)
+        token, _, result = _secret_link(config, ident, web)
+        assert result == {"status": "queued", "delivered_to": "web"}
+        assert token not in str(result)
+        _drain(config)
+        _drain(config)
+        (row,) = _rows(config, "SELECT * FROM messages WHERE body LIKE ?", (f"%{token}%",))
+        assert row["room_token"] == web and row["role"] == "system" and row["task_id"] is None
+        assert row["delivery_reference"].startswith("private-secret_link:")
+        # Talk keeps a referenceId of at most 64 characters.
+        assert len(row["delivery_reference"]) <= 64
+        (request,) = _rows(config, "SELECT kind, state FROM whatsapp_skill_requests")
+        assert request == {"kind": "secret_link", "state": "sent"}
+        assert _rows(config, "SELECT id FROM notifications") == []
+        assert _room_count(config) == before
+
+    def test_from_a_shared_talk_room_it_reaches_the_private_talk_room_only(self, config, talk):
+        from istota.context import build_talk_context
+
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_talk(conn)
+            parent_ref = db.get_room_binding(conn, parent, "talk").surface_ref
+            mine = plain_talk_room(conn, "alice", name="talk")
+            ident = _running(conn, "alice", parent, source_type="talk")
+        token, _, result = _secret_link(config, ident, parent)
+        assert result["delivered_to"] == "talk"
+        _drain(config)
+        (send,) = talk["client"].calls_to(mine.talk_ref, method="send_message")
+        assert token in send.args["message"]
+        assert talk["client"].calls_to(parent_ref, method="send_message") == []
+        # Read back from Talk, the post is not history any later task sees.
+        raw = [{"id": 1, "actorId": "bot", "actorType": "users", "messageType": "comment",
+                "message": send.args["message"], "referenceId": send.args["reference_id"],
+                "messageParameters": {}}]
+        assert build_talk_context(raw, "bot", {}) == []
+
+    def test_from_a_whatsapp_group_it_goes_to_the_users_own_chat(self, config, sent):
+        with db.get_db(config.db_path) as conn:
+            group = _whatsapp_group(conn)
+            _phone_room(conn)
+            ident = _running(conn, "alice", group, source_type="whatsapp")
+        token, _, result = _secret_link(config, ident, group)
+        assert result["delivered_to"] == "whatsapp"
+        _drain(config)
+        (request,) = sent
+        assert token in request.text and GROUP_JID not in str(request)
+
+    def test_from_the_users_own_whatsapp_chat_it_answers_there_not_in_web(self, config, sent):
+        # A web room exists too, which `private_room_for` would rank first.
+        with db.get_db(config.db_path) as conn:
+            web = _web_room(conn)
+            phone = _phone_room(conn)
+            ident = _running(conn, "alice", phone, source_type="whatsapp")
+        token, _, result = _secret_link(config, ident, phone)
+        assert result["delivered_to"] == "whatsapp"
+        _drain(config)
+        (request,) = sent
+        assert token in request.text
+        (row,) = _rows(config, "SELECT room_token FROM messages WHERE body LIKE ?", (f"%{token}%",))
+        assert row["room_token"] == phone != web
+
+    def test_from_the_users_own_talk_room_it_answers_there_not_in_web(self, config, talk):
+        with db.get_db(config.db_path) as conn:
+            web = _web_room(conn)
+            mine = plain_talk_room(conn, "alice", name="talk")
+            ident = _running(conn, "alice", mine.canonical, source_type="talk")
+        token, _, result = _secret_link(config, ident, mine.canonical)
+        assert result["delivered_to"] == "talk"
+        _drain(config)
+        (send,) = talk["client"].calls_to(mine.talk_ref, method="send_message")
+        assert token in send.args["message"]
+        (row,) = _rows(config, "SELECT room_token FROM messages WHERE body LIKE ?", (f"%{token}%",))
+        assert row["room_token"] == mine.canonical != web
+
+    def test_from_an_email_thread_with_only_the_host_as_member_it_goes_elsewhere(self, config):
+        with db.get_db(config.db_path) as conn:
+            web = _web_room(conn)
+            thread = db.register_room(conn, None, "alice", origin="email", name="Thread").token
+            db.add_room_binding(conn, thread, "email", "<root@example.com>")
+            db.upsert_room_participant(conn, room_token=thread, surface="email",
+                                       surface_ref="bob@example.com", kind="guest")
+            ident = _running(conn, "alice", thread, source_type="email")
+        token, _, result = _secret_link(config, ident, thread)
+        _drain(config)
+        (row,) = _rows(config, "SELECT room_token FROM messages WHERE body LIKE ?", (f"%{token}%",))
+        assert row["room_token"] == web != thread
+        assert result["delivered_to"] == "web"
+
+    def test_from_a_talk_room_with_a_non_member_participant_it_goes_elsewhere(self, config, talk):
+        with db.get_db(config.db_path) as conn:
+            group = plain_talk_room(conn, "alice", name="Book club")
+            db.upsert_room_participant(conn, room_token=group.canonical, surface="talk",
+                                       surface_ref="alice", kind="principal", user_id="alice")
+            db.upsert_room_participant(conn, room_token=group.canonical, surface="talk",
+                                       surface_ref="carol", kind="guest")
+            web = _web_room(conn)
+            ident = _running(conn, "alice", group.canonical, source_type="talk")
+        token, _, _ = _secret_link(config, ident, group.canonical)
+        _drain(config)
+        assert talk["client"].calls_to(group.talk_ref, method="send_message") == []
+        (row,) = _rows(config, "SELECT room_token FROM messages WHERE body LIKE ?", (f"%{token}%",))
+        assert row["room_token"] == web
+
+    def test_from_the_users_own_sms_room_it_goes_to_another_private_room(self, config):
+        # SMS is not a private-reply surface; the link falls back as for a shared room.
+        with db.get_db(config.db_path) as conn:
+            web = _web_room(conn)
+            sms = _phone_room(conn, surface="sms")
+            ident = _running(conn, "alice", sms, source_type="sms")
+        token, _, result = _secret_link(config, ident, sms)
+        assert result["delivered_to"] == "web"
+        _drain(config)
+        (row,) = _rows(config, "SELECT room_token FROM messages WHERE body LIKE ?", (f"%{token}%",))
+        assert row["room_token"] == web
+
+    def test_with_no_private_room_nothing_is_queued(self, config):
+        from istota.relay.requests import RequestError
+
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            ident = _running(conn, "alice", parent)
+        with pytest.raises(RequestError, match="no_private_room"):
+            _secret_link(config, ident, parent)
+        assert _rows(config, "SELECT id FROM whatsapp_skill_requests") == []
+
+    def test_a_link_spent_before_delivery_is_never_sent(self, config):
+        from istota.webui import secret_links
+
+        with db.get_db(config.db_path) as conn:
+            web = _web_room(conn)
+            ident = _running(conn, "alice", web)
+        token, link, _ = _secret_link(config, ident, web)
+        with db.get_db(config.db_path) as conn:
+            assert secret_links.spend(conn, link.id, "cancelled")
+        mark = _max_message_id(config)
+        _drain(config)
+        assert _rows(config, "SELECT id FROM messages WHERE id > ? AND body LIKE ?",
+                     (mark, f"%{token}%")) == []
+        (request,) = _rows(config, "SELECT state, error_code FROM whatsapp_skill_requests")
+        assert request == {"state": "failed", "error_code": "link_unavailable"}
+        (notice,) = _rows(config, "SELECT title, body FROM notifications")
+        assert notice["title"] == "Secret link not delivered"
+        assert token not in notice["body"] and "/istota/secret" not in notice["body"]
+
+    def test_a_link_superseded_before_delivery_closes_without_an_alert(self, config):
+        from istota.webui import secret_links
+
+        with db.get_db(config.db_path) as conn:
+            web = _web_room(conn)
+            ident = _running(conn, "alice", web)
+        _, link, _ = _secret_link(config, ident, web)
+        with db.get_db(config.db_path) as conn:
+            assert secret_links.spend(conn, link.id, "superseded")
+        _drain(config)
+        (request,) = _rows(config, "SELECT state, error_code FROM whatsapp_skill_requests")
+        assert request == {"state": "failed", "error_code": "link_superseded"}
+        assert _rows(config, "SELECT id FROM notifications") == []
+
+    def test_a_push_that_reaches_nobody_fails_the_request_and_says_so(self, config, talk):
+        from istota.relay.relays import AudienceUnavailable
+
+        with db.get_db(config.db_path) as conn:
+            mine = plain_talk_room(conn, "alice", name="talk")
+            ident = _running(conn, "alice", mine.canonical, source_type="talk")
+        token, _, _ = _secret_link(config, ident, mine.canonical)
+        with patch("istota.relay.relays.verify_private_audience",
+                   side_effect=AudienceUnavailable()):
+            _drain(config)
+        (request,) = _rows(config, "SELECT state, error_code FROM whatsapp_skill_requests")
+        assert request == {"state": "failed", "error_code": "not_delivered"}
+        (notice,) = _rows(config, "SELECT title, body FROM notifications")
+        assert notice["title"] == "Secret link not delivered"
+        assert token not in notice["body"] and "/istota/secret" not in notice["body"]
+
+    def test_a_private_room_gone_by_delivery_closes_it_without_a_bell_copy(self, config):
+        with db.get_db(config.db_path) as conn:
+            web = _web_room(conn)
+            ident = _running(conn, "alice", web)
+        token, _, _ = _secret_link(config, ident, web)
+        with db.get_db(config.db_path) as conn:
+            db.set_room_archived(conn, web, True)
+        _drain(config)
+        (request,) = _rows(config, "SELECT state, error_code FROM whatsapp_skill_requests")
+        assert request == {"state": "failed", "error_code": "no_private_room"}
+        for row in _rows(config, "SELECT title, body FROM notifications"):
+            assert token not in row["body"] and token not in row["title"]
+
+    def test_the_request_is_never_read_back_by_a_status_verb(self, config):
+        from istota.relay.requests import get_request
+
+        with db.get_db(config.db_path) as conn:
+            web = _web_room(conn)
+            ident = _running(conn, "alice", web)
+        _secret_link(config, ident, web)
+        (request,) = _rows(config, "SELECT id FROM whatsapp_skill_requests")
+        with db.get_db(config.db_path) as conn:
+            assert get_request(conn, actor_user_id="alice", request_id=request["id"]) is None
+
+    def test_only_its_own_running_task_may_queue_one(self, config):
+        from istota.relay.requests import RequestError
+
+        with db.get_db(config.db_path) as conn:
+            web = _web_room(conn)
+            ident = _running(conn, "alice", web)
+            conn.execute("UPDATE tasks SET status = 'completed' WHERE id = ?", (ident,))
+        with pytest.raises(RequestError, match="task_unavailable"):
+            _secret_link(config, ident, web)

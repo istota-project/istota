@@ -204,3 +204,247 @@ async def test_unloaded_config_retains_503(index, monkeypatch):
     response = await index(None)
     assert response.status_code == 503
     assert response.json() == {"detail": "config not loaded"}
+
+
+# ---------------------------------------------------------------------------
+# Connecting Google from a secret link (#994, secret-entry-links Stage 6)
+# ---------------------------------------------------------------------------
+
+DRIVE_RO = f"{SCOPE_BASE}drive.readonly"
+GMAIL_MODIFY = f"{SCOPE_BASE}gmail.modify"
+CALLBACK = "/istota/google/callback"
+CONNECTED = "/istota/google/connected"
+
+
+class TestConnectingFromALink:
+    """A `google_connect` link opens a page with no login; its POST spends the
+    link, binds the link's user to the browser session and starts Google's
+    consent with that user's scopes, and the callback stores the token for
+    that user and nobody else."""
+
+    @pytest.fixture
+    def app(self, config, monkeypatch):
+        import istota.webui.app as mod
+        from starlette.responses import RedirectResponse
+
+        from istota import user_profiles
+
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
+        config.bot_name = "Ada"
+        config.users["alice"].display_name = "Alice"
+        monkeypatch.setattr(mod, "_config", config)
+        monkeypatch.setattr(mod.app.state, "istota_config", config, raising=False)
+        oauth = MagicMock()
+        oauth.google.authorize_redirect = AsyncMock(
+            return_value=RedirectResponse("https://accounts.google.com/o/oauth2/auth"))
+        oauth.google.authorize_access_token = AsyncMock(return_value={
+            "access_token": "test-access", "refresh_token": "test-refresh",
+            "expires_in": 3600, "scope": DRIVE_RO,
+        })
+        monkeypatch.setattr(mod, "_oauth", oauth)
+        for user_id, name in (("alice", "Alice"), ("bob", "Bob")):
+            user_profiles.ensure_profile(config.db_path, user_id, display_name=name)
+        return mod
+
+    @pytest.fixture
+    async def client(self, app):
+        async with AsyncClient(transport=ASGITransport(app=app.app),
+                               base_url="https://example.com") as client:
+            yield client
+
+    def _issue(self, config, user_id="alice"):
+        from istota.webui import secret_links
+
+        with db.get_db(config.db_path) as conn:
+            room = db.create_web_chat_room(conn, user_id, "general").token
+            task_id = db.create_task(conn, user_id=user_id, source_type="web",
+                                     prompt="connect google", conversation_token=room)
+        with db.get_db(config.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            token, link = secret_links.issue(conn, user_id=user_id, intent="google_connect",
+                                             params={}, task_id=task_id, room_token=room,
+                                             ttl_seconds=900)
+        return token, link
+
+    def _row(self, config, link_id):
+        with db.get_db(config.db_path) as conn:
+            return dict(conn.execute("SELECT * FROM secret_links WHERE id=?", (link_id,)).fetchone())
+
+    def _scopes(self, config, user_id):
+        with db.get_db(config.db_path) as conn:
+            return db.get_google_scopes(conn, user_id)
+
+    def _notices(self, config, user_id="alice"):
+        with db.get_db(config.db_path) as conn:
+            return [dict(r) for r in conn.execute(
+                "SELECT * FROM notifications WHERE user_id=? ORDER BY id", (user_id,))]
+
+    async def _csrf(self, client, token):
+        import re
+
+        page = await client.get("/istota/secret", params={"token": token})
+        assert page.status_code == 200, page.text
+        return re.search(r'name="csrf_token" value="([^"]+)"', page.text)[1]
+
+    async def _post(self, client, token, action="connect", csrf=None):
+        if csrf is None:
+            csrf = await self._csrf(client, token)
+        return await client.post("/istota/secret",
+                                 data={"token": token, "csrf_token": csrf, "action": action})
+
+    async def _sign_in(self, app, client, username):
+        app._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={"user_id": username})
+        assert (await client.get("/istota/callback", follow_redirects=False)).status_code == 302
+
+    async def test_the_page_names_the_account_and_services_and_writes_nothing(
+            self, app, client, config):
+        token, link = self._issue(config)
+        before = self._row(config, link.id)
+        for _ in range(3):
+            page = await client.get("/istota/secret", params={"token": token})
+        assert page.status_code == 200
+        assert "Connect Google" in page.text and "Alice" in page.text
+        for words in ("Drive", "Read-only", "Gmail", "Read and write", "Continue to Google",
+                      "Cancel this link"):
+            assert words in page.text, words
+        assert page.headers["content-security-policy"] == "frame-ancestors 'none'"
+        assert page.headers["cache-control"] == "no-store"
+        assert self._row(config, link.id) == before
+        app._oauth.google.authorize_redirect.assert_not_awaited()
+
+    async def test_continue_goes_to_google_with_the_users_own_scopes(self, app, client, config):
+        from istota import user_profiles
+
+        user_profiles.update_profile(config.db_path, "alice",
+                                     google_scopes={"drive": "readonly", "gmail": "off"})
+        token, link = self._issue(config)
+        response = await self._post(client, token)
+        assert response.status_code in (302, 307)
+        assert response.headers["location"] == "https://accounts.google.com/o/oauth2/auth"
+        redirect = app._oauth.google.authorize_redirect
+        redirect.assert_awaited_once()
+        assert redirect.call_args.args[1] == "https://example.com/istota/google/callback"
+        assert redirect.call_args.kwargs == {"scope": DRIVE_RO, "access_type": "offline",
+                                             "prompt": "consent"}
+        row = self._row(config, link.id)
+        assert row["used_at"] is not None and row["outcome"] == "connected"
+        # The link is spent: a second continue goes nowhere near Google.
+        page = await client.get("/istota/secret", params={"token": token})
+        assert page.status_code == 400 and "expired or was already used" in page.text
+
+    async def test_the_callback_stores_the_token_for_the_link_user_and_clears_the_binding(
+            self, app, client, config):
+        token, _ = self._issue(config)
+        await self._post(client, token)
+        response = await client.get(CALLBACK)
+        assert response.status_code == 302 and response.headers["location"] == CONNECTED
+        assert self._scopes(config, "alice") == [DRIVE_RO]
+        assert self._scopes(config, "bob") is None
+        (notice,) = self._notices(config)
+        assert notice["title"] == "Google connected"
+        again = await client.get(CALLBACK)
+        assert again.status_code == 302 and again.headers["location"] == "/istota/login"
+        app._oauth.google.authorize_access_token.assert_awaited_once()
+
+    async def test_a_callback_with_neither_login_nor_link_goes_to_login(self, app, client, config):
+        response = await client.get(CALLBACK)
+        assert response.status_code == 302 and response.headers["location"] == "/istota/login"
+        app._oauth.google.authorize_access_token.assert_not_awaited()
+        assert self._scopes(config, "alice") is None
+
+    async def test_a_binding_past_the_link_lifetime_goes_to_login(
+            self, app, client, config, monkeypatch):
+        token, _ = self._issue(config)
+        await self._post(client, token)
+        later = app.time.time() + config.secret_links.ttl_seconds + 5
+        monkeypatch.setattr(app.time, "time", lambda: later)
+        response = await client.get(CALLBACK)
+        assert response.status_code == 302 and response.headers["location"] == "/istota/login"
+        assert self._scopes(config, "alice") is None
+
+    async def test_a_failed_exchange_ends_on_the_card(self, app, client, config):
+        app._oauth.google.authorize_access_token = AsyncMock(
+            side_effect=RuntimeError("provider said access_denied for code=abc"))
+        token, _ = self._issue(config)
+        await self._post(client, token)
+        response = await client.get(CALLBACK)
+        assert response.status_code == 400
+        assert "Google wasn" in response.text and "code=abc" not in response.text
+        assert self._scopes(config, "alice") is None
+        assert (await client.get(CALLBACK)).headers["location"] == "/istota/login"
+
+    async def test_no_refresh_token_ends_on_the_card(self, app, client, config):
+        app._oauth.google.authorize_access_token = AsyncMock(return_value={"access_token": "a"})
+        token, _ = self._issue(config)
+        await self._post(client, token)
+        response = await client.get(CALLBACK)
+        assert response.status_code == 400 and "Google wasn" in response.text
+        assert self._scopes(config, "alice") is None
+
+    async def test_an_account_removed_since_stores_nothing(self, app, client, config):
+        token, _ = self._issue(config)
+        await self._post(client, token)
+        del config.users["alice"]
+        response = await client.get(CALLBACK)
+        assert response.status_code == 400 and "Google wasn" in response.text
+        assert self._scopes(config, "alice") is None
+
+    async def test_a_signed_in_owner_lands_on_the_connected_page(self, app, client, config):
+        await self._sign_in(app, client, "alice")
+        token, _ = self._issue(config)
+        await self._post(client, token)
+        response = await client.get(CALLBACK)
+        assert response.status_code == 302 and response.headers["location"] == CONNECTED
+        assert self._scopes(config, "alice") == [DRIVE_RO]
+
+    async def test_another_accounts_session_is_refused(self, app, client, config):
+        await self._sign_in(app, client, "bob")
+        token, link = self._issue(config)
+        page = await client.get("/istota/secret", params={"token": token})
+        assert page.status_code == 403 and "another account" in page.text
+        assert self._row(config, link.id)["used_at"] is None
+
+    async def test_a_post_without_its_form_token_is_refused(self, app, client, config):
+        token, link = self._issue(config)
+        await client.get("/istota/secret", params={"token": token})
+        response = await self._post(client, token, csrf="forged")
+        assert response.status_code == 403
+        assert self._row(config, link.id)["used_at"] is None
+        app._oauth.google.authorize_redirect.assert_not_awaited()
+
+    async def test_cancel_spends_the_link_and_tells_the_owner(self, app, client, config):
+        token, link = self._issue(config)
+        response = await self._post(client, token, action="cancel")
+        assert response.status_code == 200 and "Link cancelled" in response.text
+        assert self._row(config, link.id)["outcome"] == "cancelled"
+        (notice,) = self._notices(config)
+        assert "cancelled" in notice["title"]
+        app._oauth.google.authorize_redirect.assert_not_awaited()
+
+    async def test_without_google_here_the_page_says_so_and_the_link_stays_live(
+            self, app, client, config, monkeypatch):
+        monkeypatch.setattr(app, "_oauth", MagicMock(spec=["nextcloud"]))
+        token, link = self._issue(config)
+        page = await client.get("/istota/secret", params={"token": token})
+        assert page.status_code == 503 and "set up" in page.text
+        assert "Continue to Google" not in page.text
+        assert self._row(config, link.id)["used_at"] is None
+
+    async def test_no_services_selected_since_issue_keeps_the_link(self, app, client, config):
+        from istota import user_profiles
+
+        token, link = self._issue(config)
+        csrf = await self._csrf(client, token)
+        user_profiles.update_profile(config.db_path, "alice",
+                                     google_scopes={"drive": "off", "gmail": "off"})
+        page = await client.get("/istota/secret", params={"token": token})
+        assert "Continue to Google" not in page.text and "Settings" in page.text
+        response = await self._post(client, token, csrf=csrf)
+        assert response.status_code == 400
+        assert self._row(config, link.id)["used_at"] is None
+        app._oauth.google.authorize_redirect.assert_not_awaited()
+
+    async def test_the_connected_page(self, app, client):
+        page = await client.get(CONNECTED)
+        assert page.status_code == 200
+        assert "Google connected" in page.text and "lucide-circle-check" in page.text

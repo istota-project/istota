@@ -861,6 +861,14 @@ Calendars and folders shared with Istota over open protocols. See [sharing](../f
 | `pending_days` | `14` | An offer left unanswered this many days after its last send is declined |
 | `max_discovery_fetches_per_minute` | `30` | Discovery requests to sending servers, across all senders |
 
+## `[secret_links]`
+
+Single-use links to a form on `[site] hostname`, which Istota sends to a user's private chat when they ask to give it a password or key. See [secret links](credentials.md#secret-links).
+
+| Setting | Default | Description |
+|---|---|---|
+| `ttl_seconds` | `900` | Seconds a link works after it is sent. Values outside 60 to 3600 are moved to the nearer bound |
+
 ## `[push]`
 
 Native iOS push through APNs. Install the `push` extra and put the APNs signing key on the server, readable only by the service user. `istota doctor --only push.credentials` checks the key's metadata; `istota push test --user U` sends one. `istota doctor --only push.signing_key` checks the private push key: mode 0600, owned by the service user, parses, and matches its `.pub` file. Under `delivery = "relay"` no APNs key is needed here, and `istota doctor --only push.relay` checks the relay URL and asks the relay's `/healthz`.

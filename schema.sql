@@ -2180,7 +2180,7 @@ CREATE TABLE IF NOT EXISTS whatsapp_skill_requests (
     requester_user_id TEXT NOT NULL,
     origin_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
     request_key TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post', 'purchase', 'recovery_fill', 'location_share', 'assignment_activation')),
+    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post', 'purchase', 'recovery_fill', 'location_share', 'assignment_activation', 'secret_link')),
     recipient_user_id TEXT NOT NULL,
     relay_id TEXT UNIQUE,
     text TEXT,
@@ -2946,6 +2946,26 @@ CREATE TABLE IF NOT EXISTS web_mobile_auth_requests (
 CREATE INDEX IF NOT EXISTS idx_web_mobile_auth_expiry ON web_mobile_auth_requests(expires_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_web_mobile_auth_code ON web_mobile_auth_requests(code_digest);
 CREATE INDEX IF NOT EXISTS idx_web_mobile_auth_source ON web_mobile_auth_requests(source, expires_at);
+
+-- One-purpose links that let a user enter a secret without a web session
+-- (istota.webui.secret_links). Only token digests are stored, and params
+-- never holds a secret. Not joined to web_auth_identities, so a user with no
+-- native web login can still be sent one.
+CREATE TABLE IF NOT EXISTS secret_links (
+    id INTEGER PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    user_id TEXT NOT NULL,
+    intent TEXT NOT NULL CHECK (intent IN ('credential', 'google_connect')),
+    params TEXT NOT NULL DEFAULT '{}',
+    task_id INTEGER NOT NULL,
+    room_token TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    outcome TEXT CHECK (outcome IN ('stored', 'cancelled', 'failed', 'superseded', 'connected')),
+    failures INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_secret_links_user ON secret_links(user_id, used_at, expires_at);
 
 -- Things a user shared with Istota through an open protocol
 -- (istota.sharing.sources): an ICS feed or an OCM folder share. The bearer

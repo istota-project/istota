@@ -80,3 +80,40 @@ def access_token_for(conn, config, user_id: str) -> str | None:
         logger.debug("Refreshed Google token for user %s", user_id)
 
     return access_token
+
+
+def scope_selection(config, user_id: str) -> dict[str, str]:
+    """The user's stored per-service selection ({} when they never chose).
+
+    Fails soft: a DB that is unreachable here must not block a connect, and
+    the empty selection resolves to the operator's whole ceiling, which is
+    what the user got before the picker existed.
+    """
+    try:
+        from istota import user_profiles
+        from istota.credentials import google_scopes
+
+        profile = user_profiles.get_profile(config.db_path, user_id)
+        if profile is None:
+            return {}
+        return google_scopes.normalize_selection(profile.google_scopes)
+    except Exception:
+        logger.warning(
+            "google_workspace: could not read the scope selection for %s; "
+            "falling back to the instance ceiling", user_id, exc_info=True,
+        )
+        return {}
+
+
+def requested_scopes(config, user_id: str) -> list[str]:
+    """What a connect for this user asks Google for, clamped to the instance ceiling.
+
+    The web connect route and the chat `connect-link` verb both read this, so
+    the services a link names are the ones its consent screen asks for.
+    """
+    from istota.credentials import google_scopes
+
+    gw_config = getattr(config, "google_workspace", None)
+    if not gw_config:
+        return []
+    return google_scopes.resolve_selection(scope_selection(config, user_id), gw_config.scopes)

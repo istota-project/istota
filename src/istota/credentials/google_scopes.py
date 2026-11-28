@@ -278,6 +278,30 @@ def resolve_selection(
     return scopes
 
 
+#: The settings card's words for a level (`GoogleWorkspaceCard.svelte`), so a
+#: secret link and the card describe one request the same way.
+LEVEL_LABELS: dict[str, str] = {
+    LEVEL_OFF: "No access",
+    LEVEL_READONLY: "Read-only",
+    LEVEL_FULL: "Read and write",
+}
+
+
+def requested_services(scopes: Iterable[str]) -> list[tuple[str, str]]:
+    """``(service label, level label)`` for each service a scope list asks for, in map order.
+
+    A scope the map does not know adds one ``("Other Google access", "Set by
+    this server")`` row, since `resolve_selection` requests it unconditionally
+    and the person consenting should know there is more than the named services.
+    """
+    scopes = list(scopes or ())
+    levels = levels_from_scopes(scopes)
+    rows = [(svc.label, LEVEL_LABELS[levels[svc.key]]) for svc in SERVICES if svc.key in levels]
+    if any(s not in _SCOPE_INDEX and s not in BOILERPLATE_SCOPES for s in scopes):
+        rows.append(("Other Google access", "Set by this server"))
+    return rows
+
+
 def summarize_granted(granted_scopes: Sequence[str]) -> dict:
     """Group a granted scope list into per-service rows for display.
 
