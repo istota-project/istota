@@ -683,12 +683,54 @@ class TestConnectLink:
         reply, code = self._run(monkeypatch, capsys)
         assert code == 0 and reply["connected"] is True
 
-    def test_a_second_link_supersedes_the_first(self, cfg, monkeypatch, capsys):
+    def test_a_later_turns_link_supersedes_the_first(self, cfg, monkeypatch, capsys):
         self._running(cfg, monkeypatch=monkeypatch)
         self._run(monkeypatch, capsys)
-        self._run(monkeypatch, capsys)
+        self._running(cfg, monkeypatch=monkeypatch)
+        reply, code = self._run(monkeypatch, capsys)
+        assert code == 0 and reply["status"] == "ok"
         outcomes = [r["outcome"] for r in self._rows(cfg, "SELECT outcome FROM secret_links ORDER BY id")]
         assert outcomes == ["superseded", None]
+
+    def test_one_link_per_task(self, cfg, monkeypatch, capsys):
+        """#999: a model calling the verb in a loop sends the user one link, not one per call."""
+        task_id, _ = self._running(cfg, monkeypatch=monkeypatch)
+        first, code = self._run(monkeypatch, capsys)
+        assert code == 0 and first["status"] == "ok"
+        second, code = self._run(monkeypatch, capsys)
+        assert code == 1
+        assert second["status"] == "error" and second["reason"] == "link_already_sent"
+        assert second["connected"] is False
+        (link,) = self._rows(cfg, "SELECT task_id, outcome FROM secret_links")
+        assert link == {"task_id": task_id, "outcome": None}
+        assert len(self._rows(cfg, "SELECT id FROM whatsapp_skill_requests")) == 1
+
+    def test_a_spent_link_still_counts_for_its_task(self, cfg, monkeypatch, capsys, secret_key):
+        from istota.webui import secret_links
+
+        self._running(cfg, monkeypatch=monkeypatch)
+        self._run(monkeypatch, capsys)
+        with db.get_db(cfg.db_path) as conn:
+            (link_id,) = conn.execute("SELECT id FROM secret_links").fetchone()
+            secret_links.spend(conn, link_id, "connected")
+            db.upsert_google_token(conn, "alice", "a", "r", "2030-01-01T00:00:00+00:00",
+                                   json.dumps([DRIVE_RO_SCOPE]))
+        reply, code = self._run(monkeypatch, capsys)
+        assert code == 1 and reply["reason"] == "link_already_sent"
+        assert reply["connected"] is True
+        assert len(self._rows(cfg, "SELECT id FROM secret_links")) == 1
+
+    def test_a_credential_link_in_the_same_task_does_not_count(self, cfg, monkeypatch, capsys):
+        from istota.webui import secret_links
+
+        task_id, room = self._running(cfg, monkeypatch=monkeypatch)
+        with db.get_db(cfg.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            secret_links.issue(conn, user_id="alice", intent="credential",
+                               params={"name": "acme-login"}, task_id=task_id,
+                               room_token=room, ttl_seconds=900)
+        reply, code = self._run(monkeypatch, capsys)
+        assert code == 0 and reply["status"] == "ok"
 
     def test_no_services_selected_points_at_settings(self, cfg, monkeypatch, capsys):
         from istota import user_profiles
