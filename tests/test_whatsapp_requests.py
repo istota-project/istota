@@ -293,7 +293,8 @@ def test_new_profile_and_attempt_columns(tmp_path, path):
     schema = (Path(__file__).parents[1] / "schema.sql").read_text()
     for column in ("relay_delivery TEXT NOT NULL DEFAULT '',",
                    "attempt_tool_calls INTEGER NOT NULL DEFAULT 0,",
-                   "attempt_first_tool_relay INTEGER NOT NULL DEFAULT 0,"):
+                   "attempt_first_tool_relay INTEGER NOT NULL DEFAULT 0,",
+                   "attempt_first_tool_link INTEGER NOT NULL DEFAULT 0,"):
         assert column in schema
         schema = schema.replace(column, "")
     with sqlite3.connect(old) as conn:
@@ -308,6 +309,7 @@ def test_new_profile_and_attempt_columns(tmp_path, path):
             assert profile["relay_delivery"] == ("TEXT", 1, "''")
             assert tasks["attempt_tool_calls"] == ("INTEGER", 1, "0")
             assert tasks["attempt_first_tool_relay"] == ("INTEGER", 1, "0")
+            assert tasks["attempt_first_tool_link"] == ("INTEGER", 1, "0")
     with db.get_db(old) as conn:
         assert conn.execute("SELECT relay_delivery FROM user_profiles").fetchone()[0] == ""
         assert tuple(conn.execute(

@@ -37,6 +37,14 @@ OUTCOMES = ("stored", "cancelled", "failed", "superseded", "consent_started", "c
 MAX_LIVE_PER_USER = 5
 MAX_FAILURES = 5
 PRUNE_AFTER_DAYS = 7
+CAUTION_LEAD = "This link was requested partway through other work."
+_CAUTION_ASK = {
+    "credential": "Only continue if you asked to give me a password.",
+    # Usually shown: connect-link mostly follows a Google command that failed for
+    # want of a token, so the user asked for something else and this is the
+    # question that matters.
+    "google_connect": "Only continue if you want to connect your own Google account.",
+}
 
 
 class SecretLinkError(ValueError):
@@ -345,7 +353,9 @@ def issue_and_queue(config, *, user_id: str, task_id: int, intent: str, params: 
     ``check(conn)`` runs first inside the transaction and refuses by raising
     ``LinkRefused``. ``compose(address, expires)`` writes the message from the
     link's address and its expiry in the user's clock; the address goes into
-    the queued message and nowhere else. Returns ``(link, delivered_to)``. A
+    the queued message and nowhere else. Whether the link was asked for
+    cleanly is stored in its ``params`` as ``clean`` and, when it was not, the
+    message ends with `caution`'s line. Returns ``(link, delivered_to)``. A
     refusal or any other error rolls back, leaving neither a link nor a message.
     """
     from istota import db
@@ -365,6 +375,7 @@ def issue_and_queue(config, *, user_id: str, task_id: int, intent: str, params: 
         about, dest = private_replies.secret_link_room(conn, config, task)
         if dest is None:
             raise LinkRefused("no_private_room", "You have no private chat to send the link to")
+        params = {**params, "clean": asked_cleanly(conn, task)}
         try:
             token, link = issue(conn, user_id=user_id, intent=intent, params=params,
                                 task_id=task_id, room_token=about,
@@ -375,6 +386,9 @@ def issue_and_queue(config, *, user_id: str, task_id: int, intent: str, params: 
             raise
         text = compose(f"{scheme}://{origin_host}/istota/secret?token={token}",
                        local_clock(config, user_id, expiry(link.expires_at)))
+        notice = caution(link)
+        if notice:
+            text = f"{text}\n{notice}"
         try:
             queued = private_replies.enqueue_secret_link(
                 conn, config, actor_user_id=user_id, task_id=task_id, link_id=link.id, text=text,
@@ -382,6 +396,36 @@ def issue_and_queue(config, *, user_id: str, task_id: int, intent: str, params: 
         except RequestError as exc:
             raise LinkRefused(str(exc), "The link could not be queued") from None
     return link, queued["delivered_to"]
+
+
+def asked_cleanly(conn: sqlite3.Connection, task) -> bool:
+    """Whether the link verb running now was the attempt's first tool call, as one plain command.
+
+    The executor counts each call as it reads it (`TaskStreamAdapter`), so an
+    uncounted call, a caller with no event writer and a lost write all read as
+    not clean, which only adds the caution. A confirmed re-run is never clean:
+    its prompt carries the previous attempt's output. Nor is a task's second
+    link, whose own count and those before it may not have landed yet, which
+    would leave the row reading the first link's ``(1, True)``.
+    """
+    from istota import db
+
+    if task is None or task.confirmed_at or (task.confirmation_prompt or "").strip():
+        return False
+    if conn.execute("SELECT 1 FROM secret_links WHERE task_id = ? LIMIT 1", (task.id,)).fetchone():
+        return False
+    calls, first_is_link = db.get_attempt_first_tool_link(conn, task.id)
+    return calls == 1 and first_is_link
+
+
+def caution(link: SecretLink) -> str | None:
+    """The line a link not asked for cleanly carries in its message and on its page.
+
+    A link with no record says it too, since nothing vouches for it.
+    """
+    if link.params.get("clean") is True:
+        return None
+    return f"{CAUTION_LEAD} {_CAUTION_ASK[link.intent]}"
 
 
 def iso_expiry(link: SecretLink) -> str:

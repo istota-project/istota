@@ -151,10 +151,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- row's outcome (ISSUE-420).
     model_namespace TEXT,
     -- Tool calls in the current attempt, and whether the first was a relay
-    -- ask. Written for every tool call whatever the display settings, and reset
-    -- when an attempt starts; the clean-turn approval rule reads them.
+    -- ask or a secret-link verb. Written for every tool call whatever the
+    -- display settings, and reset when an attempt starts; the clean-turn
+    -- approval rule and the secret-link caution read them.
     attempt_tool_calls INTEGER NOT NULL DEFAULT 0,
     attempt_first_tool_relay INTEGER NOT NULL DEFAULT 0,
+    attempt_first_tool_link INTEGER NOT NULL DEFAULT 0,
 
     -- Real Talk room for this task's notifications. Distinct from
     -- conversation_token, which doubles as an email-thread grouping key for

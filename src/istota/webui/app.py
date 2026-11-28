@@ -1799,7 +1799,7 @@ def _secret_link_view(token: object) -> dict | None:
         "link": link, "name": name, "hosts": hosts, "existing": existing,
         "asks_username": link.params.get("username") is True, "username_set": username_set,
         "display_name": (profile.display_name if profile else "") or link.user_id,
-        "expires": expires,
+        "expires": expires, "caution": secret_links.caution(link),
     }
 
 
@@ -1820,6 +1820,7 @@ def _google_link_view(link) -> dict | None:
         "display_name": (profile.display_name if profile else "") or link.user_id,
         "expires": secret_links.local_clock(_config, link.user_id, secret_links.expiry(link.expires_at)),
         "scopes": scopes, "services": google_scopes.requested_services(scopes),
+        "caution": secret_links.caution(link),
     }
 
 
@@ -1834,13 +1835,16 @@ def _stored_headers(binding: dict) -> str:
 def _grant_secret_link_entry(conn, link) -> None:
     """Grant a new credential to the conversation that asked for the link, as `vault_create` does.
 
-    A savepoint, so a grant that fails leaves the credential stored.
+    The asking task's own snapshot is not extended (#1001): the task may still
+    be running, and what led it to ask may be a page it read, so only a later
+    turn in the conversation can use the credential. A savepoint, so a grant
+    that fails leaves the credential stored.
     """
     from istota.credentials.broker.grants import grant_created_entry
 
     conn.execute("SAVEPOINT secret_link_grant")
     try:
-        grant_created_entry(conn, link.user_id, link.params["name"], link.task_id)
+        grant_created_entry(conn, link.user_id, link.params["name"], link.task_id, extend_snapshot=False)
     except Exception as exc:
         conn.execute("ROLLBACK TO secret_link_grant")
         logger.warning("secret_link id=%s: conversation grant failed: %s", link.id, type(exc).__name__)
@@ -2007,6 +2011,13 @@ def _secret_field_error(field_id: str, error: str) -> tuple[str, str]:
     return attrs, message
 
 
+def _secret_link_caution(view: dict) -> str:
+    """The page's copy of the caution a link not asked for cleanly carries (#1001), or nothing."""
+    if not view.get("caution"):
+        return ""
+    return f'<p class="form-alert">{_CIRCLE_ALERT_ICON}<span>{escape(view["caution"])}</span></p>'
+
+
 async def _secret_link_form(
     request: Request, token: str, view: dict, error: str = "", error_field: str = "", username: str = "",
 ) -> HTMLResponse:
@@ -2023,6 +2034,7 @@ async def _secret_link_form(
     )
     body = '<dl class="link-summary">' + "".join(
         f"<div><dt>{label}</dt><dd>{value}</dd></div>" for label, value in rows) + "</dl>"
+    body += _secret_link_caution(view)
     if error and not field:
         body += f'<p class="form-alert" role="alert">{_CIRCLE_ALERT_ICON}<span>{escape(error)}</span></p>'
     user_invalid, user_error = _secret_field_error("secret-username", error if field == "username" else "")
@@ -2123,7 +2135,8 @@ async def _google_link_form(request: Request, token: str, view: dict) -> HTMLRes
         '<dl class="link-summary">'
         + "".join(f"<div><dt>{label}</dt><dd>{value}</dd></div>" for label, value in rows)
         + "</dl>"
-        f'<form method="post" action="{_SECRET_LINK_PATH}">{hidden}'
+        + _secret_link_caution(view)
+        + f'<form method="post" action="{_SECRET_LINK_PATH}">{hidden}'
         '<input type="hidden" name="action" value="connect">'
         '<p class="form-help">Google asks you to sign in and approve this access. The Google '
         f'account you approve is connected to {escape(view["display_name"])} in '

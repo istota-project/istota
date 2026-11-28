@@ -522,6 +522,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # schema.sql. Constant defaults, so every existing row reads 0.
         "attempt_tool_calls": "INTEGER NOT NULL DEFAULT 0",
         "attempt_first_tool_relay": "INTEGER NOT NULL DEFAULT 0",
+        "attempt_first_tool_link": "INTEGER NOT NULL DEFAULT 0",
         # Multiplayer Stage 11; see schema.sql. No backfill: no guest turn
         # created a task before this, and the audience of a past turn is not
         # recoverable.
@@ -11436,13 +11437,15 @@ def update_task_pid(conn: sqlite3.Connection, task_id: int, pid: int | None) -> 
 def reset_attempt_tool_calls(conn: sqlite3.Connection, task_id: int) -> None:
     """Start an attempt's tool-call count from zero (ISSUE-565)."""
     conn.execute(
-        "UPDATE tasks SET attempt_tool_calls = 0, attempt_first_tool_relay = 0 WHERE id = ?",
+        "UPDATE tasks SET attempt_tool_calls = 0, attempt_first_tool_relay = 0, "
+        "attempt_first_tool_link = 0 WHERE id = ?",
         (task_id,),
     )
 
 
 def record_attempt_tool_call(
     conn: sqlite3.Connection, task_id: int, *, calls_seen: int, first_is_relay: bool,
+    first_is_link: bool = False,
 ) -> None:
     """Count one tool call of the running attempt.
 
@@ -11451,21 +11454,34 @@ def record_attempt_tool_call(
     assigning, so a second writer on the same row (a reclaimed task's old
     worker) only adds; and it takes the caller's own running total as a floor,
     so a write that failed earlier in the attempt is not lost. The first-call
-    flag is taken only while the row still reads zero calls.
+    flags are taken only while the row still reads zero calls.
     """
     conn.execute(
         """UPDATE tasks SET
                attempt_first_tool_relay = CASE WHEN attempt_tool_calls = 0 THEN ?
                                                ELSE attempt_first_tool_relay END,
+               attempt_first_tool_link = CASE WHEN attempt_tool_calls = 0 THEN ?
+                                              ELSE attempt_first_tool_link END,
                attempt_tool_calls = MAX(attempt_tool_calls + 1, ?)
            WHERE id = ?""",
-        (1 if first_is_relay else 0, calls_seen, task_id),
+        (1 if first_is_relay else 0, 1 if first_is_link else 0, calls_seen, task_id),
     )
 
 
 def get_attempt_tool_calls(conn: sqlite3.Connection, task_id: int) -> tuple[int, bool]:
     row = conn.execute(
         "SELECT attempt_tool_calls, attempt_first_tool_relay FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return 0, False
+    return int(row[0]), bool(row[1])
+
+
+def get_attempt_first_tool_link(conn: sqlite3.Connection, task_id: int) -> tuple[int, bool]:
+    """``(calls, first_is_link)`` for the running attempt, read by the secret-link caution (#1001)."""
+    row = conn.execute(
+        "SELECT attempt_tool_calls, attempt_first_tool_link FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
     if row is None:
